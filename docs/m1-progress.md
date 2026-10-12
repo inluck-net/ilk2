@@ -11,7 +11,7 @@ Started Oct 13, 2026, while P1 step 4 ran. Chad authorized building unattended, 
 | 1 | `store.py`: schema, CAS transitions, events, `needs_human`, refusals | done (leases in 6) | tests/test_store.py (8) |
 | 2 | `plans.py`: V1 Markdown and JSON import, submit checks | done | tests/test_plans.py (7) |
 | 3 | `gates/`: pytest adapter (report plugin), spec versions, pinned env, fingerprints, outcomes, judge | done for pytest; vitest pending (S20, S21) | tests/test_gates.py (13) |
-| 4 | `worker.py`: graduate the P1 CLI adapter, sandbox, hook, brief | — | — |
+| 4 | `worker.py`, `worker_hook.py`, `procs.py`: CLI dispatch, sandbox, hook (Q16 full-suite refusal), brief, group termination | done | tests/test_worker.py (20), stub `tests/stub_claude.py` |
 | 5 | `driver.py`: step lifecycle, retries, acceptance protocol and recovery, phase events | — | — |
 | 6 | `supervisor.py`: queue, admission, spawn, stall checks, reconcile | — | — |
 | 7 | `health.py`, `notify.py` | — | — |
