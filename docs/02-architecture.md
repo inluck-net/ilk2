@@ -17,6 +17,7 @@ These are the rules every component must keep. Each one exists because V1 broke 
 | I7 | **Code runs only from immutable releases.** A run records its release; upgrades happen at step boundaries. ilk2 never edits its own release. | 6 |
 | I8 | **One language (Python 3.12), one platform (macOS).** | 7 |
 | I9 | **Every terminal state has a named reason.** No state is "stuck" without a reason a human can read in `ilk2 status`. | Today's #8309 deadlock and "timeout" mislabel |
+| I10 | **Every refusal to dispatch queued work is a recorded row.** The row names the reason, the action that clears it, and who takes that action (`supervisor`, `driver` or `human`). Refused hours are reported. A refusal whose clearing action is `supervisor` or `driver` must clear without a human. No guard exists only to re-check what the driver already wrote. | V1 refused queued work for about 0.8 h per hour worked ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) |
 
 ## 2.2 Components
 
@@ -46,7 +47,7 @@ flowchart TB
 
 | Component | Responsibility | Never does |
 |---|---|---|
-| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs and keeps concurrency limits per host and per project. Spawns drivers and waits on them. On start-up, reconciles the store against live processes. Performs upgrades and drains. | Run gates, touch worktrees, call the model |
+| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs and keeps concurrency limits per host and per project. Records every refusal with its clearing action (I10). Spawns drivers and waits on them. On start-up, reconciles the store against live processes. Performs upgrades and drains. | Run gates, touch worktrees, call the model, or add a pre-dispatch audit of driver-written state |
 | **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, commits, advances one step, retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
 | **Worker** | Claude Code CLI with MiMo, under a private config dir. Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
 | **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions and events | Hold secrets |
@@ -120,6 +121,7 @@ What this removes from V1:
 - **macOS `sandbox-exec` profile:** writes allowed only to the worktree and a per-attempt temp dir. The store, plans, `~/.ilk2/releases` and `.git` internals are read-only to the worker.
 - **A hook refuses `git commit`, `git push` and edits outside the worktree**, as a second layer behind the sandbox.
 - **The brief** contains the step instructions, the declared gates, the previous attempt's red evidence, and paths the worker may read. It contains no plan files the worker could edit.
+- **The brief preloads what the worker would otherwise go and find.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). The driver can assemble most of that context itself: the files and symbols the step names, their tests, the failing output, and the relevant diff from earlier steps. It does this before dispatch, at no model cost. How much to preload is open question Q10. The P1 spike measures preloading against discovery on the same step.
 - **Spike before building:** test the Claude Agent SDK as the dispatch layer. It would give session ids, resume and hooks programmatically instead of parsing CLI stream output. It must work with the MiMo endpoint; if it does not, use the CLI with `--resume`.
 
 ## 2.7 Releases and upgrades
@@ -137,7 +139,14 @@ What this removes from V1:
 ## 2.9 Observability
 
 - **Every attempt records** wall time, time to first edit, model API time, thinking time (when the stream reports it), tool time, gate time, outcome and reason.
-- **`ilk2 report`** prints the three comparison metrics from the V1 assessment: minutes per accepted step (all attempts), share of attempts that produce nothing, and human transitions per batch.
+- **`ilk2 report`** prints five comparison metrics:
+  - minutes per accepted step (all attempts);
+  - share of attempts that produce nothing;
+  - human transitions per batch;
+  - **refused hours:** queued but not dispatched, by reason and clearing actor (I10);
+  - **minutes to first edit** per attempt.
+
+  The first three come from the V1 assessment. The last two come from the Oct 12 [evidence](evidence/2026-10-12-v1-stuck-and-slow.md).
 
 ## 2.10 Crash and restart behaviour
 

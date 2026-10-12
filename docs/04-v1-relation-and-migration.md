@@ -66,7 +66,7 @@ gantt
   section Decide
   Design review (this doc)            :p0, 2026-10-13, 3d
   section Build
-  Spike: Agent SDK + MiMo + sandbox   :p1, after p0, 3d
+  Spike: SDK + MiMo + sandbox + brief :p1, after p0, 3d
   Core M1 on a throwaway project      :p2, after p1, 10d
   section Migrate
   First real low-risk consumer        :p3, after p2, 5d
@@ -81,7 +81,7 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 
 | Phase | Exit criterion |
 |---|---|
-| P1 spike | One MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. Written up in `docs/spikes/` |
+| P1 spike | One MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. Minutes to first edit and thinking time are recorded for one real V1 step, run once with a discovery brief and once with a preloaded brief ([document 3](03-v1-vs-v2.md) §3.4). Written up in `docs/spikes/` |
 | P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered |
 | P3 first real consumer | One low-risk repo (candidates: `gh-triage`, `todo-triage`) ships 2 batches; metrics recorded |
 | P4 gh-resolve dev batches | gh-resolve's own development batches run on ilk2 and meet the 4.5 targets |
@@ -98,6 +98,8 @@ ilk-skills itself is not on the list. Its development stays on V1 until P7, and 
 | Share of attempts that produce nothing | 1/5 to 3/8 | Below V1 for the same project |
 | Human transitions per batch | Several (owner re-plans, gate repairs) | 0 for M1; at most 1 per batch from P3 on, each with a recorded reason |
 | Silent stuck states | Occurred (#8309 deadlock, mislabelled timeouts) | 0: every terminal state has a reason (I9) |
+| Refused hours per hour worked (queued, not dispatched) | ≈0.8 on both projects, chad-mbp, Sep 15 to Oct 12 ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) | 0 refusals without a named clearing action and actor (I10). The numeric target is set from M1 data, not before |
+| Minutes to first edit, per attempt | Oct 12: 416 of 998 iteration minutes (42%) passed before the first edit; mean ≈17 min over 24 iterations | Measured in P1 on one step. The target is set from that measurement, then held from P3 on |
 
 ## 4.6 Kill criteria (judgment calls, set before starting)
 

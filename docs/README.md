@@ -9,6 +9,13 @@ Draft for Chad's review, Oct 12, 2026. Author: Claude Code session ilk-skills-aa
 | 3 | [V1 vs V2](03-v1-vs-v2.md) | What changes, what improves, and what V2 will *not* fix |
 | 4 | [Relation to V1 and migration](04-v1-relation-and-migration.md) | How V2 sits beside V1, how a project moves over, and when we stop |
 | 5 | [Open questions](05-open-questions.md) | What still needs a decision before code |
+| E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
+
+**Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
+- invariant I10, refusal accounting;
+- worker time moved into scope ([document 3](03-v1-vs-v2.md) §3.4, Q10).
+
+Evidence in E1.
 
 ## Decisions already made (Chad, Oct 12, 2026)
 
