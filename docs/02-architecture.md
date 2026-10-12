@@ -56,7 +56,7 @@ flowchart TB
 | **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, accepts the step (§2.4.1), retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
 | **Worker** | A Claude Code session with MiMo, under a private config dir, reached through the dispatch adapter (§2.6). Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
 | **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions, events and `needs_human` rows | Hold secrets |
-| **CLI** | Submission, status (human and `--json`), amend, park, resume, cancel, ack, export, doctor, upgrade | Bypass the transition API |
+| **CLI** | Submission, status (human and `--json`), amend, park, resume, cancel, ack, lease acquire/release, export, doctor, upgrade | Bypass the transition API |
 
 ## 2.3 State model
 
@@ -75,8 +75,8 @@ erDiagram
 
 - **PROJECT:** id, repo root, default branch, gate adapters, concurrency limit, setup hook (§2.5), and notification policy (`owner` or `consumer`; §2.11.3). Registered explicitly with `ilk2 project add`.
 - **BATCH:** id, project, base commit, priority, consumer reference (for example a gh-resolve issue number, echoed in every event), status (`queued → active → shipped | blocked | parked | cancelled`), an immutable normalized plan snapshot (Q3), and the original imported documents.
-- **ROOT LEASE:** the execution root's current holder (`driver` or `released`) and the accepted head. Only the holder writes to the root's branch (§2.4.2).
-- **PLAN** (V1 "sub-plan"): order, dependencies, status, `verification: true|false`.
+- **ROOT LEASE:** the execution root's holder (`driver`, `consumer` or `released`), owner, generation, expiry, expected head and accepted head. It changes only by compare-and-set on the generation. Only the holder writes to the root's branch (§2.4.2).
+- **PLAN** (V1 "sub-plan"): order, dependencies, status, `verification: true|false`, and for a repair plan `repair_of_step_id` (§2.5.7). A batch ships only when every plan, repair plans included, has shipped.
 - **STEP:** index, instructions, declared gates with their specification version, expected reds, status (`pending → accepting → accepted`, or `blocked`).
 - **RUN:** one driver process lifetime. Holds PID, PGID, start time, host boot time, release version, execution root and terminal reason.
 - **ATTEMPT:** one worker dispatch for one step. Records session id, timings (model, thinking, tools, gates), diff hash, expected tree hash and outcome.
@@ -98,7 +98,7 @@ stateDiagram-v2
   ScopeCheck --> Gates: yes
   ScopeCheck --> Retry: no (evidence: out-of-scope paths)
   Gates: Run declared gates on the worktree
-  Gates --> Accept: all pass (base failures excluded)
+  Gates --> Accept: no new failures (from P4: or only attributed ones)
   Gates --> Retry: new failure
   Gates --> Blocked: unmeasured (permanent)
   Retry: Resume same session with evidence
@@ -136,11 +136,19 @@ No step is ever `accepted` without its commit, and no commit with an `ilk2-attem
 
 ### 2.4.2 Who may write the branch
 
-A consumer may also push from the execution root. gh-resolve's reap and land push the issue branch from the same worktree (gh-resolve `push.py`). Two writers on one branch would turn every consumer push into an `acceptance-mismatch` (§2.4.1). So the execution root has a lease:
-- **While the batch is `queued` or `active`,** the driver holds the lease. Only the driver commits; consumers must not push, commit or check out in that root.
-- **When the batch reaches `shipped`, `blocked`, `parked` or `cancelled`,** the driver releases the lease, after any running attempt has been stopped and recovered.
-- **`ilk2 status --json` reports** `root_lease: driver | released` and `accepted_head`, the commit SHA of the last finalized step. A consumer pushes only when the lease is `released`, and only up to `accepted_head`.
-- **`ilk2 resume` takes the lease back.** If the branch has moved since release, resume first records the consumer's commits as the new step base (a `consumer-commits` transition), so they are never mistaken for a mismatch.
+A consumer may also push from the execution root. gh-resolve's reap and land push the issue branch from the same worktree (gh-resolve `push.py`). Two writers on one branch would turn every consumer push into an `acceptance-mismatch` (§2.4.1). An advisory "released" flag is not enough: a consumer could read it, `resume` could take the lease back, and the consumer would then push into a live run. So the execution root has a **lease acquired by compare-and-set**, with a generation number:
+
+```
+driver(gen n) --release--> released(gen n+1) --consumer acquire(gen n+1, expected_head)--> consumer(owner, gen n+2, expected_head)
+consumer(gen n+2) --consumer release(gen n+2, new_head)--> released(gen n+3) --resume--> driver(gen n+4)
+```
+
+- **The driver holds the lease while the batch is `queued` or `active`.** It releases the lease when the batch reaches `shipped`, `blocked`, `parked` or `cancelled`, after any running attempt has been stopped and recovered.
+- **A consumer acquires the lease before writing:** `ilk2 lease acquire --root <root> --generation <g> --expected-head <sha> --owner <name>`. This succeeds only if the lease is `released` at generation `g` and the root's branch head equals `expected-head`. It returns the new generation.
+- **The consumer's push is conditional on the head it recorded.** It pushes only if the remote branch still points at the expected remote head, which gh-resolve's non-force push already enforces. When done it calls `ilk2 lease release --generation <g> --new-head <sha>`, recording the local and remote heads it left.
+- **`ilk2 resume` fails while a consumer holds the lease.** Resume acquires the lease by the same compare-and-set from `released`. If the local branch or the recorded remote head moved since the last driver release, resume records the consumer's commits as the new step base (a `consumer-commits` transition), so they are never mistaken for a mismatch.
+- **A consumer lease has a time limit** (§2.11.1). When it expires the lease returns to `released` with reason `consumer-lease-expired`, and a `needs_human` row is created under the project's notification policy.
+- **`ilk2 status --json` reports** `root_lease` (holder, owner, generation, expiry) and `accepted_head`.
 
 ## 2.5 Gates
 
@@ -167,15 +175,19 @@ On Oct 12, 36 V1 loop-gate reds did not reproduce in an isolated copy, because t
 
 A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). If it fails, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`.
 
-### 2.5.4 Base measurement and attribution
+### 2.5.4 Base measurement and new failures
 
-- **The base:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. The fingerprint is the exception type and the normalized first frame inside the project, so line numbers and temporary paths do not change it.
+- **The base:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. Fingerprints are adapter-specific. Each is a hash of:
+  - the exception or failure type;
+  - a digest of the normalized assertion or error message (numbers, hex ids, temporary paths and timestamps replaced by placeholders);
+  - the top three normalized frames inside the project.
+
+  So two different assertion failures at the same line get different fingerprints, while line-number drift and temporary paths do not change them.
 - **A failure is new** when its test ID was not failing at the base, when it was failing at the base but its fingerprint changed, or when the test did not exist at the base and is not declared as an expected red.
-- **Attribution to the step that caused it.** A new failure is not automatically the current step's fault: an earlier accepted step may have broken a gate that only a later step declares (gh-resolve review F8, where two 60-minute iterations went to repairing other steps' damage). When a gate shows new failures, the driver re-runs **only those failing test IDs** (the adapters select tests by ID, so this costs seconds, not a full suite) at the parent of the current step:
-  - If the failures are already there, they came from an earlier accepted step. The driver finds which one by running the gate at the earlier accepted commits, newest first, stopping at the first commit where the failure is absent. The failures are recorded against that step. The current step is judged only on failures that appear after its parent. The introducing plan gets a repair step appended through `amend` (actor `driver`, reason `regression-attributed`), and the batch cannot ship until that repair is accepted.
-  - If the failures are not at the parent, the current step introduced them, and it retries with that evidence.
-- **When a step changes a gate's specification** (a new test file, a changed runner config, `package.json`), the driver measures the base again for the new specification version before the gate runs. A gate whose tests do not exist at the base is measured as "0 tests" there, and every collected test is new.
-- This is always a fresh measurement at the base or parent, never reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
+- **When a step changes a gate's specification** (a new test file, a changed runner config, `package.json`), the driver measures the base again for the new specification version, in a diagnostic worktree at the batch base (§2.5.7), before the gate runs. A gate whose tests do not exist at the base is measured as "0 tests" there, and every collected test is new.
+- **Until M1, every new failure is judged against the current step,** as in V1. The driver also records, for each new failure, whether it was already present at the current step's parent (one probe of the failing IDs in a diagnostic worktree at the parent commit). If it was, the failure is marked `possibly-inherited` in the attempt record and in the worker's red evidence, so the worker is told it may be repairing earlier damage. This is evidence only; it changes neither the verdict nor who repairs.
+- **Before P4, attribution replaces that rule** (§2.5.7). P4 is where gh-resolve's own batches first run on ilk2, and cross-step damage (gh-resolve review F8) is where it cost the most.
+- Every measurement is fresh, at the base, a parent or a probe commit, and never reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
 
 ### 2.5.5 Outcomes
 
@@ -193,6 +205,29 @@ A gate's result is `pass`, `fail` (with the new failures), or `unmeasured` (with
 ### 2.5.6 Expected reds
 
 A red-first step declares the test IDs it expects to fail (`expect: red`), and optionally their fingerprints. The gate then passes only if exactly those IDs fail and nothing else is new. A later step that turns them green clears the expectation. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
+
+### 2.5.7 Attribution of new failures (lands before P4)
+
+Not in M1 (Chad, Oct 13). Its exit criterion is P4's (see [document 4](04-v1-relation-and-migration.md) §4.4).
+
+**Diagnostic worktrees.** All base and probe measurements run in isolated diagnostic worktrees, never in the execution root, so the current attempt's uncommitted changes are untouched.
+- Each diagnostic worktree is keyed by (commit, gate specification version).
+- The setup hook runs in it from that commit's own lockfile, so old source is never tested against later dependencies.
+- Diagnostic worktrees are cached for the batch, and removed when it ends.
+
+**When attribution is possible.** A gate specification is portable across a commit boundary only if its resolved command, adapter, pinned environment and every configuration file it hashes are identical at both commits, and the failing test files exist at both. If not, the result is `unattributable (spec-changed)`. The tool never overlays new tests or config onto old source.
+
+**The attribution phase.** When an attempt's gates show new failures that were already present at the step's parent, the driver enters an `attribute` phase:
+1. **Find the edge.** Binary-search the accepted commits of the batch (base included) for the edge (last clean commit, first failing child), probing only the failing test IDs. The step that produced the first failing child introduced the failure.
+2. **Confirm it.** Re-probe both sides of the edge twice more. The failure must be absent on the clean side and present on the failing side every time. If any probe disagrees, the result is `unattributable (flaky)`.
+3. **Budget.** At most 8 probes per failure and 20 minutes of wall time for the whole phase. Probe results are cached by (commit, specification version, test ID), so a requeued run does not repeat them. When the budget is spent, the result is `unattributable (budget)`.
+
+**What each result does:**
+
+| Result | Current step | Repair |
+|---|---|---|
+| Attributed to step *k* of plan P | Passes if its only failures are attributed ones (`pass-with-attributed`, recorded with the failing IDs) | The driver adds a **repair plan** to the batch (amend, actor `driver`, reason `regression-attributed`), with `repair_of_step_id = k`, the failing IDs and the edge as its brief. Plans that depend on P pause until the repair plan ships. The batch cannot ship until every repair plan has shipped. P stays `shipped`; nothing is reopened |
+| `unattributable (spec-changed / flaky / budget)` | Judged on all new failures, as before P4 | None. The reason is recorded and reported in `ilk2 report` |
 
 ## 2.6 Worker isolation
 
@@ -212,14 +247,14 @@ A red-first step declares the test IDs it expects to fail (`expect: red`), and o
 
 ## 2.8 Consumer interface
 
-- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF]`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 export --v1`.
+- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF]`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 lease acquire|release` (§2.4.2), `ilk2 export --v1`.
 - **Versioning.** Every JSON output carries `api_version`. A consumer may pass `--api-version N` to get an older shape. The CLI keeps every version that a registered consumer has pinned, and at least the two previous ones; `ilk2 doctor --hosts` lists each host's pinned versions. (rezmac runs a pinned gh-resolve tag, so one previous version was not enough.)
 - **`status --json` schema,** per batch: status, priority, consumer reference, terminal reason (from a fixed enum), the failing gate with its new failures and fingerprints, `root_lease`, `accepted_head`, and per accepted step its commit SHA, gate results, attempt count and release version. The per-step record is the publication evidence a consumer can cite. It replaces V1's ship-proof provenance fields.
 - **Events** carry a monotonic cursor and are kept for 30 days. A cursor older than that returns `cursor-expired`, and the consumer re-reads `status`. Every event carries the batch's consumer reference.
 - **Cancel** is terminal: it stops any running attempt as a crash would (§2.10), recovers an `accepting` step, releases the root lease, and records the reason (`issue-closed`, `claim-released`, `stand-down`, `superseded`). `--superseded-by` links the replacement batch. This replaces V1 consumers parking and unparking other masters.
 - **gh-resolve** submits one batch per issue, with that issue's worktree as the declared execution root (I3) and the issue number as consumer reference. The concurrency limit is per project, so several issues run in parallel. V1 reached that on rezmac only on Oct 12, through a per-host flag and moving `host-compat.json` aside.
-- **Amend** is append-only and version-checked, and only changes steps that have not started (Q3). The driver also amends, to append an attributed repair step (§2.5.4).
-- **Base-measurement cost is counted.** A consumer suite of about 14.5 minutes is measured at the base once per batch, and again at a parent when attribution needs it. Both appear in each batch's timings and in minutes per accepted step.
+- **Amend** is append-only and version-checked, and only changes steps that have not started (Q3). From P4 the driver also amends, to add an attributed repair plan (§2.5.7).
+- **Base-measurement cost is counted.** A consumer suite of about 14.5 minutes is measured at the base once per batch, plus parent probes and, from P4, attribution probes. All appear in each batch's timings and in minutes per accepted step.
 
 ## 2.9 Observability
 
@@ -262,7 +297,9 @@ A red-first step declares the test IDs it expects to fail (`expect: red`), and o
 | Process-group termination | SIGTERM, 30 s, SIGKILL, 60 s | `blocked (unkillable)` with a `needs_human` row (§2.10) | Human |
 | SQLite busy or locked | Busy timeout of 10 s per transaction; 3 retries | The actor's operation fails with `store-busy`. A driver treats it as a stalled phase (requeue); the CLI reports it and exits non-zero | Driver or supervisor |
 | Setup hook (§2.5.3) | Declared cap, default 15 min | `blocked (setup)` with its output | Human, or the consumer (§2.11.3) |
-| Attribution walk (§2.5.4) | One run of the failing IDs per accepted commit in the batch | Recorded against the introducing step, or against the current step if no earlier commit is clean | Driver |
+| Attribution phase (§2.5.7, from P4) | 8 probes per failure; 20 min wall time per phase; probe results cached across requeues | `unattributable (budget)`; the current step is judged on all new failures | Driver |
+| Consumer root lease (§2.4.2) | 30 min | Lease returns to `released` with `consumer-lease-expired`; `needs_human` row under the project's policy | Supervisor |
+| Host under load (admission) | Checked every tick before starting a run | No new run starts while the 5-minute load average exceeds the host's core count, free memory is under 2 GB, or 3 or more of the last 10 gate runs on the host timed out. A `host-load` refusal row (I10), cleared by the supervisor | Supervisor |
 | Cancel | Same as a crash: SIGTERM, 30 s, SIGKILL | `cancelled` with its reason; root lease released | Supervisor |
 | Upgrade drain | Attempt cap + 15 min | Remaining drivers are terminated and requeued (§2.7) | Supervisor |
 | Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. It probes every 30 min and creates a `needs_human` row at 6 h | Supervisor, then human |
@@ -291,7 +328,7 @@ When the batch becomes active, the driver runs the base measurement in the execu
 ### 2.11.3 Telling a human, or the consumer
 
 Emitting a notification does not prove anyone saw it, so the record of record is a durable **`needs_human` row**:
-- It is created once per entry into a state that ilk2 cannot clear itself. It records a reason from a fixed enum (`attempts`, `crash-loop`, `dependency`, `setup`, `base-unmeasured`, `acceptance-mismatch`, `unkillable`, `quota`, `api`, `regression-attributed`), the command that clears it, and the batch's consumer reference.
+- It is created once per entry into a state that ilk2 cannot clear itself. It records a reason from a fixed enum (`attempts`, `crash-loop`, `dependency`, `setup`, `base-unmeasured`, `acceptance-mismatch`, `unkillable`, `quota`, `api`, `regression-attributed`, `consumer-lease-expired`), the command that clears it, and the batch's consumer reference.
 - It stays open until someone runs `ilk2 ack <id>`, or the state clears (for example `ilk2 resume` or `ilk2 cancel`).
 - A `needs_human` event appears in `ilk2 events --json` and at the top of `ilk2 status` in every case.
 - A state meant for a human is never retried automatically.
@@ -329,14 +366,28 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 | S16 | Host sleeps mid-attempt for longer than the attempt cap | No `timeout` and no `stalled`; `host-slept` recorded; the attempt continues | review finding 3 |
 | S17 | Process group ignores SIGTERM | SIGKILL at 30 s; a simulated unkillable PID gives `blocked (unkillable)` | review finding 3 |
 | S18 | Store held locked by another connection | `store-busy` after the busy timeout and retries; the run is requeued, not hung | review finding 3 |
-| S19 | Step 1 breaks a test in a gate only step 3 declares | Step 3 is judged only on failures after its parent; the failure is attributed to step 1, its plan gets a repair step, and the batch ships only after the repair | gh-resolve review H2 (F8) |
+| S19 | Step 1 breaks a test in a gate only step 3 declares (M1 behaviour) | Step 3 is judged on the failure, which is marked `possibly-inherited` with the parent-probe evidence in its brief; no attribution yet | gh-resolve review H2 (F8); Codex review 2, finding 1 |
 | S20 | Gate written as `bun run <script>` that calls `vitest -c <config>`; then a step edits that config | Resolved to the vitest adapter with test IDs; the config edit changes the gate version and triggers a new base measurement. A `shell` test gate is rejected at submit | gh-resolve review H3 |
 | S21 | One vitest test exceeds its own 15 s timeout under load | Timeout-class failure, re-run alone, passes; no attempt spent | gh-resolve review H6 (F6) |
-| S22 | Consumer pushes to the branch while the driver holds the lease; later pushes after release | First: the push is refused by the lease check the consumer reads, and the driver's next accept is not disturbed. Second: `resume` records the consumer's commits as the new step base, with no mismatch | gh-resolve review H4 |
+| S22 | Two actors race for the root lease: a consumer acquire and a `resume` at the same generation; then a consumer push after the remote head moved; then a consumer lease that is never released | Exactly one acquire succeeds; `resume` fails while the consumer holds it; the push is refused on the stale expected head; the abandoned lease expires at 30 min with `consumer-lease-expired` | gh-resolve review H4; Codex review 2, finding 3 |
 | S23 | `ilk2 cancel` mid-attempt, and while a step is `accepting` | Attempt stopped, acceptance recovered, batch `cancelled`, lease released | gh-resolve review H5 |
 | S24 | Execution root without `node_modules`, setup hook declared | Setup installs, the base measures; with a failing setup the batch is `blocked (setup)`, never `base-unmeasured` | gh-resolve review H5 |
 | S25 | A test reads `$HOME/.ilk-data` or `ILK_SKILL_HOME` | It sees an empty private `HOME` and no `ILK_*` variables | gh-resolve review H6 (F7) |
 | S26 | Resolver project (policy `consumer`) blocked | `needs_human` event with the consumer reference; no macOS or off-host page; after 24 h unacknowledged, one off-host notice | gh-resolve review M2; ADR 0032 |
+| S27 | Host load above the admission threshold with a run queued | No run starts; a `host-load` refusal row clears by itself when load drops; then the run starts | Codex review 2, finding 8 |
+
+**Attribution suite (required before P4, §2.5.7):**
+
+| # | Fault injected | Expected result |
+|---|---|---|
+| A1 | Step 1 of plan P breaks a test that only step 3 declares; P has already shipped | Edge found at step 1; step 3 is `pass-with-attributed`; a repair plan with `repair_of_step_id` is added; P's dependents pause; P stays `shipped`; the batch ships only after the repair |
+| A2 | The gate's specification changed between the edge commits | `unattributable (spec-changed)`; step judged on all new failures; no overlay of new config onto old source |
+| A3 | The current attempt has uncommitted changes when attribution runs | Probes run in diagnostic worktrees; the execution root and its changes are untouched |
+| A4 | The failure is flaky at the boundary | Disagreeing re-probes give `unattributable (flaky)`, not a blamed step |
+| A5 | A dependency version changed between the edge commits | Each diagnostic worktree installs from its own commit's lockfile; the result reflects that commit's dependencies |
+| A6 | Probe budget exhausted (long batch, slow fixtures), then the run is requeued | `unattributable (budget)`; after requeue, cached probes are reused and none are repeated |
+| A7 | Base clean, step 1 red, step 2 red | Attributed to step 1 (the first failing child of the last clean commit), not to the commit where the search stopped |
+| A8 | Two different assertion failures at the same line, one at base and one after a step | Different fingerprints; the second counts as new |
 
 ### 2.11.5 Judgment calls in this section
 
@@ -353,6 +404,9 @@ Each needs data from P2 and is revisited at M1.
 - **Events kept 30 days; the CLI keeps every pinned `api_version` and at least two previous.** Basis: consumers poll at least daily; rezmac can lag a release. Wrong if a consumer is offline longer, or if keeping old shapes costs real code.
 - **Setup hook default cap of 15 min.** Basis: a cold `bun install` takes minutes. Wrong if first installs on rezmac exceed it.
 - **Consumer-policy fallback: one off-host notice after 24 h unacknowledged.** Basis: a consumer that stops handling rows should not leave a batch silent forever, but resolver runs must not page by default. Wrong if gh-resolve's own escalation already covers a dead consumer.
+- **Attribution budget: 8 probes per failure, 20 min per phase; 2 confirming re-probes per side.** Basis: a binary search over a batch of up to about 30 accepted commits needs 5 probes, plus confirmation. Wrong if real batches routinely exhaust it; then raise the wall time before the probe count.
+- **Consumer lease 30 min.** Basis: reap and land push within minutes. Wrong if a consumer's legitimate push window is longer.
+- **Host-load admission: 5-minute load above core count, under 2 GB free, or 3 or more gate timeouts in the last 10.** Basis: gate timeouts under load were the measured symptom (gh-resolve review F6). Wrong if it refuses runs on a host whose gates are not slowing.
 - **Kill and requeue on supervisor restart instead of adopting** (Chad, Oct 13: "go ahead"). Basis: I4 holds with no lease or IPC code; supervisor restarts should be rare. Cost: the attempt in flight. Wrong if supervisor restarts become frequent (more than one a day); then add a driver lease and a handshake.
 
 ## 2.12 Code layout and size

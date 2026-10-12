@@ -46,6 +46,17 @@ Evidence in E1.
 
 Decisions Q14-Q16 were recorded as accepted by Chad.
 
+**Revision, Oct 13 (Codex review 2):** 8 findings accepted:
+- repairs become batch-level repair plans (`repair_of_step_id`), with an explicit `pass-with-attributed` rule;
+- probes run in diagnostic worktrees keyed by commit and gate version, and are `unattributable` if the gate is not portable across the boundary;
+- the root lease is a compare-and-set with a generation and expected head, and has a time limit;
+- shadow mode uses a separate non-owning clone;
+- attribution is an edge search with confirmation, a budget and a cache;
+- fingerprints include a message digest and the top three project frames;
+- host budgets are an experiment guarded by load admission.
+
+Chad deferred attribution to before P4 (§2.5.7, suite A1-A8). M1 judges new failures against the current step and marks `possibly-inherited` ones. The stall suite is now S1-S27.
+
 ## Decisions already made (Chad, Oct 12, 2026)
 
 - **Mac only.** chad-mbp and rezmac; no Windows or PowerShell.
