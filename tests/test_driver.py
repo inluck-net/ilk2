@@ -206,3 +206,13 @@ def test_export_v1_round_trips_through_the_v1_importer(ilk, tmp_path):
     assert p.slug == "p" and len(p.steps) == 1
     assert p.steps[0].gates[0].command[:3] == ["python", "-m", "pytest"]
     assert "implement add" in p.steps[0].instructions
+
+
+def test_declared_test_path_still_absent_after_step_is_red(ilk):
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD], [GOOD], [GOOD])  # never creates tests/test_new.py
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_new.py")]))
+    assert ilk.drive_inprocess(bid) == "blocked"
+    ev = ilk.s.all("SELECT evidence FROM attempts WHERE evidence IS NOT NULL")[0]["evidence"]
+    assert "tests/test_new.py" in ev

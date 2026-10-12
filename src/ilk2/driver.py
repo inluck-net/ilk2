@@ -429,6 +429,11 @@ class Driver:
                 self.event("gate.timeout", gate=gate.name)
             base = self.base_for(gate, spec)
             v = gates.judge(r, base, expect_red, list(must_pass))
+            if r.missing_paths and gate.declares_tests and v.outcome != "unmeasured":
+                # At the base an absent path is 0 tests; after a step it is a missing test
+                # file the gate declares, never a silent pass (docs/06 B5).
+                v.outcome = "fail"
+                v.new_failures += [f"{p} (declared, absent after the step)" for p in r.missing_paths]
             inherited = []
             if v.outcome == "fail" and parent != self.base and v.new_failures:
                 inherited = self.parent_probe(gate, parent, v.new_failures)
