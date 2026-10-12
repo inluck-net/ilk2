@@ -246,3 +246,35 @@ def amend(s: Store, batch_id: str, ops: list[dict], *, expect_version: int, acto
                   (batch_id, actor, reason, dumps(ops), expect_version, after, clock.wall()))
         s.event("amended", {"ops": len(ops), "version": after}, batch_id=batch_id)
         return after
+
+
+def export_v1(s: Store, batch_id: str, out_dir: Path) -> list[Path]:
+    """Write the batch's not-yet-accepted steps as V1 sub-plan Markdown (§2.8, §4.3: the way back
+    to V1 between batches). Accepted steps are listed as done; gates become local_checks."""
+    import shlex
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    b = s.get("batches", batch_id)
+    for p in s.all("SELECT * FROM plans WHERE batch_id = ? ORDER BY ord", batch_id):
+        steps = s.all("SELECT * FROM steps WHERE plan_id = ? ORDER BY idx", p["id"])
+        todo = [st for st in steps if st["status"] != "accepted"]
+        done = [st for st in steps if st["status"] == "accepted"]
+        scope = sorted({x for st in steps for x in json.loads(st["scope"])})
+        lines = ["---", f"plan: {p['slug']}", "status: queued", "current_step: 0",
+                 f"depends_on: {p['depends_on']}", f"scope_paths: {json.dumps(scope)}", "---", "",
+                 f"# Sub-plan: {p['slug']}", "",
+                 f"Exported from ilk2 batch {batch_id} (base {b['base_commit'][:12]}, branch {b['branch']}).", ""]
+        if done:
+            lines += ["## Already accepted on ilk2", ""]
+            lines += [f"- {st['title']} ({(st['accepted_commit'] or '')[:12]})" for st in done]
+            lines.append("")
+        lines += ["## Steps", ""]
+        for i, st in enumerate(todo):
+            lines += [f"### Step {i} — {st['title']}", "", "```yaml", "local_checks:"]
+            for g in json.loads(st["gates"]):
+                lines += [f'  - command: {json.dumps(shlex.join(g["command"]))}', f"    timeout: {g['cap_s']}"]
+            lines += ["```", "", st["instructions"], ""]
+        f = out_dir / f"{p['slug']}.md"
+        f.write_text("\n".join(lines))
+        written.append(f)
+    return written

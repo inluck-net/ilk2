@@ -171,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("batch")
     cn.add_argument("--reason", default="human")
     cn.add_argument("--superseded-by")
+    ex = sub.add_parser("export")
+    ex.add_argument("batch")
+    ex.add_argument("--v1", action="store_true", required=True)
+    ex.add_argument("--out", required=True)
     am = sub.add_parser("amend")
     am.add_argument("batch")
     am.add_argument("--file", required=True, help="JSON list of ops")
@@ -266,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(batches.resume(s, a.batch)))
         elif a.cmd == "cancel":
             batches.cancel(s, a.batch, a.reason, a.superseded_by)
+        elif a.cmd == "export":
+            files = batches.export_v1(s, a.batch, Path(a.out))
+            _out({"files": [str(f) for f in files]}, True)
         elif a.cmd == "amend":
             v = batches.amend(s, a.batch, json.loads(Path(a.file).read_text()),
                               expect_version=a.version, reason=a.reason)

@@ -194,3 +194,15 @@ def test_changed_paths_keeps_first_entry_intact(ilk):
     (root / "calc.py").write_text("x = 1\n")          # tracked, modified: " M calc.py"
     (root / "new.py").write_text("y = 2\n")           # untracked: "?? new.py"
     assert gitops.changed_paths(root) == ["calc.py", "new.py"]
+
+
+def test_export_v1_round_trips_through_the_v1_importer(ilk, tmp_path):
+    from ilk2 import batches, plans
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    files = batches.export_v1(ilk.s, bid, tmp_path / "out")
+    p = plans.parse_v1_subplan(files[0].read_text())
+    assert p.slug == "p" and len(p.steps) == 1
+    assert p.steps[0].gates[0].command[:3] == ["python", "-m", "pytest"]
+    assert "implement add" in p.steps[0].instructions
