@@ -50,6 +50,7 @@ class Supervisor:
         self.host_budget = host_budget
         self.load_check = load_check
         self.children: dict[str, subprocess.Popen] = {}
+        self.exit_requested = False
         self.last_wall, self.last_mono = clock.wall(), clock.mono()
 
     # -- start-up ---------------------------------------------------------------------------
@@ -92,7 +93,29 @@ class Supervisor:
                                     f"ilk2 lease recover --root {root}",
                                     batch_id=b["id"] if b else None)
         self.check_waits()
+        if self.drain():
+            return
         self.admit()
+
+    def drain(self) -> bool:
+        """Upgrade drain (§2.7): admit nothing; when no run is left, or the bound passes,
+        exit so launchd restarts the supervisor from the new release. True while draining."""
+        if not self.s.one("SELECT 1 FROM meta WHERE key = 'draining' AND value = '1'"):
+            return False
+        live = self.s.all("SELECT * FROM runs WHERE status IN ('starting', 'running')")
+        started = float((self.s.one("SELECT value FROM meta WHERE key = 'drain_started_wall'")
+                         or {"value": clock.wall()})["value"])
+        if live and clock.wall() - started > self.b.attempt_cap + self.b.run_outer_extra:
+            for run in live:
+                self.kill_run(run)
+                self.end_and_requeue(run, "drained (bound)", count=False)
+            live = []
+        if not live:
+            with self.s.tx() as c:
+                c.execute("UPDATE meta SET value = '0' WHERE key = 'draining'")
+            self.s.event("supervisor.drained", {})
+            self.exit_requested = True
+        return True
 
     def reap(self) -> None:
         for rid, p in list(self.children.items()):
@@ -356,7 +379,7 @@ class Supervisor:
         stop = {"flag": False}
         signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
         t_end = clock.mono() + stop_after if stop_after else None
-        while not stop["flag"] and (t_end is None or clock.mono() < t_end):
+        while not stop["flag"] and not self.exit_requested and (t_end is None or clock.mono() < t_end):
             self.tick()
             time.sleep(self.b.tick)
         for rid, p in self.children.items():

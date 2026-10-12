@@ -1,3 +1,3 @@
 """ilk2: a small execution core for multi-step coding batches on a Mac."""
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"

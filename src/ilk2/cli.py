@@ -96,6 +96,38 @@ def report(s) -> dict:
             "minutes_to_first_edit_median": round(sorted(firsts)[len(firsts) // 2] / 60, 2) if firsts else None}
 
 
+def doctor() -> int:
+    """Checks a human can read: release, launchd jobs, supervisor tick, worker template keys."""
+    import os
+    import subprocess
+    from . import clock, paths, release
+    s = _store()
+    ok = True
+    cur = release.current()
+    print(f"release: {os.path.realpath(cur) if cur.exists() else 'none installed'}")
+    for label in (release.SUPERVISOR, release.HEALTH):
+        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True)
+        print(f"launchd {label}: {'loaded' if r.returncode == 0 else 'not loaded'}")
+    row = s.one("SELECT * FROM supervisor WHERE id = 1")
+    if row and row["tick_wall"]:
+        age = clock.wall() - row["tick_wall"]
+        ok &= age < 180
+        print(f"supervisor: pid {row['pid']}, last tick {age:.0f}s ago")
+    else:
+        print("supervisor: never ticked")
+    tmpl = paths.home() / "worker-template" / "settings.json"
+    if tmpl.exists():
+        d = json.loads(tmpl.read_text())  # key names and the model only, never values
+        print(f"worker template: model {d.get('model')}, env keys {sorted(d.get('env', {}))}, "
+              f"mode {oct(tmpl.stat().st_mode)[-3:]}")
+    else:
+        ok = False
+        print("worker template: missing")
+    print(f"needs_human open: {len(s.open_human_rows())}")
+    s.close()
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ilk2")
     ap.add_argument("--version", action="version", version=f"ilk2 {__version__}")
@@ -151,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--owner", default="consumer")
     ls.add_argument("--length", type=float)
 
+    rl = sub.add_parser("release")
+    rl.add_argument("op", choices=["build", "install", "upgrade", "uninstall"])
+    rl.add_argument("--version")
+    rl.add_argument("--repo", default=".")
+    sub.add_parser("doctor")
+
     rp = sub.add_parser("report")
     rp.add_argument("--json", action="store_true")
 
@@ -167,6 +205,19 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "health":
         from .health import main as health
         return health()
+    if a.cmd == "release":
+        from . import release
+        if a.op == "build":
+            print(release.build(Path(a.repo).resolve(), a.version).name)
+        elif a.op == "install":
+            print(json.dumps(release.install(a.version), indent=2))
+        elif a.op == "upgrade":
+            print(json.dumps(release.upgrade(a.version), indent=2))
+        else:
+            release.uninstall()
+        return 0
+    if a.cmd == "doctor":
+        return doctor()
 
     from . import batches, bounds, gitops, lease, plans
     from .store import Conflict
