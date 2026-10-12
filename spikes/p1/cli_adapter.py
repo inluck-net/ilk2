@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -26,17 +27,93 @@ TEMPLATE = Path.home() / ".ilk2" / "worker-template"
 _SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_CONFIG_DIR")
 
 
-def make_config_dir(dest: Path) -> Path:
-    """Copy the pinned template into a private per-run config dir (mode 700, settings 600)."""
+HOOK = Path(__file__).parent / "worker_hook.py"
+
+
+def make_config_dir(dest: Path, hook: bool = False) -> Path:
+    """Copy the pinned template into a private per-run config dir (mode 700, settings 600).
+
+    With hook=True, the step 3 PreToolUse hook is added. Values are never printed.
+    """
     dest.mkdir(parents=True, mode=0o700, exist_ok=False)
-    src = TEMPLATE / "settings.json"
-    shutil.copy2(src, dest / "settings.json")
-    os.chmod(dest / "settings.json", 0o600)
+    settings = json.loads((TEMPLATE / "settings.json").read_text())
+    if hook:
+        settings["hooks"] = {
+            "PreToolUse": [{
+                "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": f"/usr/bin/python3 -I {HOOK}"}],
+            }]
+        }
+    fd = os.open(dest / "settings.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(settings, f, indent=2)
     return dest
 
 
+@dataclass
+class Isolation:
+    """Step 3: sandbox-exec write fence plus the hook's environment, for one worktree.
+
+    log_dir is writable by the worker (the hook appends to it), so it must not contain
+    anything the fence protects: not the origin repo, a remote, or a probe target.
+    """
+
+    worktree: Path
+    tmp: Path
+    log_dir: Path
+    config_dir: Path
+    sandbox: bool = True
+
+    def tool_dirs(self) -> list[str]:
+        """Claude Code's per-cwd tool directory, /private/tmp/claude-<uid>/<cwd key>.
+
+        The Bash tool creates it whatever TMPDIR says; without it every Bash call fails
+        with EPERM under the sandbox (step2-20261013-025927). The key is the cwd with
+        each character outside [A-Za-z0-9-] replaced by '-'.
+        """
+        base = f"/private/tmp/claude-{os.getuid()}"
+        keys = {re.sub(r"[^A-Za-z0-9-]", "-", str(p))
+                for p in (self.worktree, os.path.realpath(self.worktree))}
+        return [f"{base}/{k}" for k in sorted(keys)]
+
+    def profile(self) -> str:
+        # Paths are matched after symlink resolution (/tmp is /private/tmp on macOS).
+        allowed = [os.path.realpath(p) for p in
+                   (self.worktree, self.tmp, self.log_dir, self.config_dir)] + self.tool_dirs()
+        subpaths = " ".join(f'(subpath "{p}")' for p in allowed)
+        # The Bash tool also writes a cwd marker /private/tmp/claude-<hex>-cwd per call
+        # (step3-20261013-030422: "operation not permitted: /tmp/claude-aad7-cwd").
+        return (
+            "(version 1)\n(allow default)\n(deny file-write*)\n"
+            f'(allow file-write* {subpaths} (subpath "/dev")\n'
+            '  (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))\n'
+        )
+
+    def env(self) -> dict[str, str]:
+        return {
+            "TMPDIR": os.path.realpath(self.tmp) + "/",
+            "ILK2_WORKTREE": os.path.realpath(self.worktree),
+            "ILK2_HOOK_LOG": str(self.log_dir / "hook.jsonl"),
+        }
+
+
+def host_env() -> dict[str, str]:
+    """The parent environment minus the spike's own virtualenv.
+
+    `uv run` puts ilk2's .venv/bin first on PATH, so a worker's or gate's `python3` would be
+    ilk2's interpreter instead of the host's (step 4 preflight: V1's pytest plugins missing).
+    """
+    env = dict(os.environ)
+    venv = env.pop("VIRTUAL_ENV", None)
+    if venv:
+        env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep)
+                                      if not p.startswith(venv))
+    env.pop("UV_RUN_RECURSION_DEPTH", None)
+    return env
+
+
 def _worker_env(config_dir: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_SCRUB_PREFIXES)}
+    env = {k: v for k, v in host_env().items() if not k.startswith(_SCRUB_PREFIXES)}
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     return env
 
@@ -124,10 +201,12 @@ class Attempt:
 class CliAdapter:
     """Dispatch through `claude -p --output-format stream-json`."""
 
-    def __init__(self, config_dir: Path, log_dir: Path, max_turns: int = 30):
+    def __init__(self, config_dir: Path, log_dir: Path, max_turns: int = 30,
+                 isolation: Isolation | None = None):
         self.config_dir = config_dir
         self.log_dir = log_dir
         self.max_turns = max_turns
+        self.isolation = isolation
         self._n = 0
 
     def _spawn(self, kind: str, prompt: str, cwd: Path, extra: list[str]) -> Attempt:
@@ -142,11 +221,20 @@ class CliAdapter:
         ]
         log_path = self.log_dir / f"attempt-{self._n:02d}-{kind}.jsonl"
         stderr_path = log_path.with_suffix(".stderr.txt")
+        env = _worker_env(self.config_dir)
+        iso = self.isolation
+        if iso is not None:
+            iso.tmp.mkdir(parents=True, mode=0o700, exist_ok=True)
+            env |= iso.env()
+            if iso.sandbox:
+                profile = self.log_dir / "sandbox.sb"
+                profile.write_text(iso.profile())
+                argv = ["/usr/bin/sandbox-exec", "-f", str(profile), *argv]
         t0 = time.monotonic()
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=_worker_env(self.config_dir),
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr_path.open("w"),
@@ -167,53 +255,59 @@ class CliAdapter:
 
     @staticmethod
     def cancel(attempt: Attempt, grace_s: float = 5.0, term_first: bool = True) -> dict:
-        """Stop the worker and every process group its descendants opened.
-
-        Claude Code's Bash tool runs commands in a new process group, so killpg on the
-        worker's group alone orphans them under SIGKILL (probe sigkill-20261013-*).
-        The descendant groups are snapshotted before signalling, because once the worker
-        dies its children are reparented to launchd and can no longer be found from it.
-        term_first=False skips SIGTERM, standing in for a worker that cannot clean up.
-        """
-        pgid = attempt.pgid
-        t0 = time.monotonic()
-        before = descendants(pgid)
-        groups = [pgid] + sorted({g for _, g, _ in before if g != pgid})
-        pids = {pid for pid, _, _ in before}
-
-        def survivors() -> list[tuple[int, str]]:
-            return [(p, c) for p, _, g, c in process_table() if g in groups or p in pids]
-
-        def signal_all(sig: signal.Signals) -> None:
-            for g in groups:
-                try:
-                    os.killpg(g, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass  # gone, or zombie-only (macOS returns EPERM for those)
-
-        sent = []
-        if term_first:
-            signal_all(signal.SIGTERM)
-            sent.append("TERM")
-            deadline = t0 + grace_s
-            while time.monotonic() < deadline and survivors():
-                attempt.proc.poll()  # reap the leader: macOS killpg on a zombie-only group is EPERM
-                time.sleep(0.1)
-        if survivors():
-            signal_all(signal.SIGKILL)
-            sent.append("KILL")
+        res = cancel_group(attempt.pgid, attempt.proc.poll, grace_s, term_first)
         try:
             attempt.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
-        time.sleep(0.5)
-        return {
-            "signals": sent,
-            "groups": groups,
-            "cancel_s": round(time.monotonic() - t0, 3),
-            "returncode": attempt.proc.returncode,
-            "survivors": survivors(),
-        }
+        return res | {"returncode": attempt.proc.returncode}
+
+
+def cancel_group(pgid: int, reap, grace_s: float = 5.0, term_first: bool = True) -> dict:
+    """Stop a worker's process group and every process group its descendants opened.
+
+    Claude Code's Bash tool runs commands in a new process group, so killpg on the
+    worker's group alone orphans them under SIGKILL (probe sigkill-20261013-*).
+    The descendant groups are snapshotted before signalling, because once the worker
+    dies its children are reparented to launchd and can no longer be found from it.
+    term_first=False skips SIGTERM, standing in for a worker that cannot clean up.
+    reap() is called while waiting, so the leader does not linger as a zombie
+    (macOS killpg on a zombie-only group is EPERM).
+    """
+    t0 = time.monotonic()
+    before = descendants(pgid)
+    groups = [pgid] + sorted({g for _, g, _ in before if g != pgid})
+    pids = {pid for pid, _, _ in before}
+
+    def survivors() -> list[tuple[int, str]]:
+        return [(p, c) for p, _, g, c in process_table() if g in groups or p in pids]
+
+    def signal_all(sig: signal.Signals) -> None:
+        for g in groups:
+            try:
+                os.killpg(g, sig)
+            except (ProcessLookupError, PermissionError):
+                pass  # gone, or zombie-only
+
+    sent = []
+    if term_first:
+        signal_all(signal.SIGTERM)
+        sent.append("TERM")
+        deadline = t0 + grace_s
+        while time.monotonic() < deadline and survivors():
+            reap()
+            time.sleep(0.1)
+    if survivors():
+        signal_all(signal.SIGKILL)
+        sent.append("KILL")
+    reap()
+    time.sleep(0.5)
+    return {
+        "signals": sent,
+        "groups": groups,
+        "cancel_s": round(time.monotonic() - t0, 3),
+        "survivors": survivors(),
+    }
 
 
 def process_table() -> list[tuple[int, int, int, str]]:
@@ -231,6 +325,40 @@ def process_table() -> list[tuple[int, int, int, str]]:
         if len(parts) == 5 and not parts[3].startswith("Z"):
             rows.append((int(parts[0]), int(parts[1]), int(parts[2]), Path(parts[4]).name))
     return rows
+
+
+def processes_in(root: Path) -> list[tuple[int, str]]:
+    """Processes of this user whose cwd is inside root (lsof), for the post-cancel sweep.
+
+    Catches descendants spawned after cancel's snapshot and reparented to launchd, which
+    the parent chain can no longer find. Matches cwd, never argv (I4).
+    """
+    real = os.path.realpath(root)
+    out = subprocess.run(
+        ["lsof", "-a", "-d", "cwd", "-u", str(os.getuid()), "-F", "pcn"],
+        capture_output=True, text=True,
+    ).stdout
+    rows, pid, comm = [], None, ""
+    for line in out.splitlines():
+        tag, val = line[:1], line[1:]
+        if tag == "p":
+            pid, comm = int(val), ""
+        elif tag == "c":
+            comm = val
+        elif tag == "n" and pid is not None and (val == real or val.startswith(real + os.sep)):
+            rows.append((pid, comm))
+    return rows
+
+
+def sweep(root: Path) -> list[tuple[int, str]]:
+    """SIGKILL every process whose cwd is inside root; return what was found."""
+    found = [r for r in processes_in(root) if r[0] != os.getpid()]
+    for pid, _ in found:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return found
 
 
 def group_members(pgid: int) -> list[tuple[int, str]]:

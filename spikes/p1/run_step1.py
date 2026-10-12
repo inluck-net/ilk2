@@ -71,11 +71,9 @@ def run_gate(gate: Path, wt: Path) -> tuple[int, str]:
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
-def main() -> int:
-    run = Path.home() / ".ilk2" / "spike-p1" / f"step1-{datetime.now():%Y%m%d-%H%M%S}"
-    run.mkdir(parents=True, mode=0o700)
+def seed(run: Path) -> tuple[Path, Path, Path]:
+    """Throwaway origin repo with the slug stub, a worktree on branch `attempt`, and the gate."""
     origin, wt, gate = run / "origin", run / "wt", run / "gate.py"
-
     origin.mkdir()
     sh("git", "init", "-q", "-b", "main", cwd=origin)
     (origin / "slug.py").write_text(STUB)
@@ -84,6 +82,13 @@ def main() -> int:
        "commit", "-q", "-m", "seed", cwd=origin)
     sh("git", "worktree", "add", "-q", "-b", "attempt", str(wt), cwd=origin)
     gate.write_text(GATE)
+    return origin, wt, gate
+
+
+def main() -> int:
+    run = Path.home() / ".ilk2" / "spike-p1" / f"step1-{datetime.now():%Y%m%d-%H%M%S}"
+    run.mkdir(parents=True, mode=0o700)
+    origin, wt, gate = seed(run)
 
     adapter = CliAdapter(make_config_dir(run / "config"), run)
     summary: dict = {"run_dir": str(run)}

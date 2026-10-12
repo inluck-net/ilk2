@@ -11,6 +11,9 @@ ilk2 = "ilk2.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
+spike = [
+    "claude-agent-sdk>=0.2.165",
+]
 
 [build-system]
 requires = ["hatchling"]
