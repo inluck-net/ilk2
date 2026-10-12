@@ -40,3 +40,21 @@ The first M1 attempt (`b-1b3841db9323`) found a bug (docs/06 B5: the scope check
 
 - Q1: CLI dispatch, no SDK, for M1 (P1 step 2; `spikes/p1/findings.md`).
 - Tests use a stub worker (a fake `claude` that emits stream-json), so the stall suite runs without MiMo. Live MiMo is used only for the M1 run.
+
+## Q17 evidence from P2 (docs/06 P2-1)
+
+**The M1 batch:** 3 planned steps, 3 accepted as written, 0 amendments. Denominator 3, changes 0.
+
+**Building M1 itself (by hand, against the 11-item order above):** 11 planned items, all still valid. Items added because an earlier item's result showed they were needed:
+
+| Added item | Found by | Knowable when the order was written? | Cost had it been missed |
+|---|---|---|---|
+| `must_pass` on steps (B1) | the first driver test passed with no change | yes, by reading §2.5.4 against a "make it pass" step | every "fix the red test" step would pass vacuously |
+| own vitest reporter | vitest 3.2's JSON reporter drops timeout messages | no, only by running it | S21 unrecognizable |
+| per-host config (`host.json`) | CI failed S11 and S13 on a small runner | partly | flaky stall suite on CI |
+| health start-up grace | the first real install kickstarted its own supervisor | yes, §2.11.1 names the start-up bound | a restart at every install |
+| raw porcelain parsing (B5) | the first live M1 run refused its own step | no | any step touching a tracked file at the top of `git status` refused |
+| closing a lost run's attempt | the M1 supervisor kill | partly | attempt rows left `running` forever |
+| absent declared test path fails after a step | a self-review for the B5 shape | yes | a step skipping its new test file would pass |
+
+Of 7 additions, 3 were knowable from the design text and 4 needed a run. All stayed inside the goal and the verification obligations; none changed the M1 exit criterion. A planning pass could have proposed the 4 run-found items only after the run that found them, which is what happened by hand.
