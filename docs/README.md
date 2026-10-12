@@ -72,6 +72,8 @@ Chad deferred attribution to before P4 (§2.5.7). M1 judges new failures against
 
 **Revision, Oct 13 (gh-resolve re-review, design close):** fixes for M1: setup re-run on transient failure; named `ILK_*` variables in the allow-list; base comparison for non-zero exit with 0 failures; notification wording made consistent; the false remote-head claim removed; A1 aligned with A10. The resolver-integration items are parked as the P5 addendum in [document 6](06-open-items.md).
 
+**Addition, Oct 13 (during P1, not a review round):** Q17 and [document 6](06-open-items.md) P2-1, from Chad's question "is it better to plan beforehand or to plan as we go?". M1 keeps fixed step lists. P1-P2 keep an evidence table, with denominators, of steps that had to change after an earlier one ran, and Chad decides at M1 whether a planning pass may propose amendments to pending steps. The driver alone would apply them, inside a sealed goal and set of verification obligations, with monotonic step and planning budgets. Codex reviewed the item (9 findings, all applied).
+
 ## Decisions already made (Chad, Oct 12, 2026)
 
 - **Mac only.** chad-mbp and rezmac; no Windows or PowerShell.

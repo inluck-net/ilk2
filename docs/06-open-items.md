@@ -7,9 +7,69 @@ The design was closed for P1 on Oct 13, 2026 (tag `design-accepted-p1`). Review 
 | When | Reviewed against | Reviewers |
 |---|---|---|
 | After P1 | The spike write-up in `docs/spikes/` and its code | Chad, Codex |
-| At M1 | The core, the stall suite S1-S27 | Chad, Codex |
+| At M1 | The core, the stall suite S1-S27, and the P2-1 evidence below | Chad, Codex |
 | Before P4 | Attribution (§2.5.7) and suite A1-A10 | Codex, gh-resolve |
 | Before P5 | The P5 addendum below, against gh-resolve's code at that time | gh-resolve, Codex |
+
+## During P2, decided at M1
+
+### P2-1: plan steps as the batch runs (Q17)
+
+**Origin.** Chad, Oct 13, after P1 step 1: "is it better to plan beforehand or to plan as we go?" The design plans beforehand. A batch is submitted with its full step list. Amendments are version-checked, limited to steps that have not started, and recorded in an append-only journal (Q3). Nothing proposes the next step from what the last one found.
+
+**Why it may matter.** Later steps are written against assumptions that earlier steps test. P1 had a case in its first step. Step 1 found that Claude Code's Bash tool runs commands in their own process group, so a kill of the worker's group orphans them (`spikes/p1/findings.md`, finding 1). That revealed a descendant-process hazard that step 3's sandbox or the supervisor's cleanup must cover. Whether step 3 itself has to change is not yet shown; the plan, written beforehand, did not name the hazard.
+
+**Direction (not designed yet).** Fix the destination and its verification before the batch starts, and plan the steps as it runs:
+
+| Sealed at submission: an autonomous amendment may strengthen these, never weaken them | May change as the batch runs |
+|---|---|
+| The batch goal | The concrete next 1-2 steps |
+| The **verification obligations**: which gates exist, their minimum coverage, and a final verification plan. That plan is sealed: weakening, replacing, dropping or reordering it, or editing the verification assets it protects (its tests and gate configuration), needs a human amendment | The order of later pending steps |
+| Bounds (§2.11), plus a **step budget** and a **planning budget** (below) | Replacing, splitting or dropping pending steps, by stable step id |
+
+Gate *specification versions* are not frozen. They change legitimately when a step edits tests, runner configuration or `package.json` (§2.5.1). What is sealed is the obligation, not the hash.
+
+**Who writes what (I1).** A planning pass writes nothing authoritative. It emits a **proposal**: the amendment, the plan version it was made against, and the evidence it cites (attempt ids, commits, gate output). Only the driver applies a proposal. It does so in one transaction, after checking the plan version, the sealed envelope, both budgets, and that every touched step is still pending. The journal is append-only. Each amendment may replace, reorder or drop pending steps. Acceptance stays with the driver's gates (§2.4-2.4.1).
+
+**Budgets, so the loop is bounded (I11):**
+- **The step budget is monotonic.** Every created step consumes a slot permanently, split replacements included, and a dropped step never refunds one.
+- **There is a separate limit on planning passes and on applied amendments,** so a planner cannot churn the plan without adding steps.
+- **A planning pass is a bounded phase with a retry limit.** Exhausting either budget ends in `blocked (planning-budget)` with a `needs_human` row.
+
+**State it would need if adopted** (§2.3 has none of it today):
+- batch fields for the goal, the sealed verification obligations, and each budget's limit and consumed count;
+- an amendment record: actor and session, plan version before and after, evidence references, and the reason.
+
+**Risks the guards answer:**
+
+| Risk | Guard |
+|---|---|
+| Goal drift, where each step looks reasonable next to the one before | Sealed goal and verification |
+| No natural end, because there is always one more step | Monotonic step budget |
+| Churn | Planning budget |
+| The planner grading its own work | Driver-only application and acceptance; protected verification assets |
+
+**Open, for M1:**
+- who plans: a separate model session, the consumer that submitted the batch, or a human through `/ilk2-plan`;
+- what triggers a planning pass: every accepted step, or only a step whose evidence contradicts a later step's instructions;
+- which stall cases the stall suite gains (a planner that adds steps forever, churns the plan, or proposes against a stale plan version).
+
+**What P1-P2 do.** M1 is built with fixed step lists, as designed; nothing above is needed to build it. Every batch and phase records a manual evidence table.
+
+*For every batch:* total steps and amendment opportunities, counting the steps where the original plan stayed valid. That is the denominator.
+
+*For every step that had to change after an earlier one ran:*
+- the original instructions and the assumption that failed;
+- the evidence, with attempt ids and commits;
+- whether the fact was knowable when the plan was written;
+- the amendment, before and after;
+- whether the goal, scope or verification obligations changed;
+- the attempts and time wasted, or that would have been wasted, without the amendment;
+- the time a human amendment took;
+- the final gate outcome;
+- what a planning pass would have proposed, and whether that would have helped.
+
+**Decision rule, declared now:** adopt only if discoveries that were not knowable at planning time recur, cost material time, and would have been handled inside the sealed envelope. No numeric threshold is set. Chad decides Q17 at the M1 review from this table.
 
 ## P5 addendum: resolver integration (from gh-resolve's re-review at 5e0e3ca)
 
