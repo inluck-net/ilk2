@@ -144,3 +144,16 @@ def test_hook_fails_closed(tmp_path):
     p = subprocess.run(["python3", "-I", str(worker.HOOK)], input="not json", text=True,
                        capture_output=True, env={"ILK2_WORKTREE": str(tmp_path), "PATH": "/usr/bin"})
     assert p.returncode == 2
+
+
+def test_preload_includes_scope_tests_and_earlier_diff(tmp_path):
+    (tmp_path / "calc.py").write_text("def add(a, b):\n    pass\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_calc.py").write_text("def test_add():\n    pass\n")
+    big = "\n".join(f"line {i}" for i in range(1000)) + "\ndef target_fn():\n    pass\n"
+    (tmp_path / "big.py").write_text(big)
+    out = worker.preload(tmp_path, ["calc.py", "big.py"], "fix `target_fn` in big.py",
+                         [["python", "-m", "pytest", "tests/test_calc.py"]], "diff --git a b")
+    assert "## calc.py (2 lines)" in out and "## tests/test_calc.py" in out
+    assert "1001: def target_fn():" in out and "line 5\n" not in out  # windowed, not whole
+    assert "Changes from this batch's earlier steps" in out

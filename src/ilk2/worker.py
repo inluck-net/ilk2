@@ -294,3 +294,57 @@ def brief(title: str, instructions: str, gate_lines: list[str], evidence: str | 
     if evidence:
         b += EVIDENCE.format(evidence=evidence)
     return b
+
+
+# -- preloaded context (§2.6, Q10) ------------------------------------------------------------
+
+WHOLE_FILE_MAX_LINES = 600
+WINDOW = 30
+PRELOAD_CAP = 150_000
+
+
+def _windows(lines: list[str], idents: set[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        if any(x in line for x in idents):
+            a, b = max(0, i - WINDOW), min(len(lines), i + WINDOW + 1)
+            if spans and a <= spans[-1][1]:
+                spans[-1] = (spans[-1][0], max(spans[-1][1], b))
+            else:
+                spans.append((a, b))
+    return spans
+
+
+def preload(root: Path, scope: list[str], instructions: str, gate_commands: list[list[str]],
+            earlier_diff: str) -> str:
+    """Context the driver assembles at no model cost: the files the step names, the gates'
+    test files, and the diff of the batch's earlier accepted steps. Same rules as P1 step 4
+    (whole files up to 600 lines, else windows around named identifiers; 150k characters)."""
+    idents = {m for m in re.findall(r"`([A-Za-z_][A-Za-z0-9_.]{3,})`", instructions)}
+    idents |= set(re.findall(r"\b([a-z_][a-z0-9_]{3,})\(", instructions))
+    files: list[str] = []
+    for s in scope:
+        p = root / s
+        if p.is_file():
+            files.append(s)
+        elif p.is_dir():
+            files += [str(f.relative_to(root)) for f in sorted(p.rglob("*")) if f.is_file()
+                      and f.suffix in (".py", ".ts", ".js", ".sh", ".md")][:20]
+    for cmd in gate_commands:
+        for a in cmd[1:]:
+            if not a.startswith("-") and (root / a.split("::")[0]).is_file():
+                files.append(a.split("::")[0])
+    parts = ["# Preloaded context (assembled by the driver)\n"]
+    for rel in dict.fromkeys(files):
+        body = (root / rel).read_text(errors="replace")
+        lines = body.splitlines()
+        if len(lines) <= WHOLE_FILE_MAX_LINES:
+            parts.append(f"\n## {rel} ({len(lines)} lines)\n```\n{body}\n```\n")
+        else:
+            parts.append(f"\n## {rel} ({len(lines)} lines; windows around names the step uses)\n")
+            for a, b in _windows(lines, idents):
+                parts.append("```\n" + "\n".join(f"{i + 1}: {lines[i]}" for i in range(a, b)) + "\n```\n")
+    if earlier_diff:
+        parts.append(f"\n## Changes from this batch's earlier steps\n```diff\n{earlier_diff}\n```\n")
+    text = "".join(parts)
+    return text[:PRELOAD_CAP] + ("\n[preload truncated]\n" if len(text) > PRELOAD_CAP else "")

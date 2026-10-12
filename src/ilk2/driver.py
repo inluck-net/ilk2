@@ -370,8 +370,13 @@ class Driver:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
         else:
+            pre = None
+            if self.cfg.preload:  # Q10
+                diff = gitops.git(self.root, "diff", f"{self.base}..HEAD", check=False)[:60_000]
+                pre = worker.preload(self.root, json.loads(step["scope"]), step["instructions"],
+                                     [g.command for g in gate_list], diff)
             prompt = worker.brief(step["title"], step["instructions"],
-                                  [" ".join(g.command) for g in gate_list], evidence)
+                                  [" ".join(g.command) for g in gate_list], evidence, preload=pre)
         with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume)):
             d = worker.dispatch(cfg, files, self.root, prompt, resume=resume)
             outcome = d.wait(self.b.attempt_cap, self.b.term_grace, self.b.kill_grace)
