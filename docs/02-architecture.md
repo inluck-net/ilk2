@@ -51,12 +51,12 @@ flowchart TB
 
 | Component | Responsibility | Never does |
 |---|---|---|
-| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs and keeps concurrency limits per host and per project. Records every refusal with its clearing action (I10). Spawns drivers and waits on them. Writes a tick timestamp every 30 s. On start-up, terminates surviving drivers and requeues their runs. Performs upgrades and drains. | Run gates, touch worktrees, call the model, adopt a process it did not start, or add a pre-dispatch audit of driver-written state |
+| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs by priority, then submission order, and keeps concurrency limits per host and per project. Records every refusal with its clearing action (I10). Spawns drivers and waits on them. Writes a tick timestamp every 30 s. On start-up, terminates surviving drivers and requeues their runs. Performs upgrades and drains. | Run gates, touch worktrees, call the model, adopt a process it did not start, or add a pre-dispatch audit of driver-written state |
 | **Health job** (`ilk2 health`) | A separate launchd job every 60 s. If the supervisor's last tick is older than the bound, or its process is gone, it restarts the supervisor with `launchctl kickstart -k`. It also re-sends unacknowledged `needs_human` notices that are due | Touch runs or batches |
 | **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, accepts the step (§2.4.1), retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
 | **Worker** | A Claude Code session with MiMo, under a private config dir, reached through the dispatch adapter (§2.6). Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
 | **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions, events and `needs_human` rows | Hold secrets |
-| **CLI** | Submission, status (human and `--json`), amend, park, resume, ack, export, doctor, upgrade | Bypass the transition API |
+| **CLI** | Submission, status (human and `--json`), amend, park, resume, cancel, ack, export, doctor, upgrade | Bypass the transition API |
 
 ## 2.3 State model
 
@@ -73,8 +73,9 @@ erDiagram
   BATCH ||--o{ NEEDS_HUMAN : raises
 ```
 
-- **PROJECT:** id, repo root, default branch, gate adapters, concurrency limit. Registered explicitly with `ilk2 project add`.
-- **BATCH:** id, project, base commit, status (`queued → active → shipped | blocked | parked`), an immutable normalized plan snapshot (Q3), and the original imported documents.
+- **PROJECT:** id, repo root, default branch, gate adapters, concurrency limit, setup hook (§2.5), and notification policy (`owner` or `consumer`; §2.11.3). Registered explicitly with `ilk2 project add`.
+- **BATCH:** id, project, base commit, priority, consumer reference (for example a gh-resolve issue number, echoed in every event), status (`queued → active → shipped | blocked | parked | cancelled`), an immutable normalized plan snapshot (Q3), and the original imported documents.
+- **ROOT LEASE:** the execution root's current holder (`driver` or `released`) and the accepted head. Only the holder writes to the root's branch (§2.4.2).
 - **PLAN** (V1 "sub-plan"): order, dependencies, status, `verification: true|false`.
 - **STEP:** index, instructions, declared gates with their specification version, expected reds, status (`pending → accepting → accepted`, or `blocked`).
 - **RUN:** one driver process lifetime. Holds PID, PGID, start time, host boot time, release version, execution root and terminal reason.
@@ -133,27 +134,72 @@ Git and SQLite cannot share a transaction, so acceptance has three phases. Each 
 
 No step is ever `accepted` without its commit, and no commit with an `ilk2-attempt` trailer is ever left without a finalized step or a recorded mismatch.
 
+### 2.4.2 Who may write the branch
+
+A consumer may also push from the execution root. gh-resolve's reap and land push the issue branch from the same worktree (gh-resolve `push.py`). Two writers on one branch would turn every consumer push into an `acceptance-mismatch` (§2.4.1). So the execution root has a lease:
+- **While the batch is `queued` or `active`,** the driver holds the lease. Only the driver commits; consumers must not push, commit or check out in that root.
+- **When the batch reaches `shipped`, `blocked`, `parked` or `cancelled`,** the driver releases the lease, after any running attempt has been stopped and recovered.
+- **`ilk2 status --json` reports** `root_lease: driver | released` and `accepted_head`, the commit SHA of the last finalized step. A consumer pushes only when the lease is `released`, and only up to `accepted_head`.
+- **`ilk2 resume` takes the lease back.** If the branch has moved since release, resume first records the consumer's commits as the new step base (a `consumer-commits` transition), so they are never mistaken for a mismatch.
+
 ## 2.5 Gates
 
-- **Declared gates are commands** with an explicit adapter (`pytest`, `vitest`, `shell`), a working directory and a time cap. They run in the worktree with a pinned environment. Each gate has a **specification version**: a hash of the adapter, command, working directory, pinned environment and the runner configuration files the adapter names.
-- **Added checks** (V1's "mention gate") come only from an adapter that can resolve the runner for that file. The vitest adapter finds the config whose `include` matches the file; the pytest adapter uses the project's rootdir. If no adapter resolves a file, no command is made, and the file is recorded as `uncovered`.
-- **Base measurement:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. The fingerprint is the exception type and the normalized first frame inside the project, so line numbers and temporary paths do not change it. After a step, a failure counts as new when:
-  - the test ID was not failing at the base;
-  - it was failing at the base but its fingerprint changed; or
-  - the test did not exist at the base and is not declared as an expected red.
+### 2.5.1 What a gate is
 
-  This is a measurement taken at the base, not reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
-- **When a step changes a gate's specification** (a new test file, a changed runner config, a new adapter), the driver measures the base again for that specification version before the gate runs. A gate whose tests do not exist at the base is not `unmeasured` there: its base measurement is "0 tests", and every collected test is new.
-- **Outcomes:** `pass`, `fail` (with the new failures), or `unmeasured` (with the reason). `unmeasured` has two kinds:
-  - **Transient:** the harness crashed or was killed by a signal, or the gate hit its own cap while the host was under load. The driver re-runs the gate once on the same tree, with no new worker attempt.
-  - **Permanent:** the runner is unknown, the command was not found, collection errored, or the second run is also unmeasured. The step is blocked with the reason. "No tests collected" is permanent only if the step declared tests for this gate.
-- **Expected reds:** a red-first step declares the test IDs it expects to fail (`expect: red`), and optionally their fingerprints. The gate then passes only if exactly those IDs fail and nothing else is new. A later step that turns them green clears the expectation. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
+- **Declared gates are commands** with an explicit adapter (`pytest` or `vitest` for test gates; `shell` for checks that are not tests), a working directory and a time cap.
+- **Package scripts are resolved.** A gate written as a package script (`bun run test:non-ui:convex`, `npm test`) is read from `package.json` and resolved to the runner command it calls, with that runner's adapter. gh-resolve's consumer gates are of this kind, with `-c tests/convex-tests/vitest.config.ts`.
+- **`shell` cannot be a test gate.** A shell gate reports no test IDs, so base exclusion and fingerprints cannot apply to it, and a shell gate that is red at the base could never pass. `ilk2 submit` rejects a step whose test gate does not resolve to a test adapter. `shell` is kept for checks with plain exit-code meaning (lint, type check, build), which must be green at the base.
+- **Each gate has a specification version:** a hash of the resolved command, adapter, working directory, pinned environment, and every configuration file that decides what runs. That includes `package.json` for a resolved script, the runner config, and any workspace or projects config.
+- **The vitest adapter** finds the owning config by evaluating each config's `include` and `exclude` against the file, and resolves workspace and projects configs. If a file matches several configs, every matching config is run. If it matches none, it is recorded as `uncovered`. Added checks (V1's "mention gate") come only from this resolution, never from a bare `vitest run`.
+- **The pytest adapter** uses the project's rootdir and its configured plugins.
+
+### 2.5.2 The pinned environment
+
+Gates run outside the worker sandbox but in a pinned environment, defined so that a test cannot see the host's ilk state:
+- `HOME` is a private directory per run, created empty, with only the files the project declares copied in.
+- All `ILK_*` and `ILK2_*` variables are removed. The paths `~/.ilk-data`, `~/.ilk` and `~/.ilk2` are therefore not reachable through `HOME`.
+- `PATH` is the project's declared `PATH` prelude plus the release's bundled tools, and nothing else.
+- Every other variable comes from an explicit per-project allow-list. Anything not listed is absent.
+
+On Oct 12, 36 V1 loop-gate reds did not reproduce in an isolated copy, because tests leaked through `ILK_SKILL_HOME`, `ILK_CODE_ROOT` and `~/.ilk-data` (gh-resolve review, finding F7).
+
+### 2.5.3 Setup hook
+
+A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). If it fails, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`.
+
+### 2.5.4 Base measurement and attribution
+
+- **The base:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. The fingerprint is the exception type and the normalized first frame inside the project, so line numbers and temporary paths do not change it.
+- **A failure is new** when its test ID was not failing at the base, when it was failing at the base but its fingerprint changed, or when the test did not exist at the base and is not declared as an expected red.
+- **Attribution to the step that caused it.** A new failure is not automatically the current step's fault: an earlier accepted step may have broken a gate that only a later step declares (gh-resolve review F8, where two 60-minute iterations went to repairing other steps' damage). When a gate shows new failures, the driver re-runs **only those failing test IDs** (the adapters select tests by ID, so this costs seconds, not a full suite) at the parent of the current step:
+  - If the failures are already there, they came from an earlier accepted step. The driver finds which one by running the gate at the earlier accepted commits, newest first, stopping at the first commit where the failure is absent. The failures are recorded against that step. The current step is judged only on failures that appear after its parent. The introducing plan gets a repair step appended through `amend` (actor `driver`, reason `regression-attributed`), and the batch cannot ship until that repair is accepted.
+  - If the failures are not at the parent, the current step introduced them, and it retries with that evidence.
+- **When a step changes a gate's specification** (a new test file, a changed runner config, `package.json`), the driver measures the base again for the new specification version before the gate runs. A gate whose tests do not exist at the base is measured as "0 tests" there, and every collected test is new.
+- This is always a fresh measurement at the base or parent, never reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
+
+### 2.5.5 Outcomes
+
+A gate's result is `pass`, `fail` (with the new failures), or `unmeasured` (with the reason).
+
+| Situation | Classified as |
+|---|---|
+| Harness crashed or killed by a signal; gate hit its own cap while the host was under load | `unmeasured`, transient. Re-run once on the same tree, with no new worker attempt |
+| A single test hit its own runner timeout (vitest `testTimeout`, pytest `--timeout`), or an xdist worker crashed | A **timeout-class failure**: its fingerprint is the class, not the first frame, which is unstable for these. That test is re-run once alone, after the gate finishes. It counts as new only if it fails again on that re-run (gh-resolve review F6: 2 of 3 consumer pre-push runs failed this way, each on a different test) |
+| Runner unknown, command not found, second run also unmeasured | `unmeasured`, permanent. The step is blocked with the reason |
+| Collection error | Recorded **per file**. A file that errors at the base too is a base failure, not a batch blocker. A file that errors only after the step is a new failure |
+| pytest exits non-zero with 0 failing tests (for example gh-resolve's D-69 unexpected-skip guard) | `fail`, with reason `nonzero-exit-no-failures` and the exit code and summary line as evidence, so the worker can see it. It is not `unmeasured`, and not a pass |
+| No tests collected | `fail` only if the step declared tests for this gate; otherwise the gate is recorded as `uncovered` |
+
+### 2.5.6 Expected reds
+
+A red-first step declares the test IDs it expects to fail (`expect: red`), and optionally their fingerprints. The gate then passes only if exactly those IDs fail and nothing else is new. A later step that turns them green clears the expectation. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
 
 ## 2.6 Worker isolation
 
 - **Private Claude config dir per run,** copied from a pinned template: model `mimo-v2.6-pro`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, the hooks, and an MCP allow-list.
 - **macOS `sandbox-exec` profile:** writes allowed only to the worktree and a per-attempt temp dir. The store, plans, `~/.ilk2/releases` and `.git` internals are read-only to the worker.
 - **A hook refuses `git commit`, `git push` and edits outside the worktree**, as a second layer behind the sandbox.
+- **The worker runs targeted tests only.** The brief tells it to run only the tests for the files it changed. A hook refuses any test command that resolves to the whole suite of a declared gate, with a message saying the driver runs that gate after the attempt. (gh-resolve review M1: the worker's own full-suite run plus the driver's gate cost about 13 minutes per iteration on rezmac. Chad approved the hook on Oct 13.)
 - **The brief** contains the step instructions, the declared gates, the previous attempt's red evidence, and paths the worker may read. It contains no plan files the worker could edit.
 - **The brief can preload context.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). That span includes model thinking, start-up, prompt processing and tool latency, not only discovery, so preloading's effect is unknown. The driver can assemble, at no model cost, the files and symbols the step names, their tests, the failing output, and the earlier steps' diff. Whether that lowers total time per accepted step is open question Q10, tested in P1 with a counterbalanced comparison over several steps.
 - **Dispatch adapter (Q1):** one interface (`start`, `resume`, `cancel`, `stream events`) with the Claude Code CLI as the baseline implementation, since it already works with MiMo. A Claude Agent SDK implementation is adopted only if P1 proves, with MiMo: compatibility, stable session identity on resume, hook parity, cancellation by process group, streaming timing metrics, and the same sandbox behaviour.
@@ -166,10 +212,14 @@ No step is ever `accepted` without its commit, and no commit with an `ilk2-attem
 
 ## 2.8 Consumer interface
 
-- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json>`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 export --v1`.
-- **Every JSON output carries `api_version`.** Breaking changes bump it, and the CLI keeps the previous version for one release.
-- **gh-resolve** submits one batch per issue, with that issue's worktree as the declared execution root (I3). The concurrency limit is per project, so several issues run in parallel with no keying workaround.
-- **Amend** is append-only and version-checked, and only changes steps that have not started (Q3).
+- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF]`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 export --v1`.
+- **Versioning.** Every JSON output carries `api_version`. A consumer may pass `--api-version N` to get an older shape. The CLI keeps every version that a registered consumer has pinned, and at least the two previous ones; `ilk2 doctor --hosts` lists each host's pinned versions. (rezmac runs a pinned gh-resolve tag, so one previous version was not enough.)
+- **`status --json` schema,** per batch: status, priority, consumer reference, terminal reason (from a fixed enum), the failing gate with its new failures and fingerprints, `root_lease`, `accepted_head`, and per accepted step its commit SHA, gate results, attempt count and release version. The per-step record is the publication evidence a consumer can cite. It replaces V1's ship-proof provenance fields.
+- **Events** carry a monotonic cursor and are kept for 30 days. A cursor older than that returns `cursor-expired`, and the consumer re-reads `status`. Every event carries the batch's consumer reference.
+- **Cancel** is terminal: it stops any running attempt as a crash would (§2.10), recovers an `accepting` step, releases the root lease, and records the reason (`issue-closed`, `claim-released`, `stand-down`, `superseded`). `--superseded-by` links the replacement batch. This replaces V1 consumers parking and unparking other masters.
+- **gh-resolve** submits one batch per issue, with that issue's worktree as the declared execution root (I3) and the issue number as consumer reference. The concurrency limit is per project, so several issues run in parallel. V1 reached that on rezmac only on Oct 12, through a per-host flag and moving `host-compat.json` aside.
+- **Amend** is append-only and version-checked, and only changes steps that have not started (Q3). The driver also amends, to append an attributed repair step (§2.5.4).
+- **Base-measurement cost is counted.** A consumer suite of about 14.5 minutes is measured at the base once per batch, and again at a parent when attribution needs it. Both appear in each batch's timings and in minutes per accepted step.
 
 ## 2.9 Observability
 
@@ -211,6 +261,9 @@ No step is ever `accepted` without its commit, and no commit with an `ilk2-attem
 | Gate running | The gate's declared cap + 5 min | The driver kills the gate's group, which counts as a transient `unmeasured`. The gate is re-run once (§2.5). The supervisor is the backstop | Driver, then supervisor |
 | Process-group termination | SIGTERM, 30 s, SIGKILL, 60 s | `blocked (unkillable)` with a `needs_human` row (§2.10) | Human |
 | SQLite busy or locked | Busy timeout of 10 s per transaction; 3 retries | The actor's operation fails with `store-busy`. A driver treats it as a stalled phase (requeue); the CLI reports it and exits non-zero | Driver or supervisor |
+| Setup hook (§2.5.3) | Declared cap, default 15 min | `blocked (setup)` with its output | Human, or the consumer (§2.11.3) |
+| Attribution walk (§2.5.4) | One run of the failing IDs per accepted commit in the batch | Recorded against the introducing step, or against the current step if no earlier commit is clean | Driver |
+| Cancel | Same as a crash: SIGTERM, 30 s, SIGKILL | `cancelled` with its reason; root lease released | Supervisor |
 | Upgrade drain | Attempt cap + 15 min | Remaining drivers are terminated and requeued (§2.7) | Supervisor |
 | Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. It probes every 30 min and creates a `needs_human` row at 6 h | Supervisor, then human |
 | Quota exhausted | Until the reported reset, or hourly probes if none is reported; 24 h at most | A `quota` refusal row, cleared by the supervisor. At 24 h it becomes `blocked (quota)` with a `needs_human` row | Supervisor, then human |
@@ -235,14 +288,22 @@ No step is ever `accepted` without its commit, and no commit with an `ilk2-attem
 
 When the batch becomes active, the driver runs the base measurement in the execution root before any worker starts. If the base is permanently `unmeasured`, the batch is `blocked (base-unmeasured)` and no model time has been spent. (V1 retro `the-gate-cannot-pass-from-the-worktree`: a batch parked four times in four hours because its gate could not pass from where the loop ran it.) A gate whose tests a later step creates is measured as "0 tests" at the base, not as unmeasured (§2.5).
 
-### 2.11.3 Telling a human
+### 2.11.3 Telling a human, or the consumer
 
 Emitting a notification does not prove anyone saw it, so the record of record is a durable **`needs_human` row**:
-- It is created once per entry into a state cleared by a human, with the reason and the command that clears it.
-- It stays open until someone runs `ilk2 ack <id>`, or the state clears (for example `ilk2 resume`).
-- Delivery goes to every configured channel: a macOS notification on the host, a `needs_human` event in `ilk2 events --json` for consumers such as gh-resolve, the top of `ilk2 status`, and one channel off the host (Q12). The off-host channel is what makes rezmac and unattended nights work.
-- Unacknowledged rows are re-sent after 4 h, then every 12 h, by the health job.
-- A state meant for a human is never retried automatically. (V1 retro `a-designed-escalation-loops`: a stop that the code called a human escalation cycled every 35 minutes until someone parked it.)
+- It is created once per entry into a state that ilk2 cannot clear itself. It records a reason from a fixed enum (`attempts`, `crash-loop`, `dependency`, `setup`, `base-unmeasured`, `acceptance-mismatch`, `unkillable`, `quota`, `api`, `regression-attributed`), the command that clears it, and the batch's consumer reference.
+- It stays open until someone runs `ilk2 ack <id>`, or the state clears (for example `ilk2 resume` or `ilk2 cancel`).
+- A `needs_human` event appears in `ilk2 events --json` and at the top of `ilk2 status` in every case.
+- A state meant for a human is never retried automatically.
+
+What happens next depends on the project's **notification policy**:
+
+| Policy | Who handles the row | Delivery | Re-sent |
+|---|---|---|---|
+| `owner` (default; projects Chad runs directly) | Chad | macOS notification on the host plus one channel off the host (Q12) | After 4 h, then every 12 h, by the health job |
+| `consumer` (resolver projects) | The consumer, for example gh-resolve | The event only. No macOS notification and no off-host page | Never. If the row is still unacknowledged after 24 h, the health job sends one off-host notice that the consumer is not handling it |
+
+**Why resolver projects never page Chad:** gh-resolve's ADR 0032, amended Sep 17, makes the merge the only human gate in the resolver pipeline. gh-resolve maps the event to its terminal `escalated` state (its `reap.py` releases the claim with `state="escalated"`), comments on the issue, writes its own ledger row, then calls `ilk2 ack`. Chad approved this policy on Oct 13. (V1 retro `a-designed-escalation-loops`: a stop that the code called a human escalation cycled every 35 minutes until someone parked it.)
 
 ### 2.11.4 The stall suite
 
@@ -268,6 +329,14 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 | S16 | Host sleeps mid-attempt for longer than the attempt cap | No `timeout` and no `stalled`; `host-slept` recorded; the attempt continues | review finding 3 |
 | S17 | Process group ignores SIGTERM | SIGKILL at 30 s; a simulated unkillable PID gives `blocked (unkillable)` | review finding 3 |
 | S18 | Store held locked by another connection | `store-busy` after the busy timeout and retries; the run is requeued, not hung | review finding 3 |
+| S19 | Step 1 breaks a test in a gate only step 3 declares | Step 3 is judged only on failures after its parent; the failure is attributed to step 1, its plan gets a repair step, and the batch ships only after the repair | gh-resolve review H2 (F8) |
+| S20 | Gate written as `bun run <script>` that calls `vitest -c <config>`; then a step edits that config | Resolved to the vitest adapter with test IDs; the config edit changes the gate version and triggers a new base measurement. A `shell` test gate is rejected at submit | gh-resolve review H3 |
+| S21 | One vitest test exceeds its own 15 s timeout under load | Timeout-class failure, re-run alone, passes; no attempt spent | gh-resolve review H6 (F6) |
+| S22 | Consumer pushes to the branch while the driver holds the lease; later pushes after release | First: the push is refused by the lease check the consumer reads, and the driver's next accept is not disturbed. Second: `resume` records the consumer's commits as the new step base, with no mismatch | gh-resolve review H4 |
+| S23 | `ilk2 cancel` mid-attempt, and while a step is `accepting` | Attempt stopped, acceptance recovered, batch `cancelled`, lease released | gh-resolve review H5 |
+| S24 | Execution root without `node_modules`, setup hook declared | Setup installs, the base measures; with a failing setup the batch is `blocked (setup)`, never `base-unmeasured` | gh-resolve review H5 |
+| S25 | A test reads `$HOME/.ilk-data` or `ILK_SKILL_HOME` | It sees an empty private `HOME` and no `ILK_*` variables | gh-resolve review H6 (F7) |
+| S26 | Resolver project (policy `consumer`) blocked | `needs_human` event with the consumer reference; no macOS or off-host page; after 24 h unacknowledged, one off-host notice | gh-resolve review M2; ADR 0032 |
 
 ### 2.11.5 Judgment calls in this section
 
@@ -281,6 +350,9 @@ Each needs data from P2 and is revisited at M1.
 - **3 restarts per step, reboot losses excluded.** Basis: matches the attempt limit (Q6). One crash is noise, three is a defect. Wrong if other host events still cause legitimate repeated losses.
 - **One re-run for a transient `unmeasured`.** Basis: a second identical failure is not transient. Wrong if load-induced gate timeouts need a quieter re-run slot, in which case wait for the host's run count to drop before re-running.
 - **Re-notify at 4 h, then every 12 h.** Basis: one working session, then twice a day. Wrong if Chad finds it noisy or too slow.
+- **Events kept 30 days; the CLI keeps every pinned `api_version` and at least two previous.** Basis: consumers poll at least daily; rezmac can lag a release. Wrong if a consumer is offline longer, or if keeping old shapes costs real code.
+- **Setup hook default cap of 15 min.** Basis: a cold `bun install` takes minutes. Wrong if first installs on rezmac exceed it.
+- **Consumer-policy fallback: one off-host notice after 24 h unacknowledged.** Basis: a consumer that stops handling rows should not leave a batch silent forever, but resolver runs must not page by default. Wrong if gh-resolve's own escalation already covers a dead consumer.
 - **Kill and requeue on supervisor restart instead of adopting** (Chad, Oct 13: "go ahead"). Basis: I4 holds with no lease or IPC code; supervisor restarts should be rare. Cost: the attempt in flight. Wrong if supervisor restarts become frequent (more than one a day); then add a driver lease and a handshake.
 
 ## 2.12 Code layout and size

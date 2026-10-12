@@ -45,7 +45,7 @@ Mechanism:
   V1's scheduler never scans `~/.ilk2`, and ilk2 never reads `~/.ilk-data`.
 - **One owner per project.** ilk2 keeps a `projects` table; V1 keeps `~/.ilk-data/projects.json`. A project is listed in exactly one of them. `ilk2 project add` refuses a repo root that V1's `projects.json` still lists.
 - **No V1 code changes are needed for coexistence.** Ownership moves by removing the project from V1's registry, after its V1 batches have shipped or been parked (step 1 of 4.3).
-- **Shared resources are the host CPU and the MiMo endpoint.** The supervisor's host limit starts at 1 concurrent run while V1 is active on the same host. That is a judgment call: it keeps V1's measured baseline comparable. It is wrong if host load measurements show headroom; then raise it.
+- **Shared resources are the host CPU and the MiMo endpoint.** Each host has two run budgets, one per engine, so neither engine starves the other. ilk2's host budget starts at **2 concurrent runs** while V1 is active on the same host, and the per-project limit decides how those runs are shared. A host limit of 1 would make the chad-mbp resolver serial for all of P5 and fail P5's own "parallel runs" criterion (gh-resolve review H1). Judgment call, approved by Chad on Oct 13. Basis: P5 needs at least two concurrent resolver runs. Wrong if host load (CPU, memory, gate times) shows V1's runs slowing measurably; then lower V1's budget, not ilk2's, or move P5 to rezmac first.
 - **Credentials:** the ilk2 worker template gets its own copy of the MiMo settings. It never reads V1 worker homes.
 
 ## 4.3 Moving one project (the handover procedure)
@@ -84,10 +84,10 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 | Phase | Exit criterion |
 |---|---|
 | P1 spike | Through the dispatch adapter with the CLI baseline: one MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. The SDK is tested against the adoption criteria in [document 2](02-architecture.md) §2.6 (Q1). The brief comparison runs over several representative V1 steps, both briefs per step, fresh worktrees and sessions, order counterbalanced ([document 3](03-v1-vs-v2.md) §3.4, Q10). A size estimate for the core is made from the spike's code. Written up in `docs/spikes/` |
-| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S18 ([document 2](02-architecture.md) §2.11.4) passes |
+| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S26 ([document 2](02-architecture.md) §2.11.4) passes |
 | P3 first real consumer | One repo that meets the criteria in Q5 (deterministic local gates, no production writes or credentials, representative multi-step work, suite under 5 min, easy rollback) ships 2 batches; metrics recorded. Provisional choice: `todo-triage`, if it meets them |
-| P4 gh-resolve dev batches | gh-resolve's own development batches run on ilk2 and meet the 4.5 targets |
-| P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs, first on chad-mbp, then rezmac |
+| P4 gh-resolve dev batches | gh-resolve's own development batches run on ilk2 and meet the 4.5 targets. These are pytest only, so before P5 the vitest/bun path must also be proven: either a vitest consumer batch, or a dry run that resolves and runs the consumer's real gate (`bun run test:non-ui:convex`) on ilk2 at an issue's base (gh-resolve review M4) |
+| P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs (at least 2 at once on the host), first on chad-mbp, then rezmac. P5 starts in **shadow mode**: for its first issues, ilk2 runs the same issue in a separate worktree alongside V1, never pushes, and its results are compared. It switches to live once the outcomes agree |
 | P7 retire | V1 scheduler disabled on both hosts; V1 planning tools emit `ilk2 submit`; V1 repo is maintenance-only |
 
 ilk-skills itself is not on the list. Its development stays on V1 until P7, and its useful V1 fixes then become ilk2 inputs only where still relevant.
@@ -122,3 +122,17 @@ ilk-skills itself is not on the list. Its development stays on V1 until P7, and 
 - **V1 keeps serving and gets only smoothness fixes** (standing rule: a smooth-to-not-smooth regression outranks feature work). Its D1/D2 work finishes as already assigned.
 - **V1 backlog rows that an ilk2 invariant makes impossible** (for example `c5a10331421dcbb8` and `aa9501b25925c890`) are tagged "superseded by ilk2". They are closed only when their project migrates, not before.
 - **gh-resolve gets an `engine: ilk | ilk2` setting** (its owner's change). Both paths keep working until P6.
+
+## 4.8 What gh-resolve needs before switching engine
+
+From gh-resolve's review (Oct 13). 28 of gh-resolve v0.106.0's 87 modules touch V1. They use plan Markdown found by run id, `last-exit.json` states, lock and pid files, ship-proof fields, `batch-gate.json`, `projects.json`, `park_master.py` and naming conventions. It never launches the loop itself.
+
+| Blocker | How ilk2 covers it |
+|---|---|
+| One engine owner per repo root ([§4.2](#42-how-the-two-engines-coexist)) | The resolver's repo switches all at once per host, after its V1 resolver runs drain. Per-issue rollback stays cheap: one issue is one batch |
+| No Markdown write-back (I2): every gh-resolve reader of plan files, `last-exit.json` and ship-proof must move | `status --json` carries status, terminal reason, failing gate, root lease, accepted head and per-step evidence ([document 2](02-architecture.md) §2.8) |
+| gh-resolve parks and unparks other masters (supersede and re-dispatch) | `ilk2 cancel --superseded-by` |
+| gh-resolve writes the registry itself | Not needed: `ilk2 submit` registers the batch; the project is registered once with `ilk2 project add` |
+| Pinned tag on rezmac | `--api-version N`; the CLI keeps every pinned version |
+| Q2, Q4, Q12 still open | Decide before P5 |
+| Host limit of 1 (H1) | Resolved: ilk2 host budget of 2 (§4.2) |

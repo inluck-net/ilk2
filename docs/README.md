@@ -31,6 +31,21 @@ Evidence in E1.
 - the Q10 comparison counterbalanced over several steps;
 - V1 status corrected in [document 1](01-why-v2.md), including new §1.4 (V1 minus its legacy paths).
 
+**Revision, Oct 13 (gh-resolve review):** reviewed by gh-resolve-e1 as the main consumer. All findings accepted after checking: ADR 0032's amendment and gh-resolve's `push.py` and `reap.py` were read, and rezmac's per-run switch was confirmed. Changes:
+- per-project notification policy: resolver projects never page;
+- the step that introduced a failure is found and gets the repair;
+- package scripts resolved to their runner; `shell` not allowed as a test gate;
+- a root lease plus `accepted_head` for consumer pushes;
+- `cancel`, priorities and a setup hook;
+- a defined pinned environment, timeout-class failures and pytest edge cases;
+- no full suites inside the worker;
+- a host budget of 2 for ilk2;
+- shadow mode for P5 and a vitest proof before it;
+- a §4.8 list of gh-resolve's blockers;
+- stall suite S1-S26.
+
+Decisions Q14-Q16 were recorded as accepted by Chad.
+
 ## Decisions already made (Chad, Oct 12, 2026)
 
 - **Mac only.** chad-mbp and rezmac; no Windows or PowerShell.

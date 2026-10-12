@@ -24,8 +24,8 @@ Each root cause below is structural: removing it needs a different shape, not a 
    *Status:* largely addressed on the managed-Mac default since v0.9.197 (code-only: the driver owns gates, commits and the advance). Still present on legacy paths, and default worker state does not yet go through CAS (backlog `0f13f9b73fe854ce`, open). The guards built against this cause (train, audit, permits) are still in place.
 2. **State lives in shell globals and in files with many writers.** This causes phase-order bugs, lost updates (`open-w-truncates-before-the-read`, `park_dead_master` rewrites after CAS) and several definitions of "this iteration's work". Sources: `design-review-pause-2026-09-28`; retro `a-subplan-with-two-names`.
    *Status:* present. Frozen per-run inputs and a journaled CAS for some writes landed in v0.9.194; the canonical context migration is open (`53e0f8975ceee8b6`).
-3. **Identity is derived, not declared.** Project key, plans dir and execution root are recomputed from paths, which produced worktree-vs-clone keys, empty plans dirs and resolver concurrency stuck at 1 on rezmac. Sources: `plans-dir-keying-has-no-read-side-seam`, `rezmac-host-compat-switch`.
-   *Status:* present. rezmac still runs with `host-compat.json`.
+3. **Identity is derived, not declared.** Project key, plans dir and execution root are recomputed from paths, which produced worktree-vs-clone keys, empty plans dirs and resolver concurrency stuck at 1 on rezmac until Oct 12. Sources: `plans-dir-keying-has-no-read-side-seam`, `rezmac-host-compat-switch`.
+   *Status:* present. rezmac reached per-run keys only on Oct 12 at 23:53, by setting a per-host flag (`ilk_project_per_run` in gh-resolve's config) and moving `host-compat.json` aside. Identity is still derived; the flag changes how it is derived. A live run of two concurrent resolver issues is still pending.
 4. **Liveness is guessed.** pgrep, argv patterns, PID files and wrapper PIDs: kills miss process groups, the scheduler races the postmortem, and a guard cannot tell a fixture from a real loop. Sources: `agent-kill-misses-gtimeout-pgid`, `runner-launched-pid-is-a-wrapper`, `scheduler-races-the-postmortem-writer`.
    *Status:* partly addressed (run registry on most paths since Oct 12); remaining readers open (`c42945c349bea1d9`).
 5. **Gates are fragile.** Some gates pass vacuously; some can never pass because of reds already at base. Some added checks guess at the test runner, and "could not measure" gets read as red or green. Sources: `step-heading-colon-makes-gates-vacuous`, `verify-step1-pytest-gate-cannot-pass-a-base-red`; retro `a-gate-that-could-not-pass-read-as-a-timeout`; backlog `a4293ee802516895`.
@@ -52,7 +52,7 @@ The two problems felt most are **stuck loops** and **slow steps**, and they have
 
 This is the strongest alternative, and since v0.9.197 it is a real one. Deleting V1's legacy worker paths would finish root cause 1 and shrink the runner. It would not address:
 - **The refusal guards** (train, audit, permits), which are scheduler-level and still apply under code-only, and were 69-74% of refused hours.
-- **Derived identity** (root cause 3), which still needs `host-compat.json` on rezmac and keeps the resolver serial.
+- **Derived identity** (root cause 3). Per-run keys now work on rezmac, but through a per-host flag and a moved compatibility file, after weeks of the resolver running serially.
 - **Guessed liveness** (root cause 4) in the readers that remain.
 - **Fragile gates** (root cause 5): base reds by test ID only, and an added check that guesses the runner.
 - **A Bash orchestrator of about 8.7k lines** (root cause 7), with no bound or progress guarantee for its own phases.
