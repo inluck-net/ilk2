@@ -194,6 +194,11 @@ class Supervisor:
         except Conflict:
             return
         self.s.event("run.lost", {"run": run["id"], "reason": reason}, batch_id=run["batch_id"])
+        for a in self.s.all("SELECT id FROM attempts WHERE run_id = ? AND status = 'running'", run["id"]):
+            # the attempt in flight is the cost of a lost run (§2.10); close it as interrupted
+            self.s.transition("attempts", a["id"], "done", actor="supervisor", reason=reason,
+                              fields={"outcome": "interrupted", "reason": reason,
+                                      "ended_at": clock.wall()})
         batch = self.s.get("batches", run["batch_id"])
         if batch["status"] != "active":
             return

@@ -394,3 +394,15 @@ def test_s27_host_load_refuses_then_clears(stall, monkeypatch):
                   (sp.b.load_timeout_window + 1,))
     assert until(sp, lambda: status(stall, bid) == "shipped")
     assert stall.s.open_refusals(bid) == []
+
+
+def test_lost_run_closes_its_running_attempt(stall):
+    stall.script([{"sleep": 30}, GOOD])
+    bid = stall.submit(one_step())
+    sp = sup(stall)
+    assert until(sp, lambda: stall.s.one("SELECT 1 FROM attempts WHERE status = 'running'"), timeout=30)
+    run = stall.s.one("SELECT * FROM runs WHERE batch_id = ? AND status != 'ended'", bid)
+    sp.kill_run(run)
+    sp.end_and_requeue(run, "lost")
+    a = stall.s.one("SELECT * FROM attempts WHERE run_id = ?", run["id"])
+    assert a["status"] == "done" and a["outcome"] == "interrupted"
