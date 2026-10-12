@@ -1,0 +1,26 @@
+# M1 build progress (P2)
+
+Working log for building the core toward M1 ([document 4](04-v1-relation-and-migration.md) §4.4). It is updated at each commit, and a resuming session starts here. The design is in documents 2-6; this file only tracks what exists and what is next.
+
+Started Oct 13, 2026, while P1 step 4 ran. Chad authorized building unattended, with the builder's recommendations taken as decisions. Every judgment call is labelled in code or commit text.
+
+## Order of work
+
+| # | Module | Status | Tests |
+|---|---|---|---|
+| 1 | `store.py`: schema, CAS transitions, events, `needs_human`, refusals | done (leases in 6) | tests/test_store.py (8) |
+| 2 | `plans.py`: V1 Markdown and JSON import, submit checks | done | tests/test_plans.py (7) |
+| 3 | `gates/`: pytest adapter, spec versions, pinned env, base measurement, fingerprints, outcomes | — | — |
+| 4 | `worker.py`: graduate the P1 CLI adapter, sandbox, hook, brief | — | — |
+| 5 | `driver.py`: step lifecycle, retries, acceptance protocol and recovery, phase events | — | — |
+| 6 | `supervisor.py`: queue, admission, spawn, stall checks, reconcile | — | — |
+| 7 | `health.py`, `notify.py` | — | — |
+| 8 | `cli.py`: project add, submit, status, events, park/resume/amend/ack/cancel, lease | — | — |
+| 9 | `release.py`: build, install, launchd | — | — |
+| 10 | Stall suite S1-S27, with a stub worker | — | — |
+| 11 | M1 run: throwaway consumer, 3-step batch, unattended, supervisor kill mid-batch | — | — |
+
+## Decisions taken while building (judgment calls)
+
+- Q1: CLI dispatch, no SDK, for M1 (P1 step 2; `spikes/p1/findings.md`).
+- Tests use a stub worker (a fake `claude` that emits stream-json), so the stall suite runs without MiMo. Live MiMo is used only for the M1 run.
