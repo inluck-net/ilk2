@@ -17,6 +17,11 @@ Draft for Chad's review, Oct 12, 2026. Author: Claude Code session ilk-skills-aa
 
 Evidence in E1.
 
+**Revision, Oct 13:** a progress guarantee, from Chad's question on how a batch is kept from getting stuck:
+- invariant I11 (every non-terminal state is bounded);
+- [document 2](02-architecture.md) §2.11: bounds table, checks at submission, notification, and the stall suite S1-S12 required for M1;
+- Q11-Q12.
+
 ## Decisions already made (Chad, Oct 12, 2026)
 
 - **Mac only.** chad-mbp and rezmac; no Windows or PowerShell.

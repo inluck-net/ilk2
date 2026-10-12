@@ -18,6 +18,7 @@ These are the rules every component must keep. Each one exists because V1 broke 
 | I8 | **One language (Python 3.12), one platform (macOS).** | 7 |
 | I9 | **Every terminal state has a named reason.** No state is "stuck" without a reason a human can read in `ilk2 status`. | Today's #8309 deadlock and "timeout" mislabel |
 | I10 | **Every refusal to dispatch queued work is a recorded row.** The row names the reason, the action that clears it, and who takes that action (`supervisor`, `driver` or `human`). Refused hours are reported. A refusal whose clearing action is `supervisor` or `driver` must clear without a human. No guard exists only to re-check what the driver already wrote. | V1 refused queued work for about 0.8 h per hour worked ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) |
+| I11 | **Every non-terminal state has a time bound and an action when the bound passes.** The action is automatic, or it names a human and notifies them. Every retry loop has a counted limit. The full table is §2.11. | V1's stalls: a hung runner, escalation loops, relaunch storms, a blocked dependency re-dispatched all night (§2.11) |
 
 ## 2.2 Components
 
@@ -113,7 +114,10 @@ What this removes from V1:
 - **Declared gates are commands** with an explicit adapter (`pytest`, `vitest`, `shell`), a working directory and a time cap. They run in the worktree with a pinned environment.
 - **Added checks** (V1's "mention gate") come only from an adapter that can resolve the runner for that file. The vitest adapter finds the config whose `include` matches the file; the pytest adapter uses the project's rootdir. If no adapter resolves a file, no command is made, and the file is recorded as `uncovered`.
 - **Base measurement:** once per batch, the driver runs the declared gates at the batch base and records the failing test IDs. A step fails only on test IDs not in that set. This is a measurement taken at the base, not reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
-- **Outcomes:** `pass`, `fail` (with introduced IDs), or `unmeasured` (with the reason). `unmeasured` blocks the step with that reason.
+- **Outcomes:** `pass`, `fail` (with introduced IDs), or `unmeasured` (with the reason). `unmeasured` has two kinds:
+  - **Transient:** the harness crashed or was killed by a signal, or the gate hit its own cap while the host was under load. The driver re-runs the gate once on the same tree, with no new worker attempt.
+  - **Permanent:** no tests were collected, the runner is unknown, the command was not found, or the second run is also unmeasured. The step is blocked with the reason.
+- **Expected reds:** a red-first step declares the test IDs it expects to fail (`expect: red`). The gate then passes only if exactly those IDs fail and nothing else regresses. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
 
 ## 2.6 Worker isolation
 
@@ -152,12 +156,83 @@ What this removes from V1:
 
 | Event | Behaviour |
 |---|---|
-| Supervisor restarts | Reads runs in non-terminal state. For each one, checks PID plus start time. If alive, it adopts the driver; if gone, it marks the run `lost` and requeues the batch from its last accepted step. |
+| Supervisor restarts | Reads runs in non-terminal state. For each one, checks PID plus start time. If alive, it adopts the driver; if gone, it marks the run `lost` and requeues the batch from its last accepted step. Each requeue counts against that step's restart limit (§2.11). |
 | Driver crashes mid-attempt | The supervisor sees the exit. The attempt is recorded `interrupted`. The worktree is kept for diagnosis, and the next run starts from the last accepted commit. |
 | Worker hangs | The driver kills the worker's process group at the attempt time cap. The outcome is `timeout`, and only then. |
 | Host reboot | launchd starts the supervisor, and the same reconciliation runs. |
 
-## 2.11 Code layout and size budget
+## 2.11 Progress guarantee
+
+**The promise:** a submitted batch either moves forward, or stops in a named state whose clearing actor has been told. No state waits without a bound (I9, I10, I11).
+
+### 2.11.1 Bounds
+
+| State or phase | Bound | When the bound passes | Who acts |
+|---|---|---|---|
+| Driver phase: prepare, scope check or commit | 10 min each | The supervisor kills the driver's process group. The run ends `stalled (<phase>)`, and the batch is requeued from its last accepted step | Supervisor |
+| Dispatch (worker running) | Attempt cap (Q7) + 5 min | The driver kills the worker's group at the cap: outcome `timeout`. If the driver misses the grace period, the supervisor treats it as a stalled phase | Driver, then supervisor |
+| Gate running | The gate's declared cap + 5 min | The driver kills the gate's group, which counts as a transient `unmeasured`. The gate is re-run once (§2.5). The supervisor is the backstop | Driver, then supervisor |
+| Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. The supervisor probes every 30 min and notifies once at 6 h | Supervisor |
+| Quota exhausted | Until the reported reset, or hourly probes if none is reported | A `quota` refusal row, cleared by the supervisor. Notifies once | Supervisor |
+| Attempts on one step | 3 (Q6) | Step `blocked (attempts)`, with the red evidence of each attempt | Human, notified |
+| Restarts of one step (run lost, interrupted or stalled) | 3 | Step `blocked (crash-loop)`, with all three reasons | Human, notified |
+| Plan whose dependency is blocked | Immediate | `blocked (dependency: <plan>)`. Independent plans keep running | Clears when the blocking plan clears |
+| Batch with nothing runnable | Immediate | Batch `blocked`, listing each blocked plan and its reason | Human, notified |
+| Queued but refused (I10) | Re-evaluated every tick | Rows cleared by the supervisor re-check themselves. Rows cleared by a human notify when created | Per row |
+| Parked | None: explicit human state | Shown at the top of `ilk2 status` | Human |
+
+**How the supervisor sees a stall:** the driver writes an event to the store at the start and end of every phase. Every 30 s the supervisor compares the age of the current phase with its bound. The heartbeat is the phase event itself, not a timer thread. A timer thread keeps beating while the main loop is hung, so it would hide the stall; V1's retro `the-ledger-spawn-held-the-runner` is a runner held by a child process it had started in the background.
+
+### 2.11.2 Checks at submission and activation
+
+`ilk2 submit` rejects a batch before it is queued, with every reason listed, when:
+- a step declares no gate (vacuous; V1 memory `step-heading-colon-makes-gates-vacuous`);
+- a declared gate resolves to no adapter, or its executable is not on the pinned `PATH` in the execution root;
+- a plan dependency names a missing plan or forms a cycle;
+- the execution root is missing, or is not a git worktree of the project.
+
+When the batch becomes active, the driver runs the base measurement in the execution root before any worker starts. If the base is permanently `unmeasured`, the batch is `blocked (base-unmeasured)` and no model time has been spent. (V1 retro `the-gate-cannot-pass-from-the-worktree`: a batch parked four times in four hours because its gate could not pass from where the loop ran it.)
+
+### 2.11.3 Telling a human
+
+Entering any state cleared by a human does three things, once per entry, not once per tick:
+- posts a macOS notification on the host;
+- writes a `needs_human` event to `ilk2 events --json`, where consumers such as gh-resolve can react;
+- puts the state at the top of `ilk2 status`.
+
+A state meant for a human is never retried automatically. (V1 retro `a-designed-escalation-loops`: a stop that the code called a human escalation cycled every 35 minutes until someone parked it.)
+
+### 2.11.4 The stall suite
+
+Each case injects one fault into a throwaway batch. M1 requires all of them to pass ([document 4](04-v1-relation-and-migration.md) §4.4).
+
+| # | Fault injected | Expected result | V1 source |
+|---|---|---|---|
+| S1 | Driver's main loop hangs in prepare | `stalled (prepare)`, requeued, the step then ships | retro `the-ledger-spawn-held-the-runner` |
+| S2 | Worker hangs | `timeout` at the cap, killed by process group, named as a timeout and nothing else | retro `a-hard-stop-disguised-as-a-timeout` |
+| S3 | Gate ignores its cap | Killed, transient `unmeasured`, re-run once | retro `a-verify-that-cannot-fit-its-own-gate` |
+| S4 | Gate runner missing | `unmeasured` (permanent), blocked at once, 0 further attempts | retro `a-gate-that-could-not-pass-read-as-a-timeout` |
+| S5 | API returns 429 and 5xx for 10 min | No attempt counted; the step continues afterwards | memory `exit-state-vocabulary-is-under-declared` (quota) |
+| S6 | Driver killed at every start | `blocked (crash-loop)` after 3 restarts, one notification | memory `relaunch-fixes-state-not-step-design` (a second failure at the same step is a design defect, not something to relaunch) |
+| S7 | One plan blocked, another depends on it, a third is independent | Dependent is `blocked (dependency)`, the independent plan ships, the batch ends `blocked`, one notification | memory `blocked-dependent-is-not-runnable` |
+| S8 | Red-first step | Passes with its declared expected reds | retro `a-red-first-step-gated-on-green` |
+| S9 | Step with no gate; gate executable missing | Rejected at submit, no run created | memory `step-heading-colon-makes-gates-vacuous` |
+| S10 | Base cannot be measured in the execution root | `blocked (base-unmeasured)` before any dispatch | retro `the-gate-cannot-pass-from-the-worktree` |
+| S11 | Supervisor killed mid-batch | Driver adopted or run requeued; the batch ships (existing M1 case) | memory `runner-launched-pid-is-a-wrapper` |
+| S12 | A state cleared by a human, held for 30 min | Exactly one notification, 0 automatic retries | retro `a-designed-escalation-loops` |
+
+### 2.11.5 Judgment calls in this section
+
+Each needs data from P2 and is revisited at M1.
+- **Phase bound of 10 min** for prepare, scope check and commit. Basis: these do git and store work only. Wrong if large repos make a normal prepare take longer; then derive the bound per project from measured phase times.
+- **5 min grace** after the attempt and gate caps. Basis: process-group kill and cleanup take seconds. Wrong if `stalled` fires on runs that were about to finish.
+- **30 s supervisor tick.** Basis: it is cheap, and it is fine-grained compared with any bound. Wrong if store contention shows up in the timings.
+- **API backoff of 1-30 min with a 2 h budget per run**, notifying at 6 h. Basis: V1 outages were either minutes long or quota resets. Wrong if MiMo outages often last 2-6 h; then notify sooner.
+- **3 restarts per step.** Basis: matches the attempt limit (Q6). One crash is noise, three is a defect. Wrong if host sleep or reboots cause legitimate repeated losses; then exclude host-reboot losses from the count.
+- **One re-run for a transient `unmeasured`.** Basis: a second identical failure is not transient. Wrong if load-induced gate timeouts need a quieter re-run slot, in which case wait for the host's run count to drop before re-running.
+- **Line budget unchanged at about 4.7k.** Basis: these checks are table-driven and live in the supervisor (stall check, notifications), the driver (re-run, expected reds) and the plan importer (submit checks). Wrong if supervisor plus driver pass about 1.8k lines at M1; then the size kill criterion in [document 4](04-v1-relation-and-migration.md) §4.6 applies.
+
+## 2.12 Code layout and size budget
 
 | Module | Purpose | Budget (lines) | Seed from V1 |
 |---|---|---:|---|

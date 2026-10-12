@@ -82,7 +82,7 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 | Phase | Exit criterion |
 |---|---|
 | P1 spike | One MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. Minutes to first edit and thinking time are recorded for one real V1 step, run once with a discovery brief and once with a preloaded brief ([document 3](03-v1-vs-v2.md) §3.4). Written up in `docs/spikes/` |
-| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered |
+| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S12 ([document 2](02-architecture.md) §2.11.4) passes |
 | P3 first real consumer | One low-risk repo (candidates: `gh-triage`, `todo-triage`) ships 2 batches; metrics recorded |
 | P4 gh-resolve dev batches | gh-resolve's own development batches run on ilk2 and meet the 4.5 targets |
 | P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs, first on chad-mbp, then rezmac |
@@ -98,6 +98,8 @@ ilk-skills itself is not on the list. Its development stays on V1 until P7, and 
 | Share of attempts that produce nothing | 1/5 to 3/8 | Below V1 for the same project |
 | Human transitions per batch | Several (owner re-plans, gate repairs) | 0 for M1; at most 1 per batch from P3 on, each with a recorded reason |
 | Silent stuck states | Occurred (#8309 deadlock, mislabelled timeouts) | 0: every terminal state has a reason (I9) |
+| Bound passed without an action | Not measurable in V1: no bounds were declared | 0. Every non-terminal state past its bound has a recorded action (I11), checked from the journal |
+| Human waits | Found by someone looking | 1 notification per state cleared by a human; median minutes from notification to clearing reported |
 | Refused hours per hour worked (queued, not dispatched) | ≈0.8 on both projects, chad-mbp, Sep 15 to Oct 12 ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) | 0 refusals without a named clearing action and actor (I10). The numeric target is set from M1 data, not before |
 | Minutes to first edit, per attempt | Oct 12: 416 of 998 iteration minutes (42%) passed before the first edit; mean ≈17 min over 24 iterations | Measured in P1 on one step. The target is set from that measurement, then held from P3 on |
 
