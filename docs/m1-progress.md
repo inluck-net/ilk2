@@ -18,7 +18,18 @@ Started Oct 13, 2026, while P1 step 4 ran. Chad authorized building unattended, 
 | 8 | `cli.py`: drive, supervise, health, project add, submit (JSON / V1), status, events, park, resume, cancel, amend (Q3 journal), ack, lease, report, release, doctor | done | test_release (CLI smoke), test_driver (amend) |
 | 9 | `release.py`: build (uv venv + wheel + manifest), install (atomic `current`, launchd plists), upgrade drain; `doctor` | done | tests/test_release.py (drain x2, build+install, CLI smoke) |
 | 10 | Stall suite S1-S27, with a stub worker | all 27 have a passing test | test_stall (16), test_vitest (S20, S21), test_driver, test_gates, test_worker, test_plans |
-| 11 | M1 run: throwaway consumer, 3-step batch, unattended, supervisor kill mid-batch | — | — |
+| 11 | M1 run: throwaway consumer, 3-step batch, unattended, supervisor kill mid-batch | **met** Oct 13 04:24 (see below) | `~/.ilk2/m1/verify.py` |
+
+## M1 result (Oct 13, chad-mbp, release 0.1.0+g955f5eda under launchd, MiMo mimo-v2.6-pro)
+
+Batch `b-26687da364b1` on the throwaway consumer `~/.ilk2/m1/consumer` (todo-lite, 3 steps with pinned tests). Checked independently by `~/.ilk2/m1/verify.py`:
+- 3 of 3 steps accepted; 3 commits on the branch, all with `ilk2-attempt` trailers; the branch head is the last step's commit; the worktree is clean;
+- 0 human transitions, 0 needs_human rows;
+- the supervisor was killed with SIGKILL during step 2's dispatch (04:21:32). launchd restarted it, reconcile marked run `r-32f0460ee630` lost and requeued it, and run `r-36c98ec6fd2c` shipped the batch;
+- the consumer's own suite passes at the final head (7 passed), run outside ilk2;
+- the stall suite S1-S27 passes in CI.
+
+The first M1 attempt (`b-1b3841db9323`) found a bug (docs/06 B5: the scope check read `odo.py`) and was cancelled by hand. That is the one human transition of the day, outside the batch that met the criterion.
 
 ## Known gaps
 

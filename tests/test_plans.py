@@ -70,3 +70,13 @@ def test_v1_subplan_import():
     assert "--deselect" in p.steps[1].gates[0].command
     assert p.steps[1].scope
     assert plans.check(plans.BatchSpec(plans=[p])) == []
+
+
+def test_v1_remove_every_xfail_maps_to_file_must_pass():
+    text = ('---\nplan: x\n---\n### Step 1 — fix\n\n```yaml\nlocal_checks:\n'
+            '  - command: "python3 -m pytest skills/a/tests/test_x.py skills/a/tests/test_y.py -q"\n'
+            '    timeout: 300\n```\n\n- Implement it. Remove every xfail.\n')
+    p = plans.parse_v1_subplan(text)
+    assert p.steps[0].must_pass == ["skills/a/tests/test_x.py"]
+    partial = text.replace("Remove every xfail", "Remove AC-1's xfail")
+    assert plans.parse_v1_subplan(partial).steps[0].must_pass == []

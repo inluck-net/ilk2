@@ -322,7 +322,12 @@ def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] |
     missing_reds = [t for t in expect if t not in current.failures]
     passed = set(current.passed)
     for t in must_pass or []:
-        if t not in passed and t not in new:
+        if "::" not in t:  # a whole file: at least one test in it passed and none failed
+            ok = any(p.startswith(t + "::") for p in passed) and \
+                not any(f.startswith(t + "::") for f in current.failures)
+        else:
+            ok = t in passed
+        if not ok and t not in new:
             new.append(t)  # this step must make it pass: failing, absent or uncollected all fail
     if current.outcome == "fail" and current.reason == "no-tests":
         return Verdict("fail", [f"{current.gate}::<no-tests>"], "no-tests")

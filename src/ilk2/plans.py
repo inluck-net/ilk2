@@ -165,7 +165,14 @@ def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
                       command=shlex.split(c.replace('\\"', '"')),
                       cap_s=int(t) if t else DEFAULT_GATE_CAP_S)
                  for j, (c, t) in enumerate(_CMD.findall(sec))]
-        steps.append(Step(title=h.group(2).strip(),
+        # "Remove every xfail" (all of the pinned file's tests must now pass) -> must_pass on the
+        # first local_checks path. A partial "Remove AC-1's xfail" needs ids; left to the author.
+        must = []
+        if re.search(r"remove (every|all)( the)? xfails?", sec, re.I) and gates:
+            first = next((a for a in gates[0].command[1:] if a.endswith(".py") and "/" in a), None)
+            if first:
+                must = [first]
+        steps.append(Step(must_pass=must, title=h.group(2).strip(),
                           instructions=(preamble.strip() + "\n\n### " + h.group(0)[4:] + sec).strip(),
                           gates=gates, scope=list(fm.get("scope_paths") or [])))
     deps = fm.get("depends_on") or []

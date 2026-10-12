@@ -176,3 +176,16 @@ def test_must_pass_requires_a_passing_test_not_just_no_failure(tmp_path):
     base = r.failure_map()  # same collect error at the base: not new
     v = gates.judge(r, base, must_pass=["tests/test_new.py::test_new"])
     assert v.outcome == "fail" and "tests/test_new.py::test_new" in v.new_failures
+
+
+def test_must_pass_file_entry_means_every_test_in_it(tmp_path):
+    root = project(tmp_path, {"tests/test_f.py": "def test_a():\n    pass\ndef test_b():\n    assert 0\n"})
+    r = m(gate("tests/test_f.py"), root, tmp_path)
+    assert gates.judge(r, r.failure_map(), must_pass=["tests/test_f.py"]).outcome == "fail"
+    (root / "tests/test_f.py").write_text("def test_a():\n    pass\ndef test_b():\n    pass\n")
+    r2 = m(gate("tests/test_f.py"), root, tmp_path)
+    assert gates.judge(r2, r.failure_map(), must_pass=["tests/test_f.py"]).outcome == "pass"
+    (tmp_path / "x").mkdir()
+    root2 = project(tmp_path / "x", {"tests/__init__.py": ""})
+    r3 = m(gate("tests/test_none.py"), root2, tmp_path)  # file absent: nothing passed
+    assert gates.judge(r3, {}, must_pass=["tests/test_none.py"]).outcome == "fail"
