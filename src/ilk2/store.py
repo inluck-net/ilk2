@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS refusals (
 CREATE TABLE IF NOT EXISTS root_leases (
   root TEXT PRIMARY KEY, holder TEXT NOT NULL, owner TEXT, generation INTEGER NOT NULL,
   expiry_wall REAL, expected_head TEXT, accepted_head TEXT, updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS amendments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL REFERENCES batches(id),
+  actor TEXT NOT NULL, reason TEXT NOT NULL, ops TEXT NOT NULL,
+  batch_version_before INTEGER NOT NULL, batch_version_after INTEGER NOT NULL, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS supervisor (
   id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER, proc_start TEXT, boot_time INTEGER,
   release TEXT, tick_wall REAL, tick_mono REAL, started_wall REAL, kickstarts TEXT);

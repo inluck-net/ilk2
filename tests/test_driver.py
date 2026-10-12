@@ -163,3 +163,26 @@ def test_s14_crash_points_recover_without_duplicates(ilk):
         b = ilk.s.get("batches", bid)
         assert len(commits_with_trailer(ilk, b["execution_root"], b["branch"])) == 1, point
         assert ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)["accepted_commit"]
+
+
+def test_amend_pending_only_version_checked_and_journalled(ilk):
+    import pytest
+    from ilk2 import batches
+    from ilk2.store import Conflict
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    v = ilk.s.get("batches", bid)["version"]
+    sid = ilk.s.one("SELECT id FROM steps WHERE batch_id = ?", bid)["id"]
+    v2 = batches.amend(ilk.s, bid, [{"op": "replace", "step": sid, "instructions": "new words"},
+                                    {"op": "add", "plan": "p", "title": "more", "instructions": "x",
+                                     "gates": [gate("tests/test_calc.py")]}], expect_version=v)
+    assert ilk.s.get("steps", sid)["instructions"] == "new words"
+    assert ilk.s.one("SELECT COUNT(*) n FROM steps WHERE batch_id = ?", bid)["n"] == 2
+    with pytest.raises(Conflict):  # stale version
+        batches.amend(ilk.s, bid, [{"op": "replace", "step": sid, "title": "t"}], expect_version=v)
+    ilk.s.update("steps", sid, {"attempt_count": 1}, actor="test", reason="started")
+    with pytest.raises(batches.SubmitRejected):  # started steps cannot change
+        batches.amend(ilk.s, bid, [{"op": "replace", "step": sid, "title": "t"}], expect_version=v2)
+    assert ilk.s.one("SELECT COUNT(*) n FROM amendments WHERE batch_id = ?", bid)["n"] == 1
+    assert "plans" in ilk.s.get("batches", bid)["snapshot"]  # the submitted snapshot is untouched

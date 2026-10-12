@@ -65,7 +65,8 @@ def status(s, batch_id: str | None) -> dict:
             plans.append({"slug": p["slug"], "status": p["status"],
                           "blocked_reason": p["blocked_reason"], "steps": steps})
         lr = lease.get(s, b["execution_root"])
-        out.append({"id": b["id"], "project": b["project_id"], "status": b["status"],
+        out.append({"id": b["id"], "version": b["version"], "project": b["project_id"],
+                    "status": b["status"],
                     "priority": b["priority"], "consumer_ref": b["consumer_ref"],
                     "terminal_reason": b["terminal_reason"], "blocked_reason": b["blocked_reason"],
                     "base": b["base_commit"], "branch": b["branch"],
@@ -170,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("batch")
     cn.add_argument("--reason", default="human")
     cn.add_argument("--superseded-by")
+    am = sub.add_parser("amend")
+    am.add_argument("batch")
+    am.add_argument("--file", required=True, help="JSON list of ops")
+    am.add_argument("--version", type=int, required=True, help="batch version from status --json")
+    am.add_argument("--reason", default="amend")
     ak = sub.add_parser("ack")
     ak.add_argument("id")
     ak.add_argument("--by", default="human")
@@ -260,6 +266,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(batches.resume(s, a.batch)))
         elif a.cmd == "cancel":
             batches.cancel(s, a.batch, a.reason, a.superseded_by)
+        elif a.cmd == "amend":
+            v = batches.amend(s, a.batch, json.loads(Path(a.file).read_text()),
+                              expect_version=a.version, reason=a.reason)
+            _out({"version": v}, True)
         elif a.cmd == "ack":
             s.ack(a.id, a.by)
         elif a.cmd == "lease":

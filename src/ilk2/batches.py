@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import clock, gitops, lease, paths, plans
-from .store import Store, dumps, new_id
+from .store import Conflict, Store, dumps, new_id
 
 DEFAULT_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
@@ -181,3 +181,68 @@ def cancel(s: Store, batch_id: str, reason: str, superseded_by: str | None = Non
                                  gitops.branch_head(Path(b["execution_root"]), b["branch"]))
         s.clear_needs_human(batch_id)
     s.event("cancelled", {"reason": reason, "superseded_by": superseded_by}, batch_id=batch_id)
+
+
+def amend(s: Store, batch_id: str, ops: list[dict], *, expect_version: int, actor: str = "human",
+          reason: str = "amend") -> int:
+    """Amend pending steps (Q3): version-checked against the batch, journalled in an
+    append-only table; the submitted snapshot is never edited. Ops:
+      {"op": "replace", "step": <step id>, "instructions"?, "gates"?, "must_pass"?, "scope"?, "title"?}
+      {"op": "add", "plan": <slug>, "title", "instructions", "gates", ...}  (appended to the plan)
+    Returns the new batch version."""
+    problems = []
+    with s.tx() as c:
+        b = c.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        if b["version"] != expect_version:
+            raise Conflict(f"batch version is {b['version']}, not {expect_version}")
+        if b["status"] in ("shipped", "cancelled"):
+            raise Conflict(f"batch is {b['status']}")
+        for op in ops:
+            if op.get("op") == "replace":
+                st = c.execute("SELECT * FROM steps WHERE id = ? AND batch_id = ?",
+                               (op["step"], batch_id)).fetchone()
+                if st is None or st["status"] != "pending" or st["attempt_count"] > 0:
+                    problems.append(f"step {op['step']} has started or does not exist")
+                    continue
+                fields = {}
+                for k in ("title", "instructions", "scope", "must_pass"):
+                    if k in op:
+                        fields[k] = op[k] if k in ("title", "instructions") else dumps(op[k])
+                if "gates" in op:
+                    spec = plans.from_dict({"plans": [{"slug": "x", "steps": [
+                        {"instructions": "x", "gates": op["gates"]}]}]})
+                    probs = plans.check(spec)
+                    problems += [f"step {op['step']}: {p}" for p in probs]
+                    fields["gates"] = dumps([asdict(g) for g in spec.plans[0].steps[0].gates])
+                if fields and not problems:
+                    s.update("steps", st["id"], fields, actor=actor, reason=f"amend: {reason}")
+            elif op.get("op") == "add":
+                p = c.execute("SELECT * FROM plans WHERE batch_id = ? AND slug = ?",
+                              (batch_id, op["plan"])).fetchone()
+                if p is None or p["status"] == "shipped":
+                    problems.append(f"plan {op['plan']} is missing or shipped")
+                    continue
+                spec = plans.from_dict({"plans": [{"slug": op["plan"], "steps": [op]}]})
+                probs = plans.check(spec)
+                if probs:
+                    problems += probs
+                    continue
+                stp = spec.plans[0].steps[0]
+                idx = c.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM steps WHERE plan_id = ?",
+                                (p["id"],)).fetchone()[0]
+                s.insert("steps", {"id": f"{p['id']}.{idx}", "plan_id": p["id"], "batch_id": batch_id,
+                                   "idx": idx, "title": stp.title, "instructions": stp.instructions,
+                                   "gates": dumps([asdict(g) for g in stp.gates]),
+                                   "expected_reds": dumps(stp.expect_red), "scope": dumps(stp.scope),
+                                   "must_pass": dumps(stp.must_pass), "status": "pending"})
+            else:
+                problems.append(f"unknown op {op.get('op')!r}")
+        if problems:
+            raise SubmitRejected(problems)
+        s.update("batches", batch_id, {"priority": b["priority"]}, actor=actor, reason=f"amend: {reason}")
+        after = expect_version + 1
+        c.execute("INSERT INTO amendments(batch_id, actor, reason, ops, batch_version_before, "
+                  "batch_version_after, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (batch_id, actor, reason, dumps(ops), expect_version, after, clock.wall()))
+        s.event("amended", {"ops": len(ops), "version": after}, batch_id=batch_id)
+        return after
