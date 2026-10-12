@@ -30,7 +30,16 @@ def check(s: Store, b: bounds.Bounds | None = None) -> dict:
     now_w, now_m = clock.wall(), clock.mono()
     stale = None
     if row is None or row["tick_wall"] is None:
-        stale = "never ticked"
+        # Not stale yet: a supervisor launchd is starting gets the start-up bound to its first
+        # tick, counted from when this job first saw it un-ticked (§2.11.1). Kickstarting at
+        # first sight killed the supervisor mid-start on the first real install (Oct 13).
+        first = s.one("SELECT value FROM meta WHERE key = 'health_first_unticked'")
+        if first is None:
+            with s.tx() as c:
+                c.execute("INSERT INTO meta(key, value) VALUES ('health_first_unticked', ?)",
+                          (str(now_w),))
+        elif now_w - float(first["value"]) > b.supervisor_startup:
+            stale = f"never ticked in {b.supervisor_startup:.0f}s"
     else:
         same_boot = row["boot_time"] == clock.boot_time()
         age = (now_m - row["tick_mono"]) if same_boot else (now_w - row["tick_wall"])
