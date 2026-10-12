@@ -53,8 +53,8 @@ class Env:
 
     def project(self, **cfg) -> str:
         cfg.setdefault("sandbox_allow", [str(self.tmp)])  # the stub's call counter lives here
-        c = batches.ProjectConfig(claude_bin=STUB, path_prelude=[PY_BIN, "/usr/bin", "/bin"],
-                                  **cfg)
+        cfg.setdefault("path_prelude", [PY_BIN, "/usr/bin", "/bin"])
+        c = batches.ProjectConfig(claude_bin=STUB, **cfg)
         batches.project_add(self.s, "proj", self.repo, c)
         return "proj"
 

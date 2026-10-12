@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..plans import Gate
+from . import vitest
 from .fingerprint import fingerprint, is_timeout_class, normalize_message
 
 PLUGIN_DIR = Path(__file__).parent
@@ -63,7 +64,8 @@ class GateRun:
 
 def spec_version(gate: Gate, root: Path, env: dict[str, str]) -> str:
     h = hashlib.sha256()
-    h.update(json.dumps([gate.adapter, gate.command, gate.cwd, gate.cap_s]).encode())
+    h.update(json.dumps([gate.adapter, gate.command, gate.cwd, gate.cap_s, gate.script,
+                         gate.script_entry]).encode())
     stable_env = {k: v for k, v in env.items() if k not in ("HOME", "TMPDIR")}
     h.update(json.dumps(stable_env, sort_keys=True).encode())
     for rel in config_files(gate, root):
@@ -82,6 +84,8 @@ def config_files(gate: Gate, root: Path) -> list[str]:
         ls = subprocess.run(["git", "-C", str(root), "ls-files", "--", "*conftest.py"],
                             capture_output=True, text=True)
         out += sorted(ls.stdout.split())
+    elif gate.adapter == "vitest":
+        out += vitest.config_files(gate.command, gate.cwd)
     return sorted(set(out))
 
 
@@ -168,6 +172,11 @@ def run_pytest(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: 
     if rc is not None and rc < 0:
         run.outcome, run.reason, run.transient = "unmeasured", f"killed by signal {-rc}", True
         return run
+    return _classify(run, report, rc, out, gate, root)
+
+
+def _classify(run: GateRun, report: Path, rc: int | None, out: str, gate: Gate, root: Path) -> GateRun:
+    """Shared §2.5.5 classification of a report written by ilk2's pytest plugin or vitest reporter."""
     data = json.loads(report.read_text()) if report.exists() else None
     if data is None:
         run.outcome = "unmeasured"
@@ -202,6 +211,30 @@ def run_pytest(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: 
     return run
 
 
+def run_vitest(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path) -> GateRun:
+    cwd = root / gate.cwd
+    run = GateRun(gate=gate.name, spec_version=spec, outcome="pass")
+    workdir.mkdir(parents=True, exist_ok=True)
+    report = workdir / f"vitest-report-{os.getpid()}-{time.monotonic_ns()}.json"
+    cmd = vitest.run_command(gate.command, root, gate.cwd, report)
+    rc, out, capped, secs = _run(cmd, cwd, env, gate.cap_s)
+    run.duration_s, run.exitstatus, run.tail = round(secs, 2), rc, out[-4000:]
+    if capped:
+        run.outcome, run.reason, run.transient = "unmeasured", f"gate cap {gate.cap_s}s hit", True
+        return run
+    if rc in (126, 127) or "command not found" in out:
+        run.outcome, run.reason = "unmeasured", "runner-not-found"
+        return run
+    if rc is not None and rc < 0:
+        run.outcome, run.reason, run.transient = "unmeasured", f"killed by signal {-rc}", True
+        return run
+    if not report.exists() and "No test files found" in out:
+        run.outcome = "fail" if gate.declares_tests else "uncovered"
+        run.reason = "no-tests"
+        return run
+    return _classify(run, report, rc, out, gate, root)
+
+
 TAKES_VALUE = {"-k", "-m", "-p", "-c", "--deselect", "--rootdir", "-o", "--junitxml",
                "--timeout", "--timeout-method", "-n", "--maxfail", "--tb", "--ignore"}
 
@@ -228,6 +261,10 @@ def with_test_ids(command: list[str], ids: list[str], drop: tuple[str, ...] = ()
 def rerun_alone(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path,
                 test_id: str) -> bool:
     """Re-run one timeout-class test alone, without xdist; True if it passes (§2.5.5, S21)."""
+    if gate.adapter == "vitest":
+        g = Gate(name=gate.name, adapter="vitest", command=vitest.with_test_ids(gate.command, [test_id]),
+                 cwd=gate.cwd, cap_s=gate.cap_s)
+        return run_vitest(g, root, env, spec, workdir).outcome == "pass"
     g = Gate(name=gate.name, adapter=gate.adapter,
              command=with_test_ids(gate.command, [test_id], drop=("-n", "--deselect", "-k")),
              cwd=gate.cwd, cap_s=gate.cap_s)
@@ -239,13 +276,14 @@ def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
     """Run a gate with the §2.5.5 rules: a transient unmeasured is re-run once on the same
     tree, and each timeout-class failure is re-run alone once and dropped if it passes."""
     spec = spec or spec_version(gate, root, env)
-    if gate.adapter != "pytest":
+    runner = {"pytest": run_pytest, "vitest": run_vitest}.get(gate.adapter)
+    if runner is None:
         return GateRun(gate=gate.name, spec_version=spec, outcome="unmeasured",
-                       reason=f"adapter {gate.adapter} not implemented yet")
-    r = run_pytest(gate, root, env, spec, workdir)
+                       reason=f"adapter {gate.adapter} cannot be a measured test gate")
+    r = runner(gate, root, env, spec, workdir)
     timeouts = int("cap" in r.reason and r.transient)
     if r.outcome == "unmeasured" and r.transient:
-        r2 = run_pytest(gate, root, env, spec, workdir)
+        r2 = runner(gate, root, env, spec, workdir)
         timeouts += int("cap" in r2.reason and r2.transient)
         if r2.outcome == "unmeasured":
             r2.transient = False

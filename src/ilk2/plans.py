@@ -23,7 +23,7 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-ADAPTERS = {"pytest", "vitest", "shell"}
+ADAPTERS = {"pytest", "vitest", "shell", "script"}  # "script": a package script not yet resolved
 TEST_ADAPTERS = {"pytest", "vitest"}
 DEFAULT_GATE_CAP_S = 600
 
@@ -42,6 +42,8 @@ class Gate:
     cwd: str = "."
     cap_s: int = DEFAULT_GATE_CAP_S
     declares_tests: bool = True
+    script: str | None = None          # package script name the command was resolved from
+    script_entry: str | None = None    # its package.json entry: the only part of it hashed
 
 
 @dataclass
@@ -76,6 +78,8 @@ class BatchSpec:
 def adapter_for(command: list[str]) -> str:
     """Resolve an adapter from a command. Package scripts are resolved by gates.resolve()."""
     joined = " ".join(command)
+    if command and Path(command[0]).name in ("npm", "bun", "pnpm", "yarn"):
+        return "script"
     if re.search(r"(^|[\s/])pytest(\s|$)|-m\s+pytest", joined):
         return "pytest"
     if re.search(r"(^|[\s/])vitest(\s|$)", joined):
@@ -90,7 +94,8 @@ def _gate(d: dict, i: int) -> Gate:
     return Gate(name=d.get("name") or f"gate-{i + 1}", adapter=d.get("adapter") or adapter_for(cmd),
                 command=list(cmd), cwd=d.get("cwd", "."),
                 cap_s=int(d.get("cap_s", DEFAULT_GATE_CAP_S)),
-                declares_tests=bool(d.get("declares_tests", True)))
+                declares_tests=bool(d.get("declares_tests", True)),
+                script=d.get("script"), script_entry=d.get("script_entry"))
 
 
 def from_dict(d: dict) -> BatchSpec:
@@ -206,13 +211,18 @@ def check(spec: BatchSpec, root: Path | None = None, path_dirs: list[str] | None
             for g in s.gates:
                 if g.adapter not in ADAPTERS:
                     problems.append(f"{where}: gate {g.name}: unknown adapter {g.adapter}")
+                if g.adapter == "script":
+                    problems.append(f"{where}: gate {g.name}: package script {' '.join(g.command)!r} "
+                                    "does not resolve to a runner")
                 if g.declares_tests and g.adapter == "shell":
                     problems.append(f"{where}: gate {g.name}: a test gate cannot use the shell "
                                     "adapter (no test ids; set declares_tests false for lint/build)")
                 if not g.command:
                     problems.append(f"{where}: gate {g.name}: empty command")
                 elif path_dirs is not None and root is not None:
-                    exe = g.command[0]
+                    # vitest runs from the project's node_modules, which a setup hook may only
+                    # create later; what must be on the pinned PATH is its runtime.
+                    exe = "node" if g.adapter == "vitest" else g.command[0]
                     found = (root / g.cwd / exe).exists() if "/" in exe else \
                         shutil.which(exe, path=":".join(path_dirs)) is not None
                     if not found:

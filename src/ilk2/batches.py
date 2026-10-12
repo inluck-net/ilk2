@@ -50,6 +50,24 @@ def project_config(s: Store, project_id: str) -> ProjectConfig:
     return ProjectConfig.from_json(s.get("projects", project_id)["config"])
 
 
+def resolve_scripts(spec: plans.BatchSpec, repo: Path, commit: str) -> None:
+    """Resolve package-script gates to their runner, reading package.json at the base (§2.5.1)."""
+    from .gates import vitest
+
+    def read(rel: str) -> str | None:
+        out = gitops.git(repo, "show", f"{commit}:{rel.lstrip('./')}", check=False)
+        return out or None
+
+    for p in spec.plans:
+        for st in p.steps:
+            for g in st.gates:
+                if g.adapter == "script":
+                    r = vitest.resolve(g.command, g.cwd, read)
+                    if r:
+                        g.adapter, g.command = r["adapter"], r["command"]
+                        g.script, g.script_entry = r["script"], r["script_entry"]
+
+
 class SubmitRejected(ValueError):
     def __init__(self, problems: list[str]):
         super().__init__("; ".join(problems))
@@ -64,6 +82,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     repo = Path(proj["repo_root"])
     base_sha = gitops.rev(repo, base or proj["default_branch"])
     problems = [] if base_sha else [f"base {base or proj['default_branch']!r} is not a commit"]
+    if base_sha:
+        resolve_scripts(spec, repo, base_sha)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
     if problems:
         raise SubmitRejected(problems)
