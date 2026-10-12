@@ -97,6 +97,8 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 | P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs (at least 2 at once on the host), first on chad-mbp, then rezmac. P5 starts in **shadow mode**: for its first issues, a shadow project (a separate clone, §4.2) runs the same issue alongside V1, with no push credentials, no external tools and no tokens, and its results are compared. It switches to live, through the normal one-owner handover, once the outcomes agree |
 | P7 retire | V1 scheduler disabled on both hosts; V1 planning tools emit `ilk2 submit`; V1 repo is maintenance-only |
 
+**Known cost of deferring attribution.** Until attribution lands before P4, a new failure that an earlier step caused is still repaired by whichever later step first runs that gate. The worker is told it is `possibly-inherited`, but must fix it, as in V1. That is the trap behind gh-resolve's F8 (two 60-minute iterations). It is accepted for M1 and P3 because P3's suite is under 5 minutes, which bounds the cost.
+
 ilk-skills itself is not on the list. Its development stays on V1 until P7, and its useful V1 fixes then become ilk2 inputs only where still relevant.
 
 ## 4.5 Acceptance targets (versus V1, same measurement method)
@@ -108,7 +110,7 @@ ilk-skills itself is not on the list. Its development stays on V1 until P7, and 
 | Human transitions per batch | Several (owner re-plans, gate repairs) | 0 for M1; at most 1 per batch from P3 on, each with a recorded reason |
 | Silent stuck states | Occurred (#8309 deadlock, mislabelled timeouts) | 0: every terminal state has a reason (I9) |
 | Bound passed without an action | Not measurable in V1: no bounds were declared | 0. Every non-terminal state past its bound has a recorded action (I11), checked from the journal |
-| Human waits | Found by someone looking | 1 durable `needs_human` row per state cleared by a human, delivered off the host too, re-sent until acknowledged; median minutes from creation to acknowledgement reported |
+| Human waits | Found by someone looking | 1 durable `needs_human` row per state cleared by a human, delivered per the project's notification policy (`owner`: off the host too, re-sent until acknowledged; `consumer`: the event only, one off-host notice at 24 h); median minutes from creation to acknowledgement reported |
 | Refused hours per hour worked (queued, not dispatched) | ≈0.8 on both projects, chad-mbp, Sep 15 to Oct 12 ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) | 0 refusals without a named clearing action and actor (I10). The numeric target is set from M1 data, not before |
 | Minutes to first edit, per attempt | Oct 12: 416 of 998 iteration minutes (42%) passed before the first edit; mean ≈17 min over 24 iterations. Overlaps with thinking | Reported, not targeted. The target is total minutes per accepted step (first row) |
 

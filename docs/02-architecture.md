@@ -145,7 +145,7 @@ consumer(gen n+2) --consumer release(gen n+2, new_head)--> released(gen n+3) --r
 
 - **The driver holds the lease while the batch is `queued` or `active`.** It releases the lease when the batch reaches `shipped`, `blocked`, `parked` or `cancelled`, after any running attempt has been stopped and recovered.
 - **A consumer acquires the lease before writing:** `ilk2 lease acquire --root <root> --generation <g> --expected-head <sha> --owner <name>`. This succeeds only if the lease is `released` at generation `g` and the root's branch head equals `expected-head`. It returns the new generation.
-- **The consumer's push is conditional on the head it recorded.** It pushes only if the remote branch still points at the expected remote head, which gh-resolve's non-force push already enforces. When done it calls `ilk2 lease release --generation <g> --new-head <sha>`, recording the local and remote heads it left.
+- **The driver never pushes,** so the consumer is the only writer to the remote branch. The checks ilk2 itself enforces are the expected local head at `acquire` and the new head recorded at `release`. A consumer's push is fast-forward only: gh-resolve's plain non-force push (its `push.py:296`, which rejects `--force-with-lease`) refuses a non-fast-forward, but it is not conditional on an expected remote SHA. When done it calls `ilk2 lease release --generation <g> --new-head <sha>`, recording the local and remote heads it left.
 - **`ilk2 resume` fails while a consumer holds the lease.** Resume acquires the lease by the same compare-and-set from `released`. If the local branch or the recorded remote head moved since the last driver release, resume records the consumer's commits as the new step base (a `consumer-commits` transition), so they are never mistaken for a mismatch.
 - **A consumer lease has a time limit and can be renewed.** A consumer doing a long operation calls `ilk2 lease renew --generation <g>` before the limit (§2.11.1). Expiry does **not** release the lease: it moves to `consumer-expired`, which still fences the driver. `resume` fails in that state, and a consumer that is still working can finish, push and release normally. Writer authority returns to `released` only by the consumer's own `ilk2 lease release`, or by `ilk2 lease recover --generation <g>` after an operator or the consumer confirms no consumer process can still write. Expiry creates a `needs_human` row under the project's notification policy (Codex review 3, finding 2).
 - **`ilk2 status --json` reports** `root_lease` (holder, owner, generation, expiry) and `accepted_head`.
@@ -167,13 +167,13 @@ Gates run outside the worker sandbox but in a pinned environment, defined so tha
 - `HOME` is a private directory per run, created empty, with only the files the project declares copied in.
 - All `ILK_*` and `ILK2_*` variables are removed. The paths `~/.ilk-data`, `~/.ilk` and `~/.ilk2` are therefore not reachable through `HOME`.
 - `PATH` is the project's declared `PATH` prelude plus the release's bundled tools, and nothing else.
-- Every other variable comes from an explicit per-project allow-list. Anything not listed is absent.
+- Every other variable comes from an explicit per-project allow-list. Anything not listed is absent. The allow-list may also set named `ILK_*` variables (for example `ILK_TEST_TOOLKIT_ROOT`), but only to values the project declares, never copied from the host.
 
 On Oct 12, 36 V1 loop-gate reds did not reproduce in an isolated copy, because tests leaked through `ILK_SKILL_HOME`, `ILK_CODE_ROOT` and `~/.ilk-data` (gh-resolve review, finding F7).
 
 ### 2.5.3 Setup hook
 
-A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). If it fails, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`.
+A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). A transient failure (killed by a signal, a network or registry error, or its cap hit under host load) is re-run once. If it fails again, or fails permanently, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`. Setup time, in the execution root and in each diagnostic worktree, is recorded in the batch's timings.
 
 ### 2.5.4 Base measurement and new failures
 
@@ -199,7 +199,7 @@ A gate's result is `pass`, `fail` (with the new failures), or `unmeasured` (with
 | A single test hit its own runner timeout (vitest `testTimeout`, pytest `--timeout`), or an xdist worker crashed | A **timeout-class failure**: its fingerprint is the class, not the first frame, which is unstable for these. That test is re-run once alone, after the gate finishes. It counts as new only if it fails again on that re-run (gh-resolve review F6: 2 of 3 consumer pre-push runs failed this way, each on a different test) |
 | Runner unknown, command not found, second run also unmeasured | `unmeasured`, permanent. The step is blocked with the reason |
 | Collection error | Recorded **per file**. A file that errors at the base too is a base failure, not a batch blocker. A file that errors only after the step is a new failure |
-| pytest exits non-zero with 0 failing tests (for example gh-resolve's D-69 unexpected-skip guard) | `fail`, with reason `nonzero-exit-no-failures` and the exit code and summary line as evidence, so the worker can see it. It is not `unmeasured`, and not a pass |
+| pytest exits non-zero with 0 failing tests (for example gh-resolve's D-69 unexpected-skip guard) | Compared with the base like any failure: its fingerprint is the exit code plus the normalized summary line. The same at the base makes it a base failure; otherwise it is a new `fail` with reason `nonzero-exit-no-failures` and that evidence, so the worker can see it. Never `unmeasured`, never a pass |
 | No tests collected | `fail` only if the step declared tests for this gate; otherwise the gate is recorded as `uncovered` |
 
 ### 2.5.6 Expected reds
@@ -299,7 +299,7 @@ The feature is split in two (Codex review 3, finding 6).
 | Gate running | The gate's declared cap + 5 min | The driver kills the gate's group, which counts as a transient `unmeasured`. The gate is re-run once (§2.5). The supervisor is the backstop | Driver, then supervisor |
 | Process-group termination | SIGTERM, 30 s, SIGKILL, 60 s | `blocked (unkillable)` with a `needs_human` row (§2.10) | Human |
 | SQLite busy or locked | Busy timeout of 10 s per transaction; 3 retries | The actor's operation fails with `store-busy`. A driver treats it as a stalled phase (requeue); the CLI reports it and exits non-zero | Driver or supervisor |
-| Setup hook (§2.5.3) | Declared cap, default 15 min | `blocked (setup)` with its output | Human, or the consumer (§2.11.3) |
+| Setup hook (§2.5.3) | Declared cap, default 15 min; one re-run if transient | `blocked (setup)` with its output | Human, or the consumer (§2.11.3) |
 | Attribution phase (§2.5.7, from P4) | 12 probes per failure (cached results do not count); 20 min wall time per phase; cache kept across requeues | `unattributable (budget)`; the current step is judged on all new failures | Driver |
 | Consumer root lease (§2.4.2) | 30 min, renewable | Lease moves to `consumer-expired`, which still fences the driver (it does not release). `needs_human` row under the project's policy. Cleared by the consumer's release or `ilk2 lease recover` | Consumer, or human |
 | Host under load (admission) | Checked every tick before starting a run | No new ilk2 run starts while the 5-minute load average exceeds the host's core count, free memory is under 2 GB, or 3 or more of ilk2's gate runs **in the last 30 minutes** timed out. The timeout signal decays with time, so it clears within 30 minutes of the last timeout without any new gate running. A `host-load` refusal row (I10), cleared by the supervisor | Supervisor |
@@ -312,7 +312,7 @@ The feature is split in two (Codex review 3, finding 6).
 | Plan whose dependency is blocked | Immediate | `blocked (dependency: <plan>)`. Independent plans keep running | Clears when the blocking plan clears |
 | Batch with nothing runnable | Immediate | Batch `blocked`, listing each blocked plan and its reason | Human |
 | Park, resume, amend | One store transaction each (SQLite busy row above) | Applied at the next step boundary. A running attempt is not interrupted except by `park --now`, which terminates it like a crash | Human, through the CLI |
-| `needs_human` row unacknowledged | Re-notify after 4 h, then every 12 h | Re-send on every configured channel (§2.11.3) | Health job |
+| `needs_human` row unacknowledged | `owner` policy: re-notify after 4 h, then every 12 h. `consumer` policy: no re-sends; one off-host notice at 24 h | As the project's notification policy says (§2.11.3) | Health job |
 | Queued but refused (I10) | Re-evaluated every tick | Rows cleared by the supervisor re-check themselves. Rows cleared by a human create a `needs_human` row | Per row |
 | Parked | None: explicit human state | Shown at the top of `ilk2 status` | Human |
 
@@ -331,7 +331,7 @@ When the batch becomes active, the driver runs the base measurement in the execu
 ### 2.11.3 Telling a human, or the consumer
 
 Emitting a notification does not prove anyone saw it, so the record of record is a durable **`needs_human` row**:
-- It is created once per entry into a state that ilk2 cannot clear itself. It records a reason from a fixed enum (`attempts`, `crash-loop`, `dependency`, `setup`, `base-unmeasured`, `acceptance-mismatch`, `unkillable`, `quota`, `api`, `regression-attributed`, `consumer-lease-expired`), the command that clears it, and the batch's consumer reference.
+- It is created once per entry into a state that ilk2 cannot clear itself. It records a reason from a fixed enum (`attempts`, `crash-loop`, `dependency`, `setup`, `base-unmeasured`, `acceptance-mismatch`, `unkillable`, `quota`, `api`, `consumer-lease-expired`), the command that clears it, and the batch's consumer reference.
 - It stays open until someone runs `ilk2 ack <id>`, or the state clears (for example `ilk2 resume` or `ilk2 cancel`).
 - A `needs_human` event appears in `ilk2 events --json` and at the top of `ilk2 status` in every case.
 - A state meant for a human is never retried automatically.
@@ -372,7 +372,7 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 | S19 | Step 1 breaks a test in a gate only step 3 declares (M1 behaviour) | Step 3 is judged on the failure, which is marked `possibly-inherited` with the parent-probe evidence in its brief; no attribution yet | gh-resolve review H2 (F8); Codex review 2, finding 1 |
 | S20 | Gate written as `bun run <script>` that calls `vitest -c <config>`; then a step edits that config | Resolved to the vitest adapter with test IDs; the config edit changes the gate version and triggers a new base measurement. A `shell` test gate is rejected at submit | gh-resolve review H3 |
 | S21 | One vitest test exceeds its own 15 s timeout under load | Timeout-class failure, re-run alone, passes; no attempt spent | gh-resolve review H6 (F6) |
-| S22 | Lease races: (a) a consumer acquire and a `resume` at the same generation; (b) a consumer push after the remote head moved; (c) a legitimate consumer operation that crosses the 30 min limit without renewing; (d) one that renews | (a) exactly one succeeds; (b) the push is refused on the stale expected head; (c) the lease moves to `consumer-expired`, `resume` still fails, and the consumer's late push and release succeed with no driver commit in between; (d) no expiry | gh-resolve review H4; Codex reviews 2-3 |
+| S22 | Lease races: (a) a consumer acquire and a `resume` at the same generation; (b) a consumer `acquire` with a stale expected head; (c) a legitimate consumer operation that crosses the 30 min limit without renewing; (d) one that renews | (a) exactly one succeeds; (b) the acquire is refused; (c) the lease moves to `consumer-expired`, `resume` still fails, and the consumer's late push and release succeed with no driver commit in between; (d) no expiry | gh-resolve review H4; Codex reviews 2-3 |
 | S23 | `ilk2 cancel` mid-attempt, and while a step is `accepting` | Attempt stopped, acceptance recovered, batch `cancelled`, lease released | gh-resolve review H5 |
 | S24 | Execution root without `node_modules`, setup hook declared | Setup installs, the base measures; with a failing setup the batch is `blocked (setup)`, never `base-unmeasured` | gh-resolve review H5 |
 | S25 | A test reads `$HOME/.ilk-data` or `ILK_SKILL_HOME` | It sees an empty private `HOME` and no `ILK_*` variables | gh-resolve review H6 (F7) |
@@ -383,7 +383,7 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 
 | # | Fault injected | Expected result |
 |---|---|---|
-| A1 | Step 1 of plan P breaks a test that only step 3 declares; P has already shipped | Edge found at step 1; step 3 is `pass-with-attributed`; a repair plan with `repair_of_step_id` is added; P's dependents pause; P stays `shipped`; the batch ships only after the repair |
+| A1 | Step 1 of plan P breaks a test that only step 3 declares; P has already shipped | Edge found at step 1; step 3 is `pass-with-attributed`; a repair plan with `repair_of_step_id` is added; the whole batch pauses behind it (as in A10); P stays `shipped`; the batch ships only after the repair |
 | A2 | The gate's specification changed between the edge commits | `unattributable (spec-changed)`; step judged on all new failures; no overlay of new config onto old source |
 | A3 | The current attempt has uncommitted changes when attribution runs | Probes run in diagnostic worktrees; the execution root and its changes are untouched |
 | A4 | The failure is flaky at the boundary | Disagreeing re-probes give `unattributable (flaky)`, not a blamed step |

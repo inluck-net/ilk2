@@ -1,6 +1,8 @@
 # ilk2 design documents
 
-Draft for Chad's review, Oct 12, 2026. Author: Claude Code session ilk-skills-aa.
+**Status: design closed for P1 on Oct 13, 2026** (tag `design-accepted-p1`), after five review rounds (Codex ×3, gh-resolve ×2). Remaining items are tracked by phase in [document 6](06-open-items.md). Building starts only when Chad approves P1.
+
+First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by ilk-skills-4a.
 
 | # | Document | Question it answers |
 |---|---|---|
@@ -9,6 +11,7 @@ Draft for Chad's review, Oct 12, 2026. Author: Claude Code session ilk-skills-aa
 | 3 | [V1 vs V2](03-v1-vs-v2.md) | What changes, what improves, and what V2 will *not* fix |
 | 4 | [Relation to V1 and migration](04-v1-relation-and-migration.md) | How V2 sits beside V1, how a project moves over, and when we stop |
 | 5 | [Open questions](05-open-questions.md) | What still needs a decision before code |
+| 6 | [Open items after design close](06-open-items.md) | What is still open, and at which phase it gets resolved |
 | E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
 
 **Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
@@ -66,6 +69,8 @@ Chad deferred attribution to before P4 (§2.5.7). M1 judges new failures against
 - diagnostic worktrees are part of M1, and only attribution is deferred;
 - fingerprints keep assertion operands;
 - repair plans are deduplicated batch barriers (A10).
+
+**Revision, Oct 13 (gh-resolve re-review, design close):** fixes for M1: setup re-run on transient failure; named `ILK_*` variables in the allow-list; base comparison for non-zero exit with 0 failures; notification wording made consistent; the false remote-head claim removed; A1 aligned with A10. The resolver-integration items are parked as the P5 addendum in [document 6](06-open-items.md).
 
 ## Decisions already made (Chad, Oct 12, 2026)
 
