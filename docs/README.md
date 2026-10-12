@@ -19,8 +19,17 @@ Evidence in E1.
 
 **Revision, Oct 13:** a progress guarantee, from Chad's question on how a batch is kept from getting stuck:
 - invariant I11 (every non-terminal state is bounded);
-- [document 2](02-architecture.md) §2.11: bounds table, checks at submission, notification, and the stall suite S1-S12 required for M1;
+- [document 2](02-architecture.md) §2.11: bounds table, checks at submission, notification, and the stall suite required for M1;
 - Q11-Q12.
+
+**Revision, Oct 13 (Codex review):** all 11 findings accepted after checking. The two V1 facts were checked against `d17ffdcd`: the code-only default at `run_ilk_loop_claude.sh:5895-5899`, and the 5,573-line seed total. Changes:
+- I4 no adoption; I6 fingerprints and gate specification versions; I11 covers the supervisor; new I12 with the acceptance protocol (§2.4.1);
+- a health job, more bounds, sleep handling, and a durable `needs_human` row with acknowledgement;
+- stall suite S1-S18;
+- rollback only between batches or via export;
+- size as a diagnostic, with checkpoints replacing the line and hour kill criteria;
+- the Q10 comparison counterbalanced over several steps;
+- V1 status corrected in [document 1](01-why-v2.md), including new §1.4 (V1 minus its legacy paths).
 
 ## Decisions already made (Chad, Oct 12, 2026)
 
@@ -34,5 +43,5 @@ Evidence in E1.
 ## Ground rules for this design
 
 - **Every V1 pain point cited here has a source:** a V1 retro, a Claude memory note, a backlog row or a measured log. V1 references are to `inluck-net/ilk-skills` at `d17ffdcd` (Oct 12, 2026) unless another commit is named.
-- **Size target:** core under about 5k lines of Python, excluding tests. If it grows past that, this design is being repeated as V1.
+- **Size is watched, not fixed in advance:** the core stays small, but its size is estimated after P1 from real code (the first draft's 4.7k budget did not survive review). Growth past the estimate triggers a review of coupling ([document 4](04-v1-relation-and-migration.md) §4.6).
 - **Speed claims follow the V1 measurement method.** Measured means all attempts counted, per accepted step. Nothing here claims a speedup that has not been measured.

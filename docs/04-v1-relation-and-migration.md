@@ -55,7 +55,9 @@ Mechanism:
 3. **Register it in ilk2:** `ilk2 project add --root <repo> --gates <adapter config> --limit N`.
 4. **Submit the next batch to ilk2** (`ilk2 submit <master.md>`). The importer reads V1's MASTER and sub-plan Markdown format unchanged.
 5. **Measure** with `ilk2 report` and compare with the project's V1 baseline (section 4.5).
-6. **Roll back if needed:** park the ilk2 batch, `ilk2 project remove`, then re-add the project to V1's `projects.json`. Plans are plain Markdown, so the same files work on V1.
+6. **Roll back if needed, between batches only.** ilk2 never writes progress back to the Markdown (I2), so the original plan files still show every step as pending. Handing them to V1 would replay accepted work. Two safe paths:
+   - **Between batches** (the default): let the ilk2 batch ship, or park it before its first step is accepted. Then `ilk2 project remove` and re-add the project to V1's `projects.json`.
+   - **Mid-batch:** `ilk2 export --v1 <batch>` writes a V1-compatible plan snapshot. Each accepted step is marked done and linked to its commit, found by the `ilk2-attempt` trailer. V1 continues from that snapshot, never from the original files. Export refuses while any step is `accepting`.
 
 ## 4.4 Migration phases
 
@@ -81,9 +83,9 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 
 | Phase | Exit criterion |
 |---|---|
-| P1 spike | One MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. Minutes to first edit and thinking time are recorded for one real V1 step, run once with a discovery brief and once with a preloaded brief ([document 3](03-v1-vs-v2.md) §3.4). Written up in `docs/spikes/` |
-| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S12 ([document 2](02-architecture.md) §2.11.4) passes |
-| P3 first real consumer | One low-risk repo (candidates: `gh-triage`, `todo-triage`) ships 2 batches; metrics recorded |
+| P1 spike | Through the dispatch adapter with the CLI baseline: one MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. The SDK is tested against the adoption criteria in [document 2](02-architecture.md) §2.6 (Q1). The brief comparison runs over several representative V1 steps, both briefs per step, fresh worktrees and sessions, order counterbalanced ([document 3](03-v1-vs-v2.md) §3.4, Q10). A size estimate for the core is made from the spike's code. Written up in `docs/spikes/` |
+| P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S18 ([document 2](02-architecture.md) §2.11.4) passes |
+| P3 first real consumer | One repo that meets the criteria in Q5 (deterministic local gates, no production writes or credentials, representative multi-step work, suite under 5 min, easy rollback) ships 2 batches; metrics recorded. Provisional choice: `todo-triage`, if it meets them |
 | P4 gh-resolve dev batches | gh-resolve's own development batches run on ilk2 and meet the 4.5 targets |
 | P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs, first on chad-mbp, then rezmac |
 | P7 retire | V1 scheduler disabled on both hosts; V1 planning tools emit `ilk2 submit`; V1 repo is maintenance-only |
@@ -99,15 +101,21 @@ ilk-skills itself is not on the list. Its development stays on V1 until P7, and 
 | Human transitions per batch | Several (owner re-plans, gate repairs) | 0 for M1; at most 1 per batch from P3 on, each with a recorded reason |
 | Silent stuck states | Occurred (#8309 deadlock, mislabelled timeouts) | 0: every terminal state has a reason (I9) |
 | Bound passed without an action | Not measurable in V1: no bounds were declared | 0. Every non-terminal state past its bound has a recorded action (I11), checked from the journal |
-| Human waits | Found by someone looking | 1 notification per state cleared by a human; median minutes from notification to clearing reported |
+| Human waits | Found by someone looking | 1 durable `needs_human` row per state cleared by a human, delivered off the host too, re-sent until acknowledged; median minutes from creation to acknowledgement reported |
 | Refused hours per hour worked (queued, not dispatched) | ≈0.8 on both projects, chad-mbp, Sep 15 to Oct 12 ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) | 0 refusals without a named clearing action and actor (I10). The numeric target is set from M1 data, not before |
-| Minutes to first edit, per attempt | Oct 12: 416 of 998 iteration minutes (42%) passed before the first edit; mean ≈17 min over 24 iterations | Measured in P1 on one step. The target is set from that measurement, then held from P3 on |
+| Minutes to first edit, per attempt | Oct 12: 416 of 998 iteration minutes (42%) passed before the first edit; mean ≈17 min over 24 iterations. Overlaps with thinking | Reported, not targeted. The target is total minutes per accepted step (first row) |
 
-## 4.6 Kill criteria (judgment calls, set before starting)
+## 4.6 Checkpoints and kill criteria (judgment calls, set before starting)
 
-- **M1 not reached within about 60 hands-on hours** after P1. Basis: the core budget is about 4.7k lines. Wrong if the spike reveals a dispatch-layer blocker that changes scope; then re-estimate rather than kill.
-- **Core grows past about 7k lines before P3.** Basis: past that, the design is reproducing V1's sprawl.
-- **P4 metrics worse than V1 for the same project over 2 weeks.** Then stop, keep V1, and port the specific learnings (gate adapters, terminal reasons) back into V1 as backlog rows.
+**Review checkpoints**, where Chad decides to continue, re-scope or stop:
+- **After P1:** the spike's results and a size and effort estimate for M1, made from real code.
+- **At about 60 hands-on hours into P2,** if M1 is not reached: a measured estimate of the remaining effort and the reason for the gap.
+- **Size past the post-P1 estimate:** a review of which module grew and why. Line count is a diagnostic, not a kill signal on its own.
+
+**Kill criteria:**
+- **An invariant cannot be kept without coupling that recreates a V1 root cause** (for example, a second writer of batch state, or liveness inferred from process names). Basis: the invariants are the reason V2 exists. Wrong if a narrower form of the invariant serves the same purpose; then amend the invariant in review rather than kill.
+- **The remaining effort to M1, measured at a checkpoint, exceeds the effort to retrofit the same five causes into V1** ([document 1](01-why-v2.md) §1.4). Basis: §1.4 is the alternative V2 must beat.
+- **P4 metrics worse than V1 for the same project over 2 weeks.** Then stop, keep V1, and port the specific learnings (gate adapters, terminal reasons, the acceptance protocol) back into V1 as backlog rows.
 
 ## 4.7 What happens to V1 meanwhile
 

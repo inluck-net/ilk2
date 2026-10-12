@@ -11,14 +11,15 @@ These are the rules every component must keep. Each one exists because V1 broke 
 | I1 | **Only the driver changes batch state** (step pointer, plan status, gate results, commits). The worker has no write path to state. | 1, 2 |
 | I2 | **All state changes are SQLite transactions**, each with an actor, a reason and the previous version. Markdown is never written back. | 2 |
 | I3 | **Identity is declared once, at submission:** project id, batch id, run id, execution root. Nothing is derived from paths afterwards. | 3 |
-| I4 | **The supervisor knows every process because it started it:** a child process group, plus PID and start time in the store. No pgrep or argv matching anywhere. | 4 |
+| I4 | **The supervisor owns only processes it started:** each driver is a child in its own process group, with PID and start time in the store. A restarted supervisor never adopts survivors. It terminates them (verified by PID and start time) and requeues their runs (§2.10). No pgrep or argv matching anywhere. | 4 |
 | I5 | **A gate result is `pass`, `fail` or `unmeasured`.** `unmeasured` (harness error, no tests found, runner unknown) is never treated as pass or fail. | 5 |
-| I6 | **Reds that exist at the batch base are measured at the base and attributed to it.** Only reds introduced by the batch block a step. | 5 |
+| I6 | **A failure counts against a step only if it is new.** Base failures are measured per versioned gate specification and identified by test ID plus failure fingerprint, so a base-red test that starts failing differently counts as new (§2.5). | 5 |
 | I7 | **Code runs only from immutable releases.** A run records its release; upgrades happen at step boundaries. ilk2 never edits its own release. | 6 |
 | I8 | **One language (Python 3.12), one platform (macOS).** | 7 |
-| I9 | **Every terminal state has a named reason.** No state is "stuck" without a reason a human can read in `ilk2 status`. | Today's #8309 deadlock and "timeout" mislabel |
+| I9 | **Every terminal state has a named reason.** No state is "stuck" without a reason a human can read in `ilk2 status`. | Oct 12 #8309 deadlock and "timeout" mislabel |
 | I10 | **Every refusal to dispatch queued work is a recorded row.** The row names the reason, the action that clears it, and who takes that action (`supervisor`, `driver` or `human`). Refused hours are reported. A refusal whose clearing action is `supervisor` or `driver` must clear without a human. No guard exists only to re-check what the driver already wrote. | V1 refused queued work for about 0.8 h per hour worked ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §1) |
-| I11 | **Every non-terminal state has a time bound and an action when the bound passes.** The action is automatic, or it names a human and notifies them. Every retry loop has a counted limit. The full table is §2.11. | V1's stalls: a hung runner, escalation loops, relaunch storms, a blocked dependency re-dispatched all night (§2.11) |
+| I11 | **Every non-terminal state has a time bound and an action when the bound passes,** including the supervisor itself, which is watched from outside (§2.11). The action is automatic, or it creates a `needs_human` row that stays open until acknowledged. Every retry loop has a counted limit. | V1's stalls: a hung runner, escalation loops, relaunch storms, a blocked dependency re-dispatched all night (§2.11) |
+| I12 | **Git and the store are never assumed atomic together.** Accepting a step is an idempotent protocol in three phases: intent, commit, finalize. Recovery finishes or undoes it (§2.4.1). | Review of Oct 13: a crash between the commit and the state change duplicates or loses work |
 
 ## 2.2 Components
 
@@ -26,6 +27,7 @@ These are the rules every component must keep. Each one exists because V1 broke 
 flowchart TB
   subgraph Host["One Mac (chad-mbp or rezmac)"]
     LD[launchd KeepAlive] --> SUP
+    HLT["launchd StartInterval 60 s<br/>ilk2 health"] -. tick age stale → kickstart -k .-> SUP
     subgraph REL["~/.ilk2/releases/vX (immutable, bundled Python 3.12)"]
       SUP["Supervisor<br/>queue · admission · process ownership · upgrades"]
       DRV1["Driver (run A)<br/>step lifecycle · gates · commits"]
@@ -39,20 +41,22 @@ flowchart TB
     SUP <-- transactions --> DB
     DRV1 <-- transactions --> DB
     DRV2 <-- transactions --> DB
+    HLT -- reads tick age --> DB
     W1 -- edits only --> WT1["Execution worktree<br/>(declared root)"]
   end
-  CLI["ilk2 CLI<br/>submit · status --json · amend · park"] <--> DB
+  CLI["ilk2 CLI<br/>submit · status --json · amend · park · ack"] <--> DB
   CLI -. signal .-> SUP
   CONS["Consumers<br/>gh-resolve · /ilk2-plan · humans"] --> CLI
 ```
 
 | Component | Responsibility | Never does |
 |---|---|---|
-| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs and keeps concurrency limits per host and per project. Records every refusal with its clearing action (I10). Spawns drivers and waits on them. On start-up, reconciles the store against live processes. Performs upgrades and drains. | Run gates, touch worktrees, call the model, or add a pre-dispatch audit of driver-written state |
-| **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, commits, advances one step, retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
-| **Worker** | Claude Code CLI with MiMo, under a private config dir. Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
-| **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions and events | Hold secrets |
-| **CLI** | Submission, status (human and `--json`), amend, park, resume, doctor, upgrade | Bypass the transition API |
+| **Supervisor** (`ilk2 supervise`) | Admits submitted batches. Decides what runs and keeps concurrency limits per host and per project. Records every refusal with its clearing action (I10). Spawns drivers and waits on them. Writes a tick timestamp every 30 s. On start-up, terminates surviving drivers and requeues their runs. Performs upgrades and drains. | Run gates, touch worktrees, call the model, adopt a process it did not start, or add a pre-dispatch audit of driver-written state |
+| **Health job** (`ilk2 health`) | A separate launchd job every 60 s. If the supervisor's last tick is older than the bound, or its process is gone, it restarts the supervisor with `launchctl kickstart -k`. It also re-sends unacknowledged `needs_human` notices that are due | Touch runs or batches |
+| **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, accepts the step (§2.4.1), retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
+| **Worker** | A Claude Code session with MiMo, under a private config dir, reached through the dispatch adapter (§2.6). Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
+| **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions, events and `needs_human` rows | Hold secrets |
+| **CLI** | Submission, status (human and `--json`), amend, park, resume, ack, export, doctor, upgrade | Bypass the transition API |
 
 ## 2.3 State model
 
@@ -66,17 +70,19 @@ erDiagram
   ATTEMPT ||--o{ GATE_RESULT : records
   STEP ||--o{ ATTEMPT : "targeted by"
   BATCH ||--o{ TRANSITION : journals
+  BATCH ||--o{ NEEDS_HUMAN : raises
 ```
 
 - **PROJECT:** id, repo root, default branch, gate adapters, concurrency limit. Registered explicitly with `ilk2 project add`.
-- **BATCH:** id, project, base commit, status (`queued → active → shipped | blocked | parked`), source Markdown hash.
+- **BATCH:** id, project, base commit, status (`queued → active → shipped | blocked | parked`), an immutable normalized plan snapshot (Q3), and the original imported documents.
 - **PLAN** (V1 "sub-plan"): order, dependencies, status, `verification: true|false`.
-- **STEP:** index, instructions, declared gates, status (`pending → accepted | failed`).
-- **RUN:** one driver process lifetime. Holds PID, PGID, start time, release version, execution root and terminal reason.
-- **ATTEMPT:** one worker dispatch for one step. Records session id, timings (model, thinking, tools, gates), diff hash and outcome.
+- **STEP:** index, instructions, declared gates with their specification version, expected reds, status (`pending → accepting → accepted`, or `blocked`).
+- **RUN:** one driver process lifetime. Holds PID, PGID, start time, host boot time, release version, execution root and terminal reason.
+- **ATTEMPT:** one worker dispatch for one step. Records session id, timings (model, thinking, tools, gates), diff hash, expected tree hash and outcome.
 - **TRANSITION:** append-only journal: entity, from, to, actor, reason, previous version. The only way state changes.
+- **NEEDS_HUMAN:** state, reason, created, last notified, acknowledged by and when. Stays open until `ilk2 ack` or the state it describes clears.
 
-Concurrency control: every transition checks the row's version, so it is a compare-and-set. A run holds a lease on its batch, and only the lease holder may move that batch's steps.
+Concurrency control: every transition checks the row's version, so it is a compare-and-set. A run holds a lease on its batch, and only the lease holder may move that batch's steps. The store opens with a busy timeout, and transactions are short (no I/O inside them other than SQLite).
 
 ## 2.4 How a step runs
 
@@ -91,33 +97,57 @@ stateDiagram-v2
   ScopeCheck --> Gates: yes
   ScopeCheck --> Retry: no (evidence: out-of-scope paths)
   Gates: Run declared gates on the worktree
-  Gates --> Commit: all pass (base reds excluded)
-  Gates --> Retry: introduced fail
-  Gates --> Blocked: unmeasured
+  Gates --> Accept: all pass (base failures excluded)
+  Gates --> Retry: new failure
+  Gates --> Blocked: unmeasured (permanent)
   Retry: Resume same session with evidence
   Retry --> Dispatch: attempts left
   Retry --> Blocked: attempts exhausted
-  Commit: Driver commits with trailer and advances one step (one transaction)
-  Commit --> Prepare: more steps
-  Commit --> PlanShipped: last step of plan
+  Accept: Intent → commit → finalize (§2.4.1)
+  Accept --> Prepare: more steps
+  Accept --> PlanShipped: last step of plan
   PlanShipped --> [*]
   Blocked --> [*]
 ```
 
 What this removes from V1:
-- **Plans ship themselves.** When the driver accepts a plan's last step, the plan is shipped in the same transaction. No separate worker ship, `gate_first` marker or ship script is needed, so the Oct 12 #8309 deadlock cannot occur.
+- **Plans ship themselves.** When the driver finalizes a plan's last step, the plan is shipped in that same store transaction. No separate worker ship, `gate_first` marker or ship script is needed, so the Oct 12 #8309 deadlock cannot occur.
 - **Batch verification is a plan like any other.** Its steps run gates; it has no special dispatch rules.
 - **Timeouts are real timeouts.** An attempt that dispatched nothing cannot exist: the driver either dispatches or ends the run with a named reason (I9).
 
+### 2.4.1 Accepting a step (I12)
+
+Git and SQLite cannot share a transaction, so acceptance has three phases. Each one can be retried safely.
+
+1. **Intent (store transaction):** the step moves `pending → accepting`, recording the attempt id, the parent commit and the expected tree hash (the gated worktree's tree).
+2. **Commit (git):** the driver creates the commit with an `ilk2-attempt: <attempt id>` trailer. It does not commit if a commit with that trailer already exists on the branch with the expected tree and parent.
+3. **Finalize (store transaction):** the step moves `accepting → accepted` with the commit SHA. If it is the plan's last step, the plan ships in the same transaction.
+
+**Recovery**, run by the next driver before it prepares anything, for any step left `accepting`:
+
+| Found in git | Action |
+|---|---|
+| A commit with the attempt's trailer, expected tree and expected parent | Finalize with that SHA. No work is redone |
+| No such commit; branch head still at the recorded parent | Undo: the step goes back to `pending`, and the next attempt starts from the parent |
+| A commit with the trailer but a different tree or parent, or the branch moved elsewhere | `blocked (acceptance-mismatch)`, with both trees recorded. A human decides. This should be impossible; it means something outside ilk2 wrote to the branch |
+
+No step is ever `accepted` without its commit, and no commit with an `ilk2-attempt` trailer is ever left without a finalized step or a recorded mismatch.
+
 ## 2.5 Gates
 
-- **Declared gates are commands** with an explicit adapter (`pytest`, `vitest`, `shell`), a working directory and a time cap. They run in the worktree with a pinned environment.
+- **Declared gates are commands** with an explicit adapter (`pytest`, `vitest`, `shell`), a working directory and a time cap. They run in the worktree with a pinned environment. Each gate has a **specification version**: a hash of the adapter, command, working directory, pinned environment and the runner configuration files the adapter names.
 - **Added checks** (V1's "mention gate") come only from an adapter that can resolve the runner for that file. The vitest adapter finds the config whose `include` matches the file; the pytest adapter uses the project's rootdir. If no adapter resolves a file, no command is made, and the file is recorded as `uncovered`.
-- **Base measurement:** once per batch, the driver runs the declared gates at the batch base and records the failing test IDs. A step fails only on test IDs not in that set. This is a measurement taken at the base, not reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
-- **Outcomes:** `pass`, `fail` (with introduced IDs), or `unmeasured` (with the reason). `unmeasured` has two kinds:
+- **Base measurement:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. The fingerprint is the exception type and the normalized first frame inside the project, so line numbers and temporary paths do not change it. After a step, a failure counts as new when:
+  - the test ID was not failing at the base;
+  - it was failing at the base but its fingerprint changed; or
+  - the test did not exist at the base and is not declared as an expected red.
+
+  This is a measurement taken at the base, not reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
+- **When a step changes a gate's specification** (a new test file, a changed runner config, a new adapter), the driver measures the base again for that specification version before the gate runs. A gate whose tests do not exist at the base is not `unmeasured` there: its base measurement is "0 tests", and every collected test is new.
+- **Outcomes:** `pass`, `fail` (with the new failures), or `unmeasured` (with the reason). `unmeasured` has two kinds:
   - **Transient:** the harness crashed or was killed by a signal, or the gate hit its own cap while the host was under load. The driver re-runs the gate once on the same tree, with no new worker attempt.
-  - **Permanent:** no tests were collected, the runner is unknown, the command was not found, or the second run is also unmeasured. The step is blocked with the reason.
-- **Expected reds:** a red-first step declares the test IDs it expects to fail (`expect: red`). The gate then passes only if exactly those IDs fail and nothing else regresses. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
+  - **Permanent:** the runner is unknown, the command was not found, collection errored, or the second run is also unmeasured. The step is blocked with the reason. "No tests collected" is permanent only if the step declared tests for this gate.
+- **Expected reds:** a red-first step declares the test IDs it expects to fail (`expect: red`), and optionally their fingerprints. The gate then passes only if exactly those IDs fail and nothing else is new. A later step that turns them green clears the expectation. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
 
 ## 2.6 Worker isolation
 
@@ -125,20 +155,21 @@ What this removes from V1:
 - **macOS `sandbox-exec` profile:** writes allowed only to the worktree and a per-attempt temp dir. The store, plans, `~/.ilk2/releases` and `.git` internals are read-only to the worker.
 - **A hook refuses `git commit`, `git push` and edits outside the worktree**, as a second layer behind the sandbox.
 - **The brief** contains the step instructions, the declared gates, the previous attempt's red evidence, and paths the worker may read. It contains no plan files the worker could edit.
-- **The brief preloads what the worker would otherwise go and find.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). The driver can assemble most of that context itself: the files and symbols the step names, their tests, the failing output, and the relevant diff from earlier steps. It does this before dispatch, at no model cost. How much to preload is open question Q10. The P1 spike measures preloading against discovery on the same step.
-- **Spike before building:** test the Claude Agent SDK as the dispatch layer. It would give session ids, resume and hooks programmatically instead of parsing CLI stream output. It must work with the MiMo endpoint; if it does not, use the CLI with `--resume`.
+- **The brief can preload context.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). That span includes model thinking, start-up, prompt processing and tool latency, not only discovery, so preloading's effect is unknown. The driver can assemble, at no model cost, the files and symbols the step names, their tests, the failing output, and the earlier steps' diff. Whether that lowers total time per accepted step is open question Q10, tested in P1 with a counterbalanced comparison over several steps.
+- **Dispatch adapter (Q1):** one interface (`start`, `resume`, `cancel`, `stream events`) with the Claude Code CLI as the baseline implementation, since it already works with MiMo. A Claude Agent SDK implementation is adopted only if P1 proves, with MiMo: compatibility, stable session identity on resume, hook parity, cancellation by process group, streaming timing metrics, and the same sandbox behaviour.
 
 ## 2.7 Releases and upgrades
 
-- **A release** is `~/.ilk2/releases/<version>/`: the code, a uv-built virtualenv and a manifest with hashes. `~/.ilk2/current` points at one release. launchd starts the supervisor from `current`.
-- **Upgrades drain at step boundaries:** `ilk2 upgrade <version>` tells the supervisor to stop admitting new steps. Each driver finishes its current step and exits with reason `drained`. Then the supervisor re-executes itself from the new release and resumes the runs. Runs record which release made each commit.
+- **A release** is `~/.ilk2/releases/<version>/`: the code, a uv-built virtualenv and a manifest with hashes. `~/.ilk2/current` points at one release. launchd starts the supervisor and the health job from `current`.
+- **Upgrades drain at step boundaries:** `ilk2 upgrade <version>` tells the supervisor to stop admitting new steps. Each driver finishes its current step and exits with reason `drained`. The drain is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, exactly as in a crash. Then the supervisor re-executes itself from the new release and requeues the drained runs. Runs record which release made each commit.
 - **Both hosts** install the same release with `ilk2 upgrade`. `ilk2 doctor --hosts` compares versions over ssh.
 
 ## 2.8 Consumer interface
 
-- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json>`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend`.
+- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json>`, `ilk2 status [--batch ID] --json`, `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 export --v1`.
 - **Every JSON output carries `api_version`.** Breaking changes bump it, and the CLI keeps the previous version for one release.
 - **gh-resolve** submits one batch per issue, with that issue's worktree as the declared execution root (I3). The concurrency limit is per project, so several issues run in parallel with no keying workaround.
+- **Amend** is append-only and version-checked, and only changes steps that have not started (Q3).
 
 ## 2.9 Observability
 
@@ -148,40 +179,51 @@ What this removes from V1:
   - share of attempts that produce nothing;
   - human transitions per batch;
   - **refused hours:** queued but not dispatched, by reason and clearing actor (I10);
-  - **minutes to first edit** per attempt.
+  - **minutes to first edit** per attempt, reported next to thinking time, because the two overlap.
 
   The first three come from the V1 assessment. The last two come from the Oct 12 [evidence](evidence/2026-10-12-v1-stuck-and-slow.md).
 
-## 2.10 Crash and restart behaviour
+## 2.10 Crash, restart and sleep behaviour
 
 | Event | Behaviour |
 |---|---|
-| Supervisor restarts | Reads runs in non-terminal state. For each one, checks PID plus start time. If alive, it adopts the driver; if gone, it marks the run `lost` and requeues the batch from its last accepted step. Each requeue counts against that step's restart limit (§2.11). |
-| Driver crashes mid-attempt | The supervisor sees the exit. The attempt is recorded `interrupted`. The worktree is kept for diagnosis, and the next run starts from the last accepted commit. |
+| Supervisor restarts (crash, health-job kickstart, upgrade) | Reads runs in non-terminal state. For each driver still alive (PID plus start time match), it sends SIGTERM to the driver's process group, waits 30 s, then sends SIGKILL. Each run is marked `lost` and requeued from its last accepted step; a step left `accepting` is recovered first (§2.4.1). It never adopts (I4). The cost is the attempt in flight, up to one attempt cap. |
+| Driver crashes mid-attempt | The supervisor sees the child exit. The attempt is recorded `interrupted`. The worktree is kept for diagnosis, and the next run starts from the last accepted commit. |
 | Worker hangs | The driver kills the worker's process group at the attempt time cap. The outcome is `timeout`, and only then. |
-| Host reboot | launchd starts the supervisor, and the same reconciliation runs. |
+| Process group does not exit after SIGKILL (for example, stuck in uninterruptible I/O) | After 60 s the run is `blocked (unkillable)`, with the PIDs, and a `needs_human` row. Its execution root is not reused until the PIDs are gone. |
+| Host sleeps | All bounds are measured with `time.monotonic()`. On macOS that is `mach_absolute_time()` (checked on chad-mbp), which Apple documents as not advancing during sleep, so sleep does not use up a bound. When the gap between monotonic time and wall time grows by more than 60 s between two ticks, the supervisor records `host-slept`. |
+| Host reboot | launchd starts the supervisor, and the same reconciliation runs. A run lost because `kern.boottime` changed counts as `lost (reboot)` and does not count toward the step's restart limit. |
 
 ## 2.11 Progress guarantee
 
-**The promise:** a submitted batch either moves forward, or stops in a named state whose clearing actor has been told. No state waits without a bound (I9, I10, I11).
+**The promise:** a submitted batch either moves forward, or stops in a named state with an open `needs_human` row. No state waits without a bound, and the supervisor that enforces the bounds is itself watched from outside (I9-I11).
 
 ### 2.11.1 Bounds
 
 | State or phase | Bound | When the bound passes | Who acts |
 |---|---|---|---|
-| Driver phase: prepare, scope check or commit | 10 min each | The supervisor kills the driver's process group. The run ends `stalled (<phase>)`, and the batch is requeued from its last accepted step | Supervisor |
+| Supervisor alive but not ticking | Last tick older than 3 min | The health job runs `launchctl kickstart -k` on the supervisor, which then restarts as in §2.10. Three kickstarts within an hour create a `needs_human` row | Health job |
+| Supervisor start-up and reconciliation | 5 min to the first tick | Same as above | Health job |
+| Driver spawned, waiting for its first phase event | 2 min | Kill the driver's group; run `stalled (spawn)`; requeue | Supervisor |
+| Any run: no progress event at all | Attempt cap (Q7) + 15 min | Kill the driver's group; run `stalled (run)`; requeue. This outer bound also covers the gap between one phase ending and the next starting | Supervisor |
+| Driver phase: prepare, scope check, accept | 10 min each | Kill the driver's group; run `stalled (<phase>)`; requeue from the last accepted step (a step left `accepting` is recovered first) | Supervisor |
 | Dispatch (worker running) | Attempt cap (Q7) + 5 min | The driver kills the worker's group at the cap: outcome `timeout`. If the driver misses the grace period, the supervisor treats it as a stalled phase | Driver, then supervisor |
 | Gate running | The gate's declared cap + 5 min | The driver kills the gate's group, which counts as a transient `unmeasured`. The gate is re-run once (§2.5). The supervisor is the backstop | Driver, then supervisor |
-| Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. The supervisor probes every 30 min and notifies once at 6 h | Supervisor |
-| Quota exhausted | Until the reported reset, or hourly probes if none is reported | A `quota` refusal row, cleared by the supervisor. Notifies once | Supervisor |
-| Attempts on one step | 3 (Q6) | Step `blocked (attempts)`, with the red evidence of each attempt | Human, notified |
-| Restarts of one step (run lost, interrupted or stalled) | 3 | Step `blocked (crash-loop)`, with all three reasons | Human, notified |
+| Process-group termination | SIGTERM, 30 s, SIGKILL, 60 s | `blocked (unkillable)` with a `needs_human` row (§2.10) | Human |
+| SQLite busy or locked | Busy timeout of 10 s per transaction; 3 retries | The actor's operation fails with `store-busy`. A driver treats it as a stalled phase (requeue); the CLI reports it and exits non-zero | Driver or supervisor |
+| Upgrade drain | Attempt cap + 15 min | Remaining drivers are terminated and requeued (§2.7) | Supervisor |
+| Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. It probes every 30 min and creates a `needs_human` row at 6 h | Supervisor, then human |
+| Quota exhausted | Until the reported reset, or hourly probes if none is reported; 24 h at most | A `quota` refusal row, cleared by the supervisor. At 24 h it becomes `blocked (quota)` with a `needs_human` row | Supervisor, then human |
+| Attempts on one step | 3 (Q6) | Step `blocked (attempts)`, with the red evidence of each attempt | Human |
+| Restarts of one step (run lost, interrupted or stalled; reboot losses excluded) | 3 | Step `blocked (crash-loop)`, with all three reasons | Human |
 | Plan whose dependency is blocked | Immediate | `blocked (dependency: <plan>)`. Independent plans keep running | Clears when the blocking plan clears |
-| Batch with nothing runnable | Immediate | Batch `blocked`, listing each blocked plan and its reason | Human, notified |
-| Queued but refused (I10) | Re-evaluated every tick | Rows cleared by the supervisor re-check themselves. Rows cleared by a human notify when created | Per row |
+| Batch with nothing runnable | Immediate | Batch `blocked`, listing each blocked plan and its reason | Human |
+| Park, resume, amend | One store transaction each (SQLite busy row above) | Applied at the next step boundary. A running attempt is not interrupted except by `park --now`, which terminates it like a crash | Human, through the CLI |
+| `needs_human` row unacknowledged | Re-notify after 4 h, then every 12 h | Re-send on every configured channel (§2.11.3) | Health job |
+| Queued but refused (I10) | Re-evaluated every tick | Rows cleared by the supervisor re-check themselves. Rows cleared by a human create a `needs_human` row | Per row |
 | Parked | None: explicit human state | Shown at the top of `ilk2 status` | Human |
 
-**How the supervisor sees a stall:** the driver writes an event to the store at the start and end of every phase. Every 30 s the supervisor compares the age of the current phase with its bound. The heartbeat is the phase event itself, not a timer thread. A timer thread keeps beating while the main loop is hung, so it would hide the stall; V1's retro `the-ledger-spawn-held-the-runner` is a runner held by a child process it had started in the background.
+**How a stall is detected:** the driver writes an event to the store at the start and end of every phase. Every 30 s the supervisor compares the age of the current phase, and of the run's latest event, with their bounds, and writes its own tick. The heartbeat is the phase event itself, not a timer thread. A timer thread keeps beating while the main loop is hung, so it would hide the stall; V1's retro `the-ledger-spawn-held-the-runner` is a runner held by a child process it had started in the background. The supervisor's own tick is checked by the health job, a separate launchd job, so a supervisor that is alive but hung is caught. KeepAlive alone only catches one that exits.
 
 ### 2.11.2 Checks at submission and activation
 
@@ -191,57 +233,69 @@ What this removes from V1:
 - a plan dependency names a missing plan or forms a cycle;
 - the execution root is missing, or is not a git worktree of the project.
 
-When the batch becomes active, the driver runs the base measurement in the execution root before any worker starts. If the base is permanently `unmeasured`, the batch is `blocked (base-unmeasured)` and no model time has been spent. (V1 retro `the-gate-cannot-pass-from-the-worktree`: a batch parked four times in four hours because its gate could not pass from where the loop ran it.)
+When the batch becomes active, the driver runs the base measurement in the execution root before any worker starts. If the base is permanently `unmeasured`, the batch is `blocked (base-unmeasured)` and no model time has been spent. (V1 retro `the-gate-cannot-pass-from-the-worktree`: a batch parked four times in four hours because its gate could not pass from where the loop ran it.) A gate whose tests a later step creates is measured as "0 tests" at the base, not as unmeasured (§2.5).
 
 ### 2.11.3 Telling a human
 
-Entering any state cleared by a human does three things, once per entry, not once per tick:
-- posts a macOS notification on the host;
-- writes a `needs_human` event to `ilk2 events --json`, where consumers such as gh-resolve can react;
-- puts the state at the top of `ilk2 status`.
-
-A state meant for a human is never retried automatically. (V1 retro `a-designed-escalation-loops`: a stop that the code called a human escalation cycled every 35 minutes until someone parked it.)
+Emitting a notification does not prove anyone saw it, so the record of record is a durable **`needs_human` row**:
+- It is created once per entry into a state cleared by a human, with the reason and the command that clears it.
+- It stays open until someone runs `ilk2 ack <id>`, or the state clears (for example `ilk2 resume`).
+- Delivery goes to every configured channel: a macOS notification on the host, a `needs_human` event in `ilk2 events --json` for consumers such as gh-resolve, the top of `ilk2 status`, and one channel off the host (Q12). The off-host channel is what makes rezmac and unattended nights work.
+- Unacknowledged rows are re-sent after 4 h, then every 12 h, by the health job.
+- A state meant for a human is never retried automatically. (V1 retro `a-designed-escalation-loops`: a stop that the code called a human escalation cycled every 35 minutes until someone parked it.)
 
 ### 2.11.4 The stall suite
 
 Each case injects one fault into a throwaway batch. M1 requires all of them to pass ([document 4](04-v1-relation-and-migration.md) §4.4).
 
-| # | Fault injected | Expected result | V1 source |
+| # | Fault injected | Expected result | Source |
 |---|---|---|---|
 | S1 | Driver's main loop hangs in prepare | `stalled (prepare)`, requeued, the step then ships | retro `the-ledger-spawn-held-the-runner` |
 | S2 | Worker hangs | `timeout` at the cap, killed by process group, named as a timeout and nothing else | retro `a-hard-stop-disguised-as-a-timeout` |
 | S3 | Gate ignores its cap | Killed, transient `unmeasured`, re-run once | retro `a-verify-that-cannot-fit-its-own-gate` |
 | S4 | Gate runner missing | `unmeasured` (permanent), blocked at once, 0 further attempts | retro `a-gate-that-could-not-pass-read-as-a-timeout` |
 | S5 | API returns 429 and 5xx for 10 min | No attempt counted; the step continues afterwards | memory `exit-state-vocabulary-is-under-declared` (quota) |
-| S6 | Driver killed at every start | `blocked (crash-loop)` after 3 restarts, one notification | memory `relaunch-fixes-state-not-step-design` (a second failure at the same step is a design defect, not something to relaunch) |
-| S7 | One plan blocked, another depends on it, a third is independent | Dependent is `blocked (dependency)`, the independent plan ships, the batch ends `blocked`, one notification | memory `blocked-dependent-is-not-runnable` |
-| S8 | Red-first step | Passes with its declared expected reds | retro `a-red-first-step-gated-on-green` |
+| S6 | Driver killed at every start | `blocked (crash-loop)` after 3 restarts, one `needs_human` row | memory `relaunch-fixes-state-not-step-design` |
+| S7 | One plan blocked, another depends on it, a third is independent | Dependent is `blocked (dependency)`, the independent plan ships, the batch ends `blocked`, one `needs_human` row | memory `blocked-dependent-is-not-runnable` |
+| S8 | Red-first step whose test does not exist at the base | Passes with its declared expected reds; a later step turns them green and passes | retro `a-red-first-step-gated-on-green`; review finding 5 |
 | S9 | Step with no gate; gate executable missing | Rejected at submit, no run created | memory `step-heading-colon-makes-gates-vacuous` |
 | S10 | Base cannot be measured in the execution root | `blocked (base-unmeasured)` before any dispatch | retro `the-gate-cannot-pass-from-the-worktree` |
-| S11 | Supervisor killed mid-batch | Driver adopted or run requeued; the batch ships (existing M1 case) | memory `runner-launched-pid-is-a-wrapper` |
-| S12 | A state cleared by a human, held for 30 min | Exactly one notification, 0 automatic retries | retro `a-designed-escalation-loops` |
+| S11 | Supervisor killed mid-batch | Surviving driver terminated, run requeued, the batch ships; no adoption | memory `runner-launched-pid-is-a-wrapper`; review finding 4 |
+| S12 | A state cleared by a human, left unacknowledged | Exactly one `needs_human` row; re-sent at 4 h (time compressed in the test); 0 automatic retries | retro `a-designed-escalation-loops`; review finding 6 |
+| S13 | Supervisor alive but its loop blocked | The health job kickstarts it within the bound; the batch ships | review finding 1 |
+| S14 | Crash after intent, after commit, and before finalize (3 cases) | Each recovers per §2.4.1: undo, finalize, finalize. No duplicate commit, no accepted step without a commit | review finding 2 |
+| S15 | Base-red test whose failure changes during a step | Counted as new; the step fails | review finding 5 |
+| S16 | Host sleeps mid-attempt for longer than the attempt cap | No `timeout` and no `stalled`; `host-slept` recorded; the attempt continues | review finding 3 |
+| S17 | Process group ignores SIGTERM | SIGKILL at 30 s; a simulated unkillable PID gives `blocked (unkillable)` | review finding 3 |
+| S18 | Store held locked by another connection | `store-busy` after the busy timeout and retries; the run is requeued, not hung | review finding 3 |
 
 ### 2.11.5 Judgment calls in this section
 
 Each needs data from P2 and is revisited at M1.
-- **Phase bound of 10 min** for prepare, scope check and commit. Basis: these do git and store work only. Wrong if large repos make a normal prepare take longer; then derive the bound per project from measured phase times.
-- **5 min grace** after the attempt and gate caps. Basis: process-group kill and cleanup take seconds. Wrong if `stalled` fires on runs that were about to finish.
-- **30 s supervisor tick.** Basis: it is cheap, and it is fine-grained compared with any bound. Wrong if store contention shows up in the timings.
-- **API backoff of 1-30 min with a 2 h budget per run**, notifying at 6 h. Basis: V1 outages were either minutes long or quota resets. Wrong if MiMo outages often last 2-6 h; then notify sooner.
-- **3 restarts per step.** Basis: matches the attempt limit (Q6). One crash is noise, three is a defect. Wrong if host sleep or reboots cause legitimate repeated losses; then exclude host-reboot losses from the count.
+- **Phase bound of 10 min** for prepare, scope check and accept. Basis: these do git and store work only. Wrong if large repos make a normal prepare take longer; then derive the bound per project from measured phase times.
+- **5 min grace** after the attempt and gate caps, and **attempt cap + 15 min** as the outer run bound and drain bound. Basis: process-group kill and cleanup take seconds; the outer bound only has to exceed the longest phase. Wrong if `stalled` fires on runs that were about to finish.
+- **30 s supervisor tick; health job every 60 s; supervisor stale after 3 min.** Basis: cheap, and fine-grained compared with any bound; 3 min is 6 missed ticks. Wrong if store contention shows up in the timings, or if kickstarts happen on a healthy supervisor.
+- **Kill escalation: SIGTERM, 30 s, SIGKILL, 60 s.** Basis: drivers and workers need seconds to flush. Wrong if `unkillable` fires on processes that exit shortly after.
+- **SQLite busy timeout 10 s, 3 retries.** Basis: transactions do no I/O beyond SQLite, so they last milliseconds. Wrong if `store-busy` appears under normal load.
+- **API backoff of 1-30 min with a 2 h budget per run; `needs_human` at 6 h; quota at most 24 h.** Basis: V1 outages were either minutes long or quota resets. Wrong if MiMo outages often last 2-6 h; then notify sooner.
+- **3 restarts per step, reboot losses excluded.** Basis: matches the attempt limit (Q6). One crash is noise, three is a defect. Wrong if other host events still cause legitimate repeated losses.
 - **One re-run for a transient `unmeasured`.** Basis: a second identical failure is not transient. Wrong if load-induced gate timeouts need a quieter re-run slot, in which case wait for the host's run count to drop before re-running.
-- **Line budget unchanged at about 4.7k.** Basis: these checks are table-driven and live in the supervisor (stall check, notifications), the driver (re-run, expected reds) and the plan importer (submit checks). Wrong if supervisor plus driver pass about 1.8k lines at M1; then the size kill criterion in [document 4](04-v1-relation-and-migration.md) §4.6 applies.
+- **Re-notify at 4 h, then every 12 h.** Basis: one working session, then twice a day. Wrong if Chad finds it noisy or too slow.
+- **Kill and requeue on supervisor restart instead of adopting** (Chad, Oct 13: "go ahead"). Basis: I4 holds with no lease or IPC code; supervisor restarts should be rare. Cost: the attempt in flight. Wrong if supervisor restarts become frequent (more than one a day); then add a driver lease and a handshake.
 
-## 2.12 Code layout and size budget
+## 2.12 Code layout and size
 
-| Module | Purpose | Budget (lines) | Seed from V1 |
-|---|---|---:|---|
-| `ilk2/store.py` | Schema, migrations, transitions (CAS), events | 600 | `plan_state.py` |
-| `ilk2/supervisor.py` | Queue, admission, process ownership, reconcile, upgrade | 700 | `run_registry.py` |
-| `ilk2/driver.py` | Step lifecycle, retries, commit | 800 | `driver_step.py`, `iteration_context.py` |
-| `ilk2/worker.py` | Brief, config dir, sandbox, dispatch, stream timings | 600 | `run_inputs.py`, `worker_dispatch.py` |
-| `ilk2/gates/` | Adapters (pytest, vitest, shell), base measurement | 700 | `run_local_checks.py` (parts) |
-| `ilk2/plans.py` | Import V1 MASTER/sub-plan Markdown and ilk2 JSON | 400 | `dispatch_target.py` |
-| `ilk2/cli.py` | Commands and JSON output | 500 | none |
-| `ilk2/release.py` | Build, install, verify, doctor | 400 | none |
-| **Total** | | **about 4,700** | |
+| Module | Purpose | Seed from V1 (lines at `d17ffdcd`) |
+|---|---|---|
+| `ilk2/store.py` | Schema, migrations, transitions (CAS), events, `needs_human` | `plan_state.py` (492) |
+| `ilk2/supervisor.py` | Queue, admission, process ownership, reconcile, upgrade, stall checks | `run_registry.py` (503) |
+| `ilk2/health.py` | Supervisor health, re-notification | none |
+| `ilk2/driver.py` | Step lifecycle, retries, acceptance protocol | `driver_step.py` (624), `iteration_context.py` (392) |
+| `ilk2/worker.py` | Brief, config dir, sandbox, dispatch adapter, stream timings | `run_inputs.py` (480), `worker_dispatch.py` (199) |
+| `ilk2/gates/` | Adapters (pytest, vitest, shell), specification versions, base measurement, fingerprints | `run_local_checks.py` (2,744; parts only) |
+| `ilk2/plans.py` | Import V1 MASTER/sub-plan Markdown and ilk2 JSON, snapshot, export to V1 | `dispatch_target.py` (139) |
+| `ilk2/notify.py` | Channels: macOS, events, one off-host channel | none |
+| `ilk2/cli.py` | Commands and JSON output | none |
+| `ilk2/release.py` | Build, install, verify, doctor | none |
+
+**Size is a diagnostic, not a budget yet.** The first draft budgeted about 4.7k lines. The eight seed modules alone total 5,573 lines at `d17ffdcd`, before the acceptance protocol, health job, notification channels, fingerprinting, packaging and fault injection. Cutting seeds down may be possible, but 4.7k was an aspiration, not an estimate. A size estimate is made after P1 from the spike's real code, and then tracked per module in CI. Growth past that estimate is a signal to review coupling, not a kill condition by itself ([document 4](04-v1-relation-and-migration.md) §4.6).
