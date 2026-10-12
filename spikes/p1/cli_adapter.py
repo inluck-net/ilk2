@@ -131,6 +131,8 @@ class Attempt:
     result: dict | None = None
     timings: dict[str, float] = field(default_factory=dict)
     tool_uses: list[str] = field(default_factory=list)
+    thinking_chars: int = 0
+    thinking_s: float = 0.0
 
     @property
     def pgid(self) -> int:
@@ -155,6 +157,8 @@ class Attempt:
 
     def _note(self, ev: dict, t: float) -> None:
         typ = ev.get("type")
+        last = self.timings.get("_last_event_s", 0.0)
+        self.timings["_last_event_s"] = t
         if typ == "system" and ev.get("subtype") == "init":
             self.session_id = ev.get("session_id")
             self.init_model = ev.get("model")
@@ -162,6 +166,11 @@ class Attempt:
         elif typ == "assistant":
             self.timings.setdefault("first_assistant_s", t)
             for block in ev.get("message", {}).get("content", []):
+                if block.get("type") == "thinking":
+                    # Time from the previous event to this thinking block: an upper bound on
+                    # thinking time, as V1's "[thinking] N chars in Xs" lines measure it.
+                    self.thinking_chars += len(block.get("thinking", ""))
+                    self.thinking_s += t - last
                 if block.get("type") == "tool_use":
                     name = block.get("name", "?")
                     self.tool_uses.append(name)
@@ -194,7 +203,10 @@ class Attempt:
             "duration_api_ms": r.get("duration_api_ms"),
             "model_usage": sorted(r.get("modelUsage", {})),
             "tool_uses": self.tool_uses,
-            "timings": {k: round(v, 3) for k, v in self.timings.items()},
+            "tool_counts": {n: self.tool_uses.count(n) for n in sorted(set(self.tool_uses))},
+            "thinking_chars": self.thinking_chars,
+            "thinking_s": round(self.thinking_s, 1),
+            "timings": {k: round(v, 3) for k, v in self.timings.items() if not k.startswith("_")},
         }
 
 
