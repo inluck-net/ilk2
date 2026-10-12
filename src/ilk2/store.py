@@ -38,6 +38,9 @@ TERMINAL = {
 NEEDS_HUMAN_REASONS = {
     "attempts", "crash-loop", "dependency", "setup", "base-unmeasured", "acceptance-mismatch",
     "unkillable", "quota", "api", "consumer-lease-expired", "health",
+    # Not in the design's list (§2.11.3): a step gate that becomes permanently unmeasured
+    # after the base measured fine (S4 when the runner disappears mid-batch).
+    "unmeasured",
 }
 
 SCHEMA = """
@@ -61,7 +64,7 @@ CREATE TABLE IF NOT EXISTS steps (
   id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id),
   batch_id TEXT NOT NULL REFERENCES batches(id), idx INTEGER NOT NULL,
   title TEXT NOT NULL, instructions TEXT NOT NULL, gates TEXT NOT NULL,
-  expected_reds TEXT NOT NULL, scope TEXT NOT NULL,
+  expected_reds TEXT NOT NULL, scope TEXT NOT NULL, must_pass TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL, blocked_reason TEXT, accepted_commit TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0, restart_count INTEGER NOT NULL DEFAULT 0,
   accepting TEXT, version INTEGER NOT NULL DEFAULT 1);

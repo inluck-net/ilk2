@@ -21,9 +21,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import procs
+from . import paths, procs
 
-TEMPLATE = Path.home() / ".ilk2" / "worker-template"
 HOOK = Path(__file__).with_name("worker_hook.py")
 SCRUB = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "ILK_", "ILK2_")
 
@@ -34,9 +33,11 @@ QUOTA = re.compile(r"quota|insufficient.?balance|usage limit|credit balance", re
 @dataclass
 class WorkerConfig:
     claude_bin: str = "claude"
-    template: Path = TEMPLATE
+    # Follows ILK2_HOME, so tests never copy the real template (credentials) anywhere.
+    template: Path = field(default_factory=lambda: paths.home() / "worker-template")
     max_turns: int = 400
     sandbox: bool = True
+    sandbox_allow: list[str] = field(default_factory=list)
     hook: bool = True
     hook_python: str = sys.executable
     permission_mode: str = "bypassPermissions"
@@ -60,8 +61,8 @@ def tool_dirs(worktree: Path) -> list[str]:
     return [f"{base}/{k}" for k in sorted(keys)]
 
 
-def sandbox_profile(worktree: Path, files: AttemptFiles) -> str:
-    allowed = [os.path.realpath(p) for p in (worktree, files.tmp, files.config, files.logs)]
+def sandbox_profile(worktree: Path, files: AttemptFiles, extra: list[str] = ()) -> str:
+    allowed = [os.path.realpath(p) for p in (worktree, files.tmp, files.config, files.logs, *extra)]
     allowed += tool_dirs(worktree)
     subpaths = " ".join(f'(subpath "{p}")' for p in allowed)
     return ("(version 1)\n(allow default)\n(deny file-write*)\n"
@@ -90,7 +91,7 @@ def prepare(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, gate_command
         with os.fdopen(fd, "w") as f:
             json.dump(settings, f, indent=2)
     (files.logs / "gates.json").write_text(json.dumps(gate_commands))
-    (files.logs / "sandbox.sb").write_text(sandbox_profile(worktree, files))
+    (files.logs / "sandbox.sb").write_text(sandbox_profile(worktree, files, cfg.sandbox_allow))
 
 
 def worker_env(files: AttemptFiles, worktree: Path) -> dict[str, str]:

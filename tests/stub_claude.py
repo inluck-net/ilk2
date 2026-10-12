@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """A stand-in for `claude -p --output-format stream-json`, for tests and the stall suite.
 
-Reads the prompt from stdin, prints an init event, then follows $CLAUDE_CONFIG_DIR/stub.json:
+Reads the prompt from stdin, prints an init event, then follows $STUB_SCRIPT (or
+$CLAUDE_CONFIG_DIR/stub.json); {"calls": [script, ...]} gives the Nth call its own script.
+A script is
 {"actions": [...], "resume_actions": [...]} where each action is one of
   {"write": "rel/path", "text": "..."}        write a file in the cwd (via an Edit tool_use)
   {"append": "rel/path", "text": "..."}
@@ -35,10 +37,17 @@ def main():
     prompt = sys.stdin.read()
     cfg = os.environ.get("CLAUDE_CONFIG_DIR", ".")
     script = {}
-    p = os.path.join(cfg, "stub.json")
+    p = os.environ.get("STUB_SCRIPT") or os.path.join(cfg, "stub.json")
     if os.path.exists(p):
         with open(p) as f:
             script = json.load(f)
+    if "calls" in script:  # a sequence: the Nth start/resume across the test gets calls[N]
+        log = p + ".calls"
+        n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
+        with open(log, "a") as f:
+            f.write("x\n")
+        seq = script["calls"]
+        script = seq[min(n, len(seq) - 1)]
     sid = resume or str(uuid.uuid4())
     with open(os.path.join(cfg, "stub-calls.jsonl"), "a") as f:
         f.write(json.dumps({"resume": resume, "session_id": sid, "prompt_chars": len(prompt),

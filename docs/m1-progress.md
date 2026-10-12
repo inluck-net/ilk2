@@ -12,7 +12,7 @@ Started Oct 13, 2026, while P1 step 4 ran. Chad authorized building unattended, 
 | 2 | `plans.py`: V1 Markdown and JSON import, submit checks | done | tests/test_plans.py (7) |
 | 3 | `gates/`: pytest adapter (report plugin), spec versions, pinned env, fingerprints, outcomes, judge | done for pytest; vitest pending (S20, S21) | tests/test_gates.py (13) |
 | 4 | `worker.py`, `worker_hook.py`, `procs.py`: CLI dispatch, sandbox, hook (Q16 full-suite refusal), brief, group termination | done | tests/test_worker.py (20), stub `tests/stub_claude.py` |
-| 5 | `driver.py`: step lifecycle, retries, acceptance protocol and recovery, phase events | — | — |
+| 5 | `driver.py`, `gitops.py`, `lease.py`, `batches.py`, `bounds.py`, `faults.py`: step lifecycle, Q6 retries, API backoff, scope, gates with parent probe, acceptance + recovery | done | tests/test_driver.py (10: S5, S7, S8, S10, S14, S19 in-process) |
 | 6 | `supervisor.py`: queue, admission, spawn, stall checks, reconcile | — | — |
 | 7 | `health.py`, `notify.py` | — | — |
 | 8 | `cli.py`: project add, submit, status, events, park/resume/amend/ack/cancel, lease | — | — |

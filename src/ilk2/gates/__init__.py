@@ -116,8 +116,7 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], cap_s: int) -> tuple[in
 def _split_missing(command: list[str], cwd: Path) -> tuple[list[str], list[str]]:
     """Drop positional test paths that do not exist (yet): they measure as '0 tests' (§2.5.4)."""
     kept, missing = [], []
-    takes_value = {"-k", "-m", "-p", "-c", "--deselect", "--rootdir", "-o", "--junitxml",
-                   "--timeout", "--timeout-method", "-n", "--maxfail", "--tb"}
+    takes_value = TAKES_VALUE
     skip_next = False
     for i, a in enumerate(command):
         if skip_next:
@@ -202,26 +201,36 @@ def run_pytest(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: 
     return run
 
 
+TAKES_VALUE = {"-k", "-m", "-p", "-c", "--deselect", "--rootdir", "-o", "--junitxml",
+               "--timeout", "--timeout-method", "-n", "--maxfail", "--tb", "--ignore"}
+
+
+def with_test_ids(command: list[str], ids: list[str], drop: tuple[str, ...] = ()) -> list[str]:
+    """The gate's command with its positional test paths replaced by `ids`. Options and their
+    values are kept, except those in `drop` (with their value)."""
+    out, i = [], 0
+    while i < len(command):
+        a = command[i]
+        if a in TAKES_VALUE:
+            if a not in drop and i + 1 < len(command):
+                out += [a, command[i + 1]]
+            i += 2
+            continue
+        looks_path = i > 0 and not a.startswith("-") and ("/" in a or a.endswith(".py")) \
+            and not a.endswith(("python", "python3"))
+        if not looks_path:
+            out.append(a)
+        i += 1
+    return out + list(ids)
+
+
 def rerun_alone(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path,
                 test_id: str) -> bool:
-    """Re-run one timeout-class test alone; True if it passes (§2.5.5, S21)."""
-    base_cmd = [a for a in gate.command if a not in ("-n",)]
-    keep: list[str] = []
-    skip = False
-    for a in base_cmd:
-        if skip:
-            skip = False
-            continue
-        if a in ("-n", "--deselect", "-k"):
-            skip = True
-            continue
-        if not a.startswith("-") and ("/" in a or a.endswith(".py")) and a not in ("python3",):
-            continue
-        keep.append(a)
-    g = Gate(name=gate.name, adapter=gate.adapter, command=keep + [test_id], cwd=gate.cwd,
-             cap_s=gate.cap_s)
-    r = run_pytest(g, root, env, spec, workdir)
-    return r.outcome == "pass"
+    """Re-run one timeout-class test alone, without xdist; True if it passes (§2.5.5, S21)."""
+    g = Gate(name=gate.name, adapter=gate.adapter,
+             command=with_test_ids(gate.command, [test_id], drop=("-n", "--deselect", "-k")),
+             cwd=gate.cwd, cap_s=gate.cap_s)
+    return run_pytest(g, root, env, spec, workdir).outcome == "pass"
 
 
 def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
@@ -256,7 +265,8 @@ class Verdict:
     reason: str = ""
 
 
-def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] | None = None) -> Verdict:
+def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] | None = None,
+          must_pass: list[str] | None = None) -> Verdict:
     """base: test id -> fingerprint failing at the base, or None when there is no comparable
     base (the spec changed): then every failure is new (§2.5.4)."""
     if current.outcome == "unmeasured":
@@ -266,6 +276,9 @@ def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] |
     new = [tid for tid, f in current.failures.items()
            if tid not in expect and (tid not in base or base[tid] != f.fingerprint)]
     missing_reds = [t for t in expect if t not in current.failures]
+    for t in must_pass or []:
+        if t in current.failures and t not in new:
+            new.append(t)  # failing at the base too, but this step must make it pass
     if current.outcome == "fail" and current.reason == "no-tests":
         return Verdict("fail", [f"{current.gate}::<no-tests>"], "no-tests")
     if missing_reds:

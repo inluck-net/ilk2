@@ -51,6 +51,10 @@ class Step:
     gates: list[Gate]
     scope: list[str] = field(default_factory=list)
     expect_red: list[str] = field(default_factory=list)
+    # Tests that must pass after this step even if they failed at the batch base. Without it a
+    # base-red test that stays red is not a new failure, so "make X pass" was inexpressible
+    # (found in P2; docs/06).
+    must_pass: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -94,7 +98,8 @@ def from_dict(d: dict) -> BatchSpec:
     for p in d["plans"]:
         steps = [Step(title=s.get("title", f"step {j}"), instructions=s["instructions"],
                       gates=[_gate(g, i) for i, g in enumerate(s.get("gates", []))],
-                      scope=list(s.get("scope", [])), expect_red=list(s.get("expect_red", [])))
+                      scope=list(s.get("scope", [])), expect_red=list(s.get("expect_red", [])),
+                      must_pass=list(s.get("must_pass", [])))
                  for j, s in enumerate(p["steps"])]
         plans.append(Plan(slug=p["slug"], steps=steps, depends_on=list(p.get("depends_on", [])),
                           verification=bool(p.get("verification", False))))
