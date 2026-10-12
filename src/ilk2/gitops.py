@@ -69,7 +69,11 @@ def worktree_tree(root: Path) -> str:
 
 def changed_paths(root: Path) -> list[str]:
     """Paths that differ between HEAD and the worktree, untracked included."""
-    out = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    # Raw output: git() strips, which would eat the leading space of the first " M path"
+    # entry and with it the path's first character (the M1 run of Oct 13: "odo.py").
+    out = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1", "-z",
+                          "--untracked-files=all"], capture_output=True, text=True,
+                         check=True).stdout
     paths = []
     for entry in out.split("\0"):
         if len(entry) > 3:

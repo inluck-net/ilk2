@@ -186,3 +186,11 @@ def test_amend_pending_only_version_checked_and_journalled(ilk):
         batches.amend(ilk.s, bid, [{"op": "replace", "step": sid, "title": "t"}], expect_version=v2)
     assert ilk.s.one("SELECT COUNT(*) n FROM amendments WHERE batch_id = ?", bid)["n"] == 1
     assert "plans" in ilk.s.get("batches", bid)["snapshot"]  # the submitted snapshot is untouched
+
+
+def test_changed_paths_keeps_first_entry_intact(ilk):
+    from ilk2 import gitops
+    root = ilk.make_repo()
+    (root / "calc.py").write_text("x = 1\n")          # tracked, modified: " M calc.py"
+    (root / "new.py").write_text("y = 2\n")           # untracked: "?? new.py"
+    assert gitops.changed_paths(root) == ["calc.py", "new.py"]
