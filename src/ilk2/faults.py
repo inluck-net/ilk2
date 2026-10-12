@@ -1,7 +1,9 @@
 """Named fault-injection points for the stall suite (docs/02 §2.11.4).
 
 ILK2_FAULTS is a comma-separated list of point names; a listed point acts when reached:
-`<name>` kills this process (SIGKILL, as a crash would), `<name>=hang` blocks forever.
+`<name>` kills this process (SIGKILL, as a crash would), `<name>=hang` blocks forever, and
+`<name>=kill-once` / `<name>=hang-once` act only the first time any process reaches the point
+(a marker file under the data dir records it).
 Unset in production, so every call is a dictionary lookup that does nothing.
 """
 
@@ -24,6 +26,16 @@ def hit(name: str) -> None:
     mode = _points().get(name)
     if mode is None:
         return
+    if mode.endswith("-once"):
+        from . import paths
+        marker = paths.data() / "faults" / name
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            return
+        mode = mode[: -len("-once")]
     if mode == "hang":
         while True:
             time.sleep(3600)

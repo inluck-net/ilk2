@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS batches (
   priority INTEGER NOT NULL DEFAULT 0, consumer_ref TEXT,
   status TEXT NOT NULL, terminal_reason TEXT, blocked_reason TEXT,
   snapshot TEXT NOT NULL, originals TEXT NOT NULL,
-  run_lease TEXT, created_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+  run_lease TEXT, control TEXT, created_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES batches(id), slug TEXT NOT NULL,
   ord INTEGER NOT NULL, depends_on TEXT NOT NULL, status TEXT NOT NULL,
@@ -344,7 +344,8 @@ class Store:
         with self.tx() as c:
             r = c.execute("SELECT id FROM refusals WHERE cleared_at IS NULL AND reason = ? AND "
                           "batch_id IS ?", (reason, batch_id)).fetchone()
-            if r:
+            if r:  # keep the open row (its age is the refused time) but show the current detail
+                c.execute("UPDATE refusals SET detail = ? WHERE id = ?", (detail, r["id"]))
                 return r["id"]
             cur = c.execute("INSERT INTO refusals(batch_id, reason, detail, clearing_action, "
                             "clearing_actor, opened_at) VALUES (?, ?, ?, ?, ?, ?)",

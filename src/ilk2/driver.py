@@ -85,6 +85,12 @@ class Driver:
         except Stop as e:
             reason = e.reason
             self.event("run.stop", reason=e.reason, detail=e.detail)
+            if reason in ("parked", "cancelled"):  # §2.4.2: the driver releases at these states
+                row = lease.get(self.s, str(self.root))
+                if row and row["holder"] == "driver" and not self.s.one(
+                        "SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'", self.batch_id):
+                    lease.driver_release(self.s, str(self.root),
+                                         gitops.branch_head(self.root, self.branch))
         except StoreBusy:
             reason = "store-busy"
         except Exception:  # noqa: BLE001 - recorded, the supervisor requeues
@@ -414,6 +420,8 @@ class Driver:
             env = self.env()
             spec = gates.spec_version(gate, self.root, env)
             r = gates.measure(gate, self.root, env, self.dir / "gates", spec)
+            for _ in range(r.timeouts):
+                self.event("gate.timeout", gate=gate.name)
             base = self.base_for(gate, spec)
             v = gates.judge(r, base, expect_red, list(must_pass))
             inherited = []

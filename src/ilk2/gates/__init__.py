@@ -48,6 +48,7 @@ class GateRun:
     duration_s: float = 0.0
     missing_paths: list[str] = field(default_factory=list)
     tail: str = ""
+    timeouts: int = 0                # gate-cap hits, for host-load admission (§2.11.1)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -242,12 +243,15 @@ def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
         return GateRun(gate=gate.name, spec_version=spec, outcome="unmeasured",
                        reason=f"adapter {gate.adapter} not implemented yet")
     r = run_pytest(gate, root, env, spec, workdir)
+    timeouts = int("cap" in r.reason and r.transient)
     if r.outcome == "unmeasured" and r.transient:
         r2 = run_pytest(gate, root, env, spec, workdir)
+        timeouts += int("cap" in r2.reason and r2.transient)
         if r2.outcome == "unmeasured":
             r2.transient = False
             r2.reason = f"{r2.reason} (twice)"
         r = r2
+    r.timeouts = timeouts
     for tid, f in list(r.failures.items()):
         if f.timeout_class and rerun_alone(gate, root, env, spec, workdir, tid):
             del r.failures[tid]

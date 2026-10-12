@@ -98,3 +98,66 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         s.event("submitted", {"priority": priority, "plans": len(spec.plans),
                               "steps": sum(len(p.steps) for p in spec.plans)}, batch_id=bid)
     return bid
+
+
+# -- human and consumer controls (§2.8, §2.11.1) --------------------------------------------
+
+def park(s: Store, batch_id: str, now: bool = False, actor: str = "human") -> None:
+    s.transition("batches", batch_id, "parked", actor=actor, reason="park --now" if now else "park",
+                 expect_from={"queued", "active"}, fields={"control": "park-now" if now else None})
+
+
+def resume(s: Store, batch_id: str, actor: str = "human") -> dict:
+    """Unblock or unpark: blocked steps and plans go back to pending with fresh counters, the
+    batch is queued again, its human rows clear, and the driver side takes the lease back."""
+    b = s.get("batches", batch_id)
+    root = b["execution_root"]
+    row = lease.get(s, root)
+    if row["holder"] in ("consumer", "consumer-expired"):
+        raise SubmitRejected([f"root lease is held by {row['holder']} {row['owner']}"])
+    head = gitops.branch_head(Path(root), b["branch"])
+    out = {"consumer_commits": False}
+    with s.tx():
+        for st in s.all("SELECT * FROM steps WHERE batch_id = ? AND status = 'blocked'", batch_id):
+            s.transition("steps", st["id"], "pending", actor=actor, reason="resume",
+                         fields={"attempt_count": 0, "restart_count": 0, "blocked_reason": None})
+        for p in s.all("SELECT * FROM plans WHERE batch_id = ? AND status = 'blocked'", batch_id):
+            s.transition("plans", p["id"], "pending", actor=actor, reason="resume",
+                         fields={"blocked_reason": None})
+        s.transition("batches", batch_id, "queued", actor=actor, reason="resume",
+                     expect_from={"blocked", "parked"},
+                     fields={"blocked_reason": None, "control": None})
+        s.clear_needs_human(batch_id)
+        for r in s.open_refusals(batch_id):
+            s.clear_refusal(batch_id, r["reason"])
+        if row["holder"] == "released":
+            lease.driver_acquire(s, root, row["generation"])
+            if head and head != row["accepted_head"]:
+                out["consumer_commits"] = True
+                s.event("consumer-commits", {"from": row["accepted_head"], "to": head},
+                        batch_id=batch_id)
+                lease.set_accepted_head(s, root, head)
+        s.event("resumed", {"by": actor}, batch_id=batch_id)
+    return out
+
+
+CANCEL_REASONS = {"issue-closed", "claim-released", "stand-down", "superseded", "human"}
+
+
+def cancel(s: Store, batch_id: str, reason: str, superseded_by: str | None = None,
+           actor: str = "human") -> None:
+    if reason not in CANCEL_REASONS:
+        raise SubmitRejected([f"cancel reason must be one of {sorted(CANCEL_REASONS)}"])
+    s.transition("batches", batch_id, "cancelled", actor=actor, reason=reason,
+                 expect_from={"queued", "active", "blocked", "parked"},
+                 fields={"terminal_reason": f"cancelled ({reason})",
+                         "blocked_reason": f"superseded by {superseded_by}" if superseded_by else None})
+    live = s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', 'running')", batch_id)
+    if not live:  # nothing running: release now; otherwise the supervisor stops the run first
+        b = s.get("batches", batch_id)
+        row = lease.get(s, b["execution_root"])
+        if row and row["holder"] == "driver":
+            lease.driver_release(s, b["execution_root"],
+                                 gitops.branch_head(Path(b["execution_root"]), b["branch"]))
+        s.clear_needs_human(batch_id)
+    s.event("cancelled", {"reason": reason, "superseded_by": superseded_by}, batch_id=batch_id)
