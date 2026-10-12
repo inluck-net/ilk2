@@ -166,3 +166,13 @@ def test_spec_version_tracks_config(tmp_path):
     v3 = gates.spec_version(g, root, env)
     assert len({v1, v2, v3}) == 3
     assert gates.spec_version(g, root, env | {"HOME": "/elsewhere"}) == v3
+
+
+def test_must_pass_requires_a_passing_test_not_just_no_failure(tmp_path):
+    # the file fails to collect: test_new is never a "failure", but it did not pass either
+    root = project(tmp_path, {"tests/test_new.py": "from nowhere import thing\n"
+                                                    "def test_new():\n    assert thing\n"})
+    r = m(gate("tests/test_new.py"), root, tmp_path)
+    base = r.failure_map()  # same collect error at the base: not new
+    v = gates.judge(r, base, must_pass=["tests/test_new.py::test_new"])
+    assert v.outcome == "fail" and "tests/test_new.py::test_new" in v.new_failures

@@ -44,6 +44,7 @@ class GateRun:
     reason: str = ""
     transient: bool = False
     failures: dict[str, Failure] = field(default_factory=dict)
+    passed: list[str] = field(default_factory=list)   # ids that ran and passed (for must_pass)
     collected: int = 0
     exitstatus: int | None = None
     duration_s: float = 0.0
@@ -185,6 +186,7 @@ def _classify(run: GateRun, report: Path, rc: int | None, out: str, gate: Gate, 
         return run
     tests = data["tests"]
     run.collected = max(data.get("collected", 0), len(tests))
+    run.passed = sorted(t["nodeid"] for t in tests if t["outcome"] in ("passed", "xpassed"))
     rootp = str(root)
     for t in tests:
         if t["outcome"] in ("failed", "error"):
@@ -318,9 +320,10 @@ def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] |
     new = [tid for tid, f in current.failures.items()
            if tid not in expect and (tid not in base or base[tid] != f.fingerprint)]
     missing_reds = [t for t in expect if t not in current.failures]
+    passed = set(current.passed)
     for t in must_pass or []:
-        if t in current.failures and t not in new:
-            new.append(t)  # failing at the base too, but this step must make it pass
+        if t not in passed and t not in new:
+            new.append(t)  # this step must make it pass: failing, absent or uncollected all fail
     if current.outcome == "fail" and current.reason == "no-tests":
         return Verdict("fail", [f"{current.gate}::<no-tests>"], "no-tests")
     if missing_reds:
