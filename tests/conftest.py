@@ -29,6 +29,8 @@ class Env:
         self.script_path = tmp / "stub-script.json"
         monkeypatch.setenv("STUB_SCRIPT", str(self.script_path))
         (self.home / "worker-template").mkdir(parents=True)
+        # Subprocess supervisors must not refuse on the test host's load (CI runners are small).
+        (self.home / "host.json").write_text(json.dumps({"load_check": False}))
         (self.home / "worker-template" / "settings.json").write_text(
             json.dumps({"model": "stub-model", "env": {}}))
         paths.ensure()

@@ -366,11 +366,19 @@ class Supervisor:
                 self.end_and_requeue(run, "lost (supervisor stopped)", count=False)
 
 
+def host_config() -> dict:
+    """~/.ilk2/host.json: {"host_budget": 2, "load_check": true}. Per-host settings (Q15)."""
+    p = paths.home() / "host.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
 def main(stop_after: float | None = None) -> int:
     paths.ensure()
     s = Store(paths.db())
+    hc = host_config()
     try:
-        Supervisor(s).run_forever(stop_after)
+        Supervisor(s, host_budget=int(hc.get("host_budget", HOST_BUDGET)),
+                   load_check=bool(hc.get("load_check", True))).run_forever(stop_after)
     finally:
         s.close()
     return 0
