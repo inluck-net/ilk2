@@ -15,3 +15,5 @@ jobs:
         run: uv sync --locked --python 3.12
       - name: Tests
         run: uv run pytest -q
+      - name: Core size per module (diagnostic, docs/02 §2.12)
+        run: uv run python tools/size.py
