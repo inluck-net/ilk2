@@ -75,9 +75,19 @@ Orphan sweep: a double-forked `(sleep 600 &)` survived a SIGKILL cancel, because
 11. **The writable log directory must not contain anything the fence protects.** My first step 2 and 3 runs put the probe targets under the allowed log directory and "passed" vacuously (step3-20261013-030422). The model-free profile check in the commit message is the guard: inside 0, outside 1, commit 128, cwd marker 0, other /tmp 1.
 12. **`uv run` leaks the spike's virtualenv into children** (`PATH`, `VIRTUAL_ENV`), so a worker's or gate's `python3` became ilk2's 3.12 instead of the host's. `host_env()` strips it. The core's driver must set the worker's and the gate's interpreter explicitly.
 
+## Step 4: brief comparison (Q10)
+
+**Result: done, 8 of 8 runs accepted.** Runs `~/.ilk2/spike-p1/step4/runs/20261013-033236`, analysis `~/.ilk2/spike-p1/step4/analysis.json`, verdict and table in `docs/spikes/p1.md`. P was faster on 4 of 4 steps (26.99 → 20.59 min per accepted step).
+
+Findings from preparing it:
+13. Gates cannot run under `sandbox-exec`: V1's tests exec setuid `ps`. They run in the pinned environment instead (HOME and ILK_DATA_* pinned; 0 ilk2-keyed projects appeared in `~/.ilk-data`).
+14. V1 accepted `d996894e` with a pinned test still red (`launch.sh` wrote Python `true`); V1 fixed it in the next commit, `3d1823e7`. Evidence for the design's driver-owned gate.
+15. `13919eff` could not be judged: a pinned test fails at its own commit in a clean environment.
+16. The adapter's thinking measure undercounts: MiMo reports thinking through `thinking_tokens` system events, not thinking blocks. `step4_analyze.py` measures from those events.
+
 ## Q17 evidence table (docs/06 P2-1)
 
-Denominator for P1: 5 planned steps (1-5). Steps whose original plan line stayed valid are counted as they finish.
+Denominator for P1: 5 planned steps. Steps 1, 2 and 5 kept their plan line; step 3 gained a check from step 1; step 4 swapped one V1 step after preflight (`13919eff` → `d996894e`), which a planning pass could not have foreseen without running the gate.
 
 | Step | Plan line still valid? | Evidence | Knowable when planned? | Change | Goal/scope/verification changed? | Cost without amendment | Human amend time | Gate outcome | What a planning pass would have proposed |
 |---|---|---|---|---|---|---|---|---|---|

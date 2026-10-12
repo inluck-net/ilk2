@@ -30,7 +30,7 @@ class ProjectConfig:
     max_turns: int = 400
     sandbox: bool = True
     sandbox_allow: list[str] = field(default_factory=list)   # extra writable paths (caches)
-    preload: bool = False                     # Q10: decided by P1 step 4
+    preload: bool = True                      # Q10: adopted after P1 step 4 (docs/spikes/p1.md)
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":
