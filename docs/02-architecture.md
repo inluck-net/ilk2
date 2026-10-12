@@ -147,7 +147,7 @@ consumer(gen n+2) --consumer release(gen n+2, new_head)--> released(gen n+3) --r
 - **A consumer acquires the lease before writing:** `ilk2 lease acquire --root <root> --generation <g> --expected-head <sha> --owner <name>`. This succeeds only if the lease is `released` at generation `g` and the root's branch head equals `expected-head`. It returns the new generation.
 - **The consumer's push is conditional on the head it recorded.** It pushes only if the remote branch still points at the expected remote head, which gh-resolve's non-force push already enforces. When done it calls `ilk2 lease release --generation <g> --new-head <sha>`, recording the local and remote heads it left.
 - **`ilk2 resume` fails while a consumer holds the lease.** Resume acquires the lease by the same compare-and-set from `released`. If the local branch or the recorded remote head moved since the last driver release, resume records the consumer's commits as the new step base (a `consumer-commits` transition), so they are never mistaken for a mismatch.
-- **A consumer lease has a time limit** (§2.11.1). When it expires the lease returns to `released` with reason `consumer-lease-expired`, and a `needs_human` row is created under the project's notification policy.
+- **A consumer lease has a time limit and can be renewed.** A consumer doing a long operation calls `ilk2 lease renew --generation <g>` before the limit (§2.11.1). Expiry does **not** release the lease: it moves to `consumer-expired`, which still fences the driver. `resume` fails in that state, and a consumer that is still working can finish, push and release normally. Writer authority returns to `released` only by the consumer's own `ilk2 lease release`, or by `ilk2 lease recover --generation <g>` after an operator or the consumer confirms no consumer process can still write. Expiry creates a `needs_human` row under the project's notification policy (Codex review 3, finding 2).
 - **`ilk2 status --json` reports** `root_lease` (holder, owner, generation, expiry) and `accepted_head`.
 
 ## 2.5 Gates
@@ -179,13 +179,13 @@ A project may declare a setup command, for example `bun install --frozen-lockfil
 
 - **The base:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. Fingerprints are adapter-specific. Each is a hash of:
   - the exception or failure type;
-  - a digest of the normalized assertion or error message (numbers, hex ids, temporary paths and timestamps replaced by placeholders);
+  - a digest of the assertion or error message, with only **recognized volatile values** replaced by placeholders: ISO and epoch timestamps, temporary paths, memory addresses, UUIDs and generated ids, process ids and ports. Assertion operands such as "expected 1, got 2" are kept, so different assertions stay different;
   - the top three normalized frames inside the project.
 
   So two different assertion failures at the same line get different fingerprints, while line-number drift and temporary paths do not change them.
 - **A failure is new** when its test ID was not failing at the base, when it was failing at the base but its fingerprint changed, or when the test did not exist at the base and is not declared as an expected red.
-- **When a step changes a gate's specification** (a new test file, a changed runner config, `package.json`), the driver measures the base again for the new specification version, in a diagnostic worktree at the batch base (§2.5.7), before the gate runs. A gate whose tests do not exist at the base is measured as "0 tests" there, and every collected test is new.
-- **Until M1, every new failure is judged against the current step,** as in V1. The driver also records, for each new failure, whether it was already present at the current step's parent (one probe of the failing IDs in a diagnostic worktree at the parent commit). If it was, the failure is marked `possibly-inherited` in the attempt record and in the worker's red evidence, so the worker is told it may be repairing earlier damage. This is evidence only; it changes neither the verdict nor who repairs.
+- **When a step changes a gate's specification** (a new test file, a changed runner config, the gate's own `package.json` script entry), the new specification is generally not portable to the base (§2.5.7): there is **no comparable base** for it. That gate's failures at that step are all charged to the current step, and attribution is unavailable for them. The one exception is a pure addition: new test files with the runner, config and environment unchanged. Then the base is measured in a diagnostic worktree at the base commit, the new tests are absent there ("0 tests"), and every collected new test counts as new. To limit spurious changes, the specification hashes only the gate's own `package.json` script entry, not the whole file. Plan authors should put gate-specification changes in a step of their own (Codex review 3, finding 4).
+- **In M1, and until attribution lands before P4, every new failure is judged against the current step,** as in V1. The driver also records, for each new failure, whether it was already present at the current step's parent (one probe of the failing IDs in a diagnostic worktree at the parent commit; diagnostic worktrees are part of M1, §2.5.7). If it was, the failure is marked `possibly-inherited` in the attempt record and in the worker's red evidence, so the worker is told it may be repairing earlier damage. This is evidence only; it changes neither the verdict nor who repairs.
 - **Before P4, attribution replaces that rule** (§2.5.7). P4 is where gh-resolve's own batches first run on ilk2, and cross-step damage (gh-resolve review F8) is where it cost the most.
 - Every measurement is fresh, at the base, a parent or a probe commit, and never reuse of an earlier gate result. V1's false-green history (07m R1/R2) stays excluded.
 
@@ -206,28 +206,31 @@ A gate's result is `pass`, `fail` (with the new failures), or `unmeasured` (with
 
 A red-first step declares the test IDs it expects to fail (`expect: red`), and optionally their fingerprints. The gate then passes only if exactly those IDs fail and nothing else is new. A later step that turns them green clears the expectation. (V1 retro `a-red-first-step-gated-on-green`: correct work was failed by its own gate, and the project was blacklisted for an hour.)
 
-### 2.5.7 Attribution of new failures (lands before P4)
+### 2.5.7 Diagnostic worktrees (M1) and attribution (before P4)
 
-Not in M1 (Chad, Oct 13). Its exit criterion is P4's (see [document 4](04-v1-relation-and-migration.md) §4.4).
+The feature is split in two (Codex review 3, finding 6).
 
-**Diagnostic worktrees.** All base and probe measurements run in isolated diagnostic worktrees, never in the execution root, so the current attempt's uncommitted changes are untouched.
+**Diagnostic worktrees: required for M1.** Every base, re-base and parent measurement runs in an isolated diagnostic worktree, never in the execution root, so the current attempt's uncommitted changes are untouched.
 - Each diagnostic worktree is keyed by (commit, gate specification version).
 - The setup hook runs in it from that commit's own lockfile, so old source is never tested against later dependencies.
 - Diagnostic worktrees are cached for the batch, and removed when it ends.
 
+**Attribution: deferred to before P4** (Chad, Oct 13). Multi-commit attribution, repair plans and `pass-with-attributed` are not in M1. Their entry condition is P4's ([document 4](04-v1-relation-and-migration.md) §4.4), with the suite A1-A10 (§2.11.4).
+
 **When attribution is possible.** A gate specification is portable across a commit boundary only if its resolved command, adapter, pinned environment and every configuration file it hashes are identical at both commits, and the failing test files exist at both. If not, the result is `unattributable (spec-changed)`. The tool never overlays new tests or config onto old source.
 
-**The attribution phase.** When an attempt's gates show new failures that were already present at the step's parent, the driver enters an `attribute` phase:
-1. **Find the edge.** Binary-search the accepted commits of the batch (base included) for the edge (last clean commit, first failing child), probing only the failing test IDs. The step that produced the first failing child introduced the failure.
+**The attribution phase.** When an attempt's gates show new failures that were already present at the step's parent, the driver enters an `attribute` phase. For each failure:
+1. **Walk backwards.** Starting from the step's parent (known failing), probe the failing test IDs at each earlier accepted commit of the batch, newest first, until the first commit where the failure is absent. That commit and its child form the edge (last clean commit, first failing child). The child's step introduced the failure. Walking backwards, never binary search, means the edge found is always the **most recent** clean-to-failing transition, even if the history went clean, failing, fixed and failing again (Codex review 3, finding 3).
 2. **Confirm it.** Re-probe both sides of the edge twice more. The failure must be absent on the clean side and present on the failing side every time. If any probe disagrees, the result is `unattributable (flaky)`.
-3. **Budget.** At most 8 probes per failure and 20 minutes of wall time for the whole phase. Probe results are cached by (commit, specification version, test ID), so a requeued run does not repeat them. When the budget is spent, the result is `unattributable (budget)`.
+3. **If the walk reaches the batch base and the failure is still there,** it is a base failure whose fingerprint changed, and it is judged against the current step.
+4. **Budget.** Every probe run counts, confirmation probes included. Results already in the cache, keyed by (commit, specification version, test ID), are reused and do not count. The limit is 12 probes per failure and 20 minutes of wall time for the whole phase. The cache persists across requeues. When the budget is spent, the result is `unattributable (budget)`.
 
 **What each result does:**
 
 | Result | Current step | Repair |
 |---|---|---|
-| Attributed to step *k* of plan P | Passes if its only failures are attributed ones (`pass-with-attributed`, recorded with the failing IDs) | The driver adds a **repair plan** to the batch (amend, actor `driver`, reason `regression-attributed`), with `repair_of_step_id = k`, the failing IDs and the edge as its brief. Plans that depend on P pause until the repair plan ships. The batch cannot ship until every repair plan has shipped. P stays `shipped`; nothing is reopened |
-| `unattributable (spec-changed / flaky / budget)` | Judged on all new failures, as before P4 | None. The reason is recorded and reported in `ilk2 report` |
+| Attributed to step *k* of plan P | Passes if its only failures are attributed ones (`pass-with-attributed`, recorded with the failing IDs) | The driver adds a **repair plan** to the batch (amend, actor `driver`, reason `regression-attributed`), with `repair_of_step_id = k`, the failing IDs and the edge as its brief. Repair plans are deduplicated by (test ID, fingerprint, edge): a second attribution of the same failure to the same edge joins the existing repair plan. A repair plan is a **batch barrier**: it runs at the highest priority, and no other plan in the batch starts a new step until it ships. All plans share one branch, and no impact graph exists to prove a plan unaffected. P stays `shipped`; nothing is reopened. The batch cannot ship until every repair plan has shipped |
+| `unattributable (spec-changed / flaky / budget)` | Judged on all new failures, as in M1 | None. The reason is recorded and reported in `ilk2 report` |
 
 ## 2.6 Worker isolation
 
@@ -297,9 +300,9 @@ Not in M1 (Chad, Oct 13). Its exit criterion is P4's (see [document 4](04-v1-rel
 | Process-group termination | SIGTERM, 30 s, SIGKILL, 60 s | `blocked (unkillable)` with a `needs_human` row (§2.10) | Human |
 | SQLite busy or locked | Busy timeout of 10 s per transaction; 3 retries | The actor's operation fails with `store-busy`. A driver treats it as a stalled phase (requeue); the CLI reports it and exits non-zero | Driver or supervisor |
 | Setup hook (§2.5.3) | Declared cap, default 15 min | `blocked (setup)` with its output | Human, or the consumer (§2.11.3) |
-| Attribution phase (§2.5.7, from P4) | 8 probes per failure; 20 min wall time per phase; probe results cached across requeues | `unattributable (budget)`; the current step is judged on all new failures | Driver |
-| Consumer root lease (§2.4.2) | 30 min | Lease returns to `released` with `consumer-lease-expired`; `needs_human` row under the project's policy | Supervisor |
-| Host under load (admission) | Checked every tick before starting a run | No new run starts while the 5-minute load average exceeds the host's core count, free memory is under 2 GB, or 3 or more of the last 10 gate runs on the host timed out. A `host-load` refusal row (I10), cleared by the supervisor | Supervisor |
+| Attribution phase (§2.5.7, from P4) | 12 probes per failure (cached results do not count); 20 min wall time per phase; cache kept across requeues | `unattributable (budget)`; the current step is judged on all new failures | Driver |
+| Consumer root lease (§2.4.2) | 30 min, renewable | Lease moves to `consumer-expired`, which still fences the driver (it does not release). `needs_human` row under the project's policy. Cleared by the consumer's release or `ilk2 lease recover` | Consumer, or human |
+| Host under load (admission) | Checked every tick before starting a run | No new ilk2 run starts while the 5-minute load average exceeds the host's core count, free memory is under 2 GB, or 3 or more of ilk2's gate runs **in the last 30 minutes** timed out. The timeout signal decays with time, so it clears within 30 minutes of the last timeout without any new gate running. A `host-load` refusal row (I10), cleared by the supervisor | Supervisor |
 | Cancel | Same as a crash: SIGTERM, 30 s, SIGKILL | `cancelled` with its reason; root lease released | Supervisor |
 | Upgrade drain | Attempt cap + 15 min | Remaining drivers are terminated and requeued (§2.7) | Supervisor |
 | Model API error (429, 5xx, overloaded) | Backoff of 1, 2, 4 … 30 min; 2 h per run | Not counted as an attempt. After 2 h the batch gets a `waiting (api)` refusal row (I10), cleared by the supervisor. It probes every 30 min and creates a `needs_human` row at 6 h | Supervisor, then human |
@@ -369,14 +372,14 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 | S19 | Step 1 breaks a test in a gate only step 3 declares (M1 behaviour) | Step 3 is judged on the failure, which is marked `possibly-inherited` with the parent-probe evidence in its brief; no attribution yet | gh-resolve review H2 (F8); Codex review 2, finding 1 |
 | S20 | Gate written as `bun run <script>` that calls `vitest -c <config>`; then a step edits that config | Resolved to the vitest adapter with test IDs; the config edit changes the gate version and triggers a new base measurement. A `shell` test gate is rejected at submit | gh-resolve review H3 |
 | S21 | One vitest test exceeds its own 15 s timeout under load | Timeout-class failure, re-run alone, passes; no attempt spent | gh-resolve review H6 (F6) |
-| S22 | Two actors race for the root lease: a consumer acquire and a `resume` at the same generation; then a consumer push after the remote head moved; then a consumer lease that is never released | Exactly one acquire succeeds; `resume` fails while the consumer holds it; the push is refused on the stale expected head; the abandoned lease expires at 30 min with `consumer-lease-expired` | gh-resolve review H4; Codex review 2, finding 3 |
+| S22 | Lease races: (a) a consumer acquire and a `resume` at the same generation; (b) a consumer push after the remote head moved; (c) a legitimate consumer operation that crosses the 30 min limit without renewing; (d) one that renews | (a) exactly one succeeds; (b) the push is refused on the stale expected head; (c) the lease moves to `consumer-expired`, `resume` still fails, and the consumer's late push and release succeed with no driver commit in between; (d) no expiry | gh-resolve review H4; Codex reviews 2-3 |
 | S23 | `ilk2 cancel` mid-attempt, and while a step is `accepting` | Attempt stopped, acceptance recovered, batch `cancelled`, lease released | gh-resolve review H5 |
 | S24 | Execution root without `node_modules`, setup hook declared | Setup installs, the base measures; with a failing setup the batch is `blocked (setup)`, never `base-unmeasured` | gh-resolve review H5 |
 | S25 | A test reads `$HOME/.ilk-data` or `ILK_SKILL_HOME` | It sees an empty private `HOME` and no `ILK_*` variables | gh-resolve review H6 (F7) |
 | S26 | Resolver project (policy `consumer`) blocked | `needs_human` event with the consumer reference; no macOS or off-host page; after 24 h unacknowledged, one off-host notice | gh-resolve review M2; ADR 0032 |
-| S27 | Host load above the admission threshold with a run queued | No run starts; a `host-load` refusal row clears by itself when load drops; then the run starts | Codex review 2, finding 8 |
+| S27 | Host load above threshold with a run queued; then 3 gate timeouts in 30 min followed by recovered load | No run starts; the `host-load` refusal clears by itself, at the latest 30 min after the last timeout, with no gate having run; then the run starts | Codex reviews 2-3 |
 
-**Attribution suite (required before P4, §2.5.7):**
+**Attribution suite (required before P4, §2.5.7; diagnostic worktrees themselves are tested in M1 by S19):**
 
 | # | Fault injected | Expected result |
 |---|---|---|
@@ -385,9 +388,11 @@ Each case injects one fault into a throwaway batch. M1 requires all of them to p
 | A3 | The current attempt has uncommitted changes when attribution runs | Probes run in diagnostic worktrees; the execution root and its changes are untouched |
 | A4 | The failure is flaky at the boundary | Disagreeing re-probes give `unattributable (flaky)`, not a blamed step |
 | A5 | A dependency version changed between the edge commits | Each diagnostic worktree installs from its own commit's lockfile; the result reflects that commit's dependencies |
-| A6 | Probe budget exhausted (long batch, slow fixtures), then the run is requeued | `unattributable (budget)`; after requeue, cached probes are reused and none are repeated |
-| A7 | Base clean, step 1 red, step 2 red | Attributed to step 1 (the first failing child of the last clean commit), not to the commit where the search stopped |
-| A8 | Two different assertion failures at the same line, one at base and one after a step | Different fingerprints; the second counts as new |
+| A6 | Probe budget exhausted (long batch, slow fixtures), then the run is requeued | `unattributable (budget)`; after requeue, cached probes are reused, not repeated, and not counted again |
+| A7 | Base clean, step 1 red, step 2 red | Attributed to step 1 (the child of the last clean commit, found walking backwards), not to the commit where the walk stopped |
+| A8 | Two different assertion failures at the same line ("expected 1, got 2" at base, "expected 3, got 4" after a step) | Different fingerprints; the second counts as new |
+| A9 | History clean, failing (step 1), fixed (step 2), failing again (step 4) | Attributed to step 4, the most recent clean-to-failing edge, not step 1 |
+| A10 | Two attributed failures with the same test ID, fingerprint and edge; and an independent plan queued | One repair plan, not two; the independent plan starts no new step until the repair ships |
 
 ### 2.11.5 Judgment calls in this section
 
@@ -404,9 +409,9 @@ Each needs data from P2 and is revisited at M1.
 - **Events kept 30 days; the CLI keeps every pinned `api_version` and at least two previous.** Basis: consumers poll at least daily; rezmac can lag a release. Wrong if a consumer is offline longer, or if keeping old shapes costs real code.
 - **Setup hook default cap of 15 min.** Basis: a cold `bun install` takes minutes. Wrong if first installs on rezmac exceed it.
 - **Consumer-policy fallback: one off-host notice after 24 h unacknowledged.** Basis: a consumer that stops handling rows should not leave a batch silent forever, but resolver runs must not page by default. Wrong if gh-resolve's own escalation already covers a dead consumer.
-- **Attribution budget: 8 probes per failure, 20 min per phase; 2 confirming re-probes per side.** Basis: a binary search over a batch of up to about 30 accepted commits needs 5 probes, plus confirmation. Wrong if real batches routinely exhaust it; then raise the wall time before the probe count.
-- **Consumer lease 30 min.** Basis: reap and land push within minutes. Wrong if a consumer's legitimate push window is longer.
-- **Host-load admission: 5-minute load above core count, under 2 GB free, or 3 or more gate timeouts in the last 10.** Basis: gate timeouts under load were the measured symptom (gh-resolve review F6). Wrong if it refuses runs on a host whose gates are not slowing.
+- **Attribution budget: 12 probes per failure, 20 min per phase.** Basis: walking backwards costs one probe per accepted commit until the clean one. In typical batches the damaging step is a few steps back; with 4 confirmation probes that leaves about 8 for the walk. Wrong if real damage is usually further back than that; then raise the probe count, since the wall-time limit still bounds the cost.
+- **Consumer lease 30 min, renewable; expiry fences instead of releasing.** Basis: reap and land push within minutes, and a stuck consumer must never let the driver write under it. Wrong if consumers often die holding a lease, which would leave batches waiting on `lease recover`.
+- **Host-load admission: 5-minute load above core count, under 2 GB free, or 3 or more ilk2 gate timeouts in the last 30 minutes.** Basis: gate timeouts under load were the measured symptom (gh-resolve review F6); a time window cannot latch. Wrong if it refuses runs on a host whose gates are not slowing.
 - **Kill and requeue on supervisor restart instead of adopting** (Chad, Oct 13: "go ahead"). Basis: I4 holds with no lease or IPC code; supervisor restarts should be rare. Cost: the attempt in flight. Wrong if supervisor restarts become frequent (more than one a day); then add a driver lease and a handshake.
 
 ## 2.12 Code layout and size

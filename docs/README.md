@@ -55,7 +55,17 @@ Decisions Q14-Q16 were recorded as accepted by Chad.
 - fingerprints include a message digest and the top three project frames;
 - host budgets are an experiment guarded by load admission.
 
-Chad deferred attribution to before P4 (§2.5.7, suite A1-A8). M1 judges new failures against the current step and marks `possibly-inherited` ones. The stall suite is now S1-S27.
+Chad deferred attribution to before P4 (§2.5.7). M1 judges new failures against the current step and marks `possibly-inherited` ones. The stall suite is now S1-S27.
+
+**Revision, Oct 13 (Codex review 3):** 8 remaining findings fixed:
+- the host-load timeout signal decays over a 30-minute window, so it can't latch;
+- lease expiry moves to `consumer-expired`, which still fences the driver, and leases are renewable;
+- attribution walks backwards to the most recent edge, never binary search (A9);
+- a changed gate specification has no comparable base, so its failures are charged to the current step;
+- the probe budget is 12, with cached probes not counted;
+- diagnostic worktrees are part of M1, and only attribution is deferred;
+- fingerprints keep assertion operands;
+- repair plans are deduplicated batch barriers (A10).
 
 ## Decisions already made (Chad, Oct 12, 2026)
 

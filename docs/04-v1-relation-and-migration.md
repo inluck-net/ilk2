@@ -47,7 +47,7 @@ Mechanism:
 - **The one exception is a shadow project** (P5, §4.4). `ilk2 project add --shadow-of <repo>` registers a **separate clone** at its own root, never the V1-owned root. A shadow project:
   - has no push credentials, and its clone's remotes are set to push to nowhere;
   - gives the worker an empty MCP allow-list, so no external tools;
-  - runs gates in a pinned environment with no tokens (§2.5.2 of [document 2](02-architecture.md));
+  - runs gates and the worker with no tokens other than the model credential the worker needs to reach MiMo (§2.5.2 of [document 2](02-architecture.md));
   - cannot acquire a consumer lease, and emits events marked `shadow`.
 
   It owns nothing V1 owns: not the repo root, branches, registry entry or external side effects.
@@ -93,7 +93,7 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 | P1 spike | Through the dispatch adapter with the CLI baseline: one MiMo session is dispatched, resumed with evidence, and killed by process group from Python. The sandbox denies a write outside the worktree. The SDK is tested against the adoption criteria in [document 2](02-architecture.md) §2.6 (Q1). The brief comparison runs over several representative V1 steps, both briefs per step, fresh worktrees and sessions, order counterbalanced ([document 3](03-v1-vs-v2.md) §3.4, Q10). A size estimate for the core is made from the spike's code. Written up in `docs/spikes/` |
 | P2 core, milestone M1 | A throwaway consumer runs a 3-step batch unattended on ilk2: every step driver-gated and committed; 0 human transitions; a supervisor kill mid-batch is recovered. The stall suite S1-S27 ([document 2](02-architecture.md) §2.11.4) passes |
 | P3 first real consumer | One repo that meets the criteria in Q5 (deterministic local gates, no production writes or credentials, representative multi-step work, suite under 5 min, easy rollback) ships 2 batches; metrics recorded. Provisional choice: `todo-triage`, if it meets them |
-| P4 gh-resolve dev batches | Before P4 starts: attribution of new failures ([document 2](02-architecture.md) §2.5.7) is built and its suite A1-A8 passes. Then gh-resolve's own development batches run on ilk2 and meet the 4.5 targets. These are pytest only, so before P5 the vitest/bun path must also be proven: either a vitest consumer batch, or a dry run that resolves and runs the consumer's real gate (`bun run test:non-ui:convex`) on ilk2 at an issue's base (gh-resolve review M4) |
+| P4 gh-resolve dev batches | Before P4 starts: attribution of new failures ([document 2](02-architecture.md) §2.5.7) is built and its suite A1-A10 passes. Then gh-resolve's own development batches run on ilk2 and meet the 4.5 targets. These are pytest only, so before P5 the vitest/bun path must also be proven: either a vitest consumer batch, or a dry run that resolves and runs the consumer's real gate (`bun run test:non-ui:convex`) on ilk2 at an issue's base (gh-resolve review M4) |
 | P5/P6 resolver | gh-resolve submits issue batches to ilk2 with parallel runs (at least 2 at once on the host), first on chad-mbp, then rezmac. P5 starts in **shadow mode**: for its first issues, a shadow project (a separate clone, §4.2) runs the same issue alongside V1, with no push credentials, no external tools and no tokens, and its results are compared. It switches to live, through the normal one-owner handover, once the outcomes agree |
 | P7 retire | V1 scheduler disabled on both hosts; V1 planning tools emit `ilk2 submit`; V1 repo is maintenance-only |
 
