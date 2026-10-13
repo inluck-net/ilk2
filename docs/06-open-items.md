@@ -156,6 +156,14 @@ These items only matter once gh-resolve's resolver runs on ilk2. They stay open 
 
 Also fixed with these: an attempt closed because its run had already ended now ends when the run ended, not when it was found. `ilk2 report` had counted 294.6 and 291.4 min for two attempts that ran 0.7 and 0.2 min.
 
+## P5 shadow evidence
+
+| Issue | Batch | Result | Checked outside ilk2 |
+|---|---|---|---|
+| kira-cloudflare #7794, convex half (agent card shows the text model, not the voice model) | `b-420f113d1eba`, shadow project `kira-shadow` (push-disabled clone at `dev` `b73a8031c`), Oct 13 | shipped: 1 step, 1 attempt, 34.5 min; 7 files, +249/−8; gates: `test:non-ui:convex` on the new test file plus `agentRuntime.test.ts`, and `tsc -p convex/tsconfig.json` | clean copy: 8 tests pass, `tsc` exit 0; `livekit.ts` change read as a behaviour-neutral extraction (`vc = snapshot?.voiceConfig`, `:6105`); mutation: the base `agentBuilder.ts` fails exactly the 3 voice-specific tests and passes the 3 controls. Not pushed |
+
+Found on the way, fixed: kira's lefthook `post-checkout` broke `git worktree add` (ilk2's git now runs without consumer hooks); a diagnostic worktree's setup was keyed on creation, not completion; with the empty pinned HOME every worktree reinstalled 2053 packages cold (>10 min), so `kira-shadow` uses a persistent bun cache (3.2 s).
+
 ## Before P4
 
 | # | Item |
