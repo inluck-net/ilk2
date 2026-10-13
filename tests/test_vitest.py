@@ -15,13 +15,16 @@ from ilk2 import batches, gates, plans
 from ilk2.gates.env import pinned_env
 from ilk2.plans import Gate
 
-CACHE = Path.home() / ".cache" / "ilk2-test-vitest" / "node_modules"
+# vitest 3.2.4 and 4.1.11 (kira-cloudflare's version on Oct 13): the reporter API changed in 4
+# (onFinished -> onTestRunEnd), and a gate that writes no report is unmeasured on every run.
+CACHES = {"3": Path.home() / ".cache" / "ilk2-test-vitest" / "node_modules",
+          "4": Path.home() / ".cache" / "ilk2-test-vitest4" / "node_modules"}
 NODE = shutil.which("node")
 NODE = os.path.realpath(NODE) if NODE else None  # fnm's multishell path is per-shell
 # The cache is built from tests/fixtures/vitest-cache/package.json (CI does it). Locally a
 # missing cache skips these tests; with ILK2_REQUIRE_VITEST=1 (CI) it fails instead, so S20
 # and S21 cannot vanish from a green run (Codex stall-suite review).
-HAVE = (CACHE / ".bin" / "vitest").exists() and bool(NODE)
+HAVE = all((c / ".bin" / "vitest").exists() for c in CACHES.values()) and bool(NODE)
 REQUIRED = os.environ.get("ILK2_REQUIRE_VITEST") == "1"
 pytestmark = pytest.mark.skipif(not HAVE and not REQUIRED, reason="vitest cache or node missing")
 PRELUDE = [str(Path(NODE).parent) if NODE else "", PY_BIN, "/usr/bin", "/bin"]
@@ -32,6 +35,11 @@ CONFIG = 'export default { test: { include: ["t/**/*.test.ts"], testTimeout: 200
 SUM = "export const add = (a: number, b: number) => { throw new Error('todo') }\n"
 TEST = ("import { it, expect } from 'vitest'\nimport { add } from '../src/sum'\n"
         "it('adds', () => { expect(add(2, 3)).toBe(5) })\n")
+
+
+@pytest.fixture(params=sorted(CACHES), ids=lambda v: f"vitest{v}")
+def cache(request) -> Path:
+    return CACHES[request.param]
 
 
 def fixture_repo(root: Path) -> Path:
@@ -48,9 +56,9 @@ def fixture_repo(root: Path) -> Path:
     return root
 
 
-def test_s21_vitest_timeout_class_rerun_alone(tmp_path):
+def test_s21_vitest_timeout_class_rerun_alone(tmp_path, cache):
     root = fixture_repo(tmp_path / "r")
-    (root / "node_modules").symlink_to(CACHE)
+    (root / "node_modules").symlink_to(cache)
     (root / "t" / "slow.test.ts").write_text(
         "import { it } from 'vitest'\nimport { existsSync, writeFileSync } from 'node:fs'\n"
         "import { tmpdir } from 'node:os'\nimport { join } from 'node:path'\n"
@@ -64,9 +72,9 @@ def test_s21_vitest_timeout_class_rerun_alone(tmp_path):
     assert (tmp_path / "tmp" / "seen").exists()  # it did time out once, and was re-run alone
 
 
-def test_vitest_ids_and_fingerprints(tmp_path):
+def test_vitest_ids_and_fingerprints(tmp_path, cache):
     root = fixture_repo(tmp_path / "r")
-    (root / "node_modules").symlink_to(CACHE)
+    (root / "node_modules").symlink_to(cache)
     env = pinned_env(home=tmp_path / "home", tmp=tmp_path / "tmp", path_prelude=PRELUDE)
     g = Gate(name="unit", adapter="vitest", command=["vitest", "run", "-c", "vitest.config.ts"], cap_s=120)
     r = gates.measure(g, root, env, tmp_path / "work")
@@ -74,11 +82,11 @@ def test_vitest_ids_and_fingerprints(tmp_path):
     assert "todo" in r.failures["t/sum.test.ts::adds"].message
 
 
-def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_path, monkeypatch):
+def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_path, monkeypatch, cache):
     monkeypatch.setenv("ILK2_NOTIFY", "log")
     ilk.repo = fixture_repo(ilk.repo)
     ilk.project(path_prelude=PRELUDE,
-                setup={"command": ["ln", "-sfn", str(CACHE), "node_modules"], "cap_s": 60})
+                setup={"command": ["ln", "-sfn", str(cache), "node_modules"], "cap_s": 60})
     # a shell test gate is rejected at submit
     lint = {"plans": [{"slug": "p", "steps": [{"instructions": "x",
                                                "gates": [{"name": "lint", "command": "bun run lint"}]}]}]}
@@ -104,4 +112,4 @@ def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_pa
 
 
 def test_vitest_prerequisites_present():
-    assert HAVE, f"node ({NODE}) or the vitest cache ({CACHE}) is missing"
+    assert HAVE, f"node ({NODE}) or a vitest cache ({CACHES}) is missing"

@@ -1,0 +1,7 @@
+{
+  "name": "ilk2-vitest4-cache",
+  "private": true,
+  "devDependencies": {
+    "vitest": "4.1.11"
+  }
+}

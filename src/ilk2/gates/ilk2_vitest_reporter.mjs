@@ -2,13 +2,26 @@
 // vitest's built-in JSON reporter (3.2) replaces a timeout's message with "STACK_TRACE_ERROR",
 // so timeout-class failures could not be recognized (docs/02 §2.5.5, S21). This reads the
 // task results directly. Output path: --outputFile.
+// vitest 3 calls onFinished(files); vitest 4 dropped it for onTestRunEnd(testModules), whose
+// TestModule keeps the same task tree in `.task` (seen in 4.1.11, kira-cloudflare, Oct 13).
+// Without the second hook a vitest 4 gate wrote no report and was unmeasured on every run.
 import { writeFileSync } from 'node:fs'
 import { relative } from 'node:path'
 
 export default class Ilk2Reporter {
   onInit(ctx) { this.ctx = ctx }
 
+  onTestRunEnd(testModules = [], errors = []) {
+    this.write(testModules.map(m => m && m.task).filter(Boolean), errors)
+  }
+
   onFinished(files = [], errors = []) {
+    this.write(files, errors)
+  }
+
+  write(files = [], errors = []) {
+    if (this.written) return  // vitest 3.2 calls both hooks: one report
+    this.written = true
     const root = this.ctx?.config?.root || process.cwd()
     let out = this.ctx?.config?.outputFile
     if (out && typeof out === 'object') out = out['ilk2'] || Object.values(out)[0]
