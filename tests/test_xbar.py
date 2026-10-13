@@ -91,8 +91,8 @@ def test_live_phase_is_read_from_the_run(ilk):
 def test_progress_counts_done_steps_when_a_repair_plan_sorts_first():
     # Chad, Oct 14: the P5 batch read "step 2/15" with 12 of 15 accepted (repairs sort first).
     b = batch("b-4", "active", [("work 1", "accepted", 1), ("work 2", "accepted", 1)], project="gh-resolve")
-    b["plans"].insert(0, {"slug": "repair-1", "status": "active",
+    b["plans"].insert(0, {"slug": "repair-1", "status": "active", "repair_of": "b-4.p.0",
                           "steps": [{"title": "Repair t", "status": "pending", "attempts": 3}]})
     out = xbar.render({"batches": [b], "needs_human": []}, tick_age=5, stale=180)
     line = next(x for x in out.splitlines() if x.startswith("b-4"))
-    assert "2/3 done" in line and "repair-1" in line and "attempt 3" in line
+    assert "2/3 done (+1 repair)" in line and "repair-1" in line and "attempt 3" in line

@@ -112,7 +112,10 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
             # position read "step 2/15" with 12 of 15 accepted (Chad, Oct 14).
             done = sum(1 for x in steps if x.get("status") == "accepted")
             plan = next((p.get("slug") for p in b.get("plans", []) if cur in p.get("steps", [])), None)
-            parts += [f"{done}/{len(steps)} done"] + ([plan] if plan else []) + \
+            repairs = sum(1 for p in b.get("plans", []) if p.get("repair_of") for _ in p.get("steps", []))
+            total = f"{done}/{len(steps)} done" + (f" (+{repairs} repair{'s' if repairs > 1 else ''})"
+                                                     if repairs else "")
+            parts += [total] + ([plan] if plan else []) + \
                 [f"attempt {max(cur.get('attempts') or 1, 1)}"]
         live = b.get("live")
         if live:

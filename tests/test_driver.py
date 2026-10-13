@@ -859,3 +859,15 @@ def test_a_repair_step_is_not_red_first_checked(ilk):
     rep = ilk.s.one("SELECT a.outcome FROM attempts a JOIN steps st ON st.id = a.step_id "
                     "WHERE st.plan_id = ?", f"{bid}.repair-1")
     assert rep["outcome"] == "accepted"
+
+
+def test_doctor_shows_host_budget_and_each_projects_limit(ilk, capsys):
+    from ilk2 import cli, paths
+    ilk.make_repo()
+    ilk.project()
+    assert cli.main(["project", "set", "proj", "concurrency_limit=3"]) == 0
+    (paths.home() / "host.json").write_text(json.dumps({"host_budget": 4, "load_check": False}))
+    capsys.readouterr()
+    cli.main(["doctor"])
+    out = capsys.readouterr().out
+    assert "runs: 0 of host_budget 4" in out and "proj: 0 of 3 running, 0 queued" in out

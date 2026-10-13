@@ -79,6 +79,7 @@ def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
                               "gates": [{"gate": g["gate"], "outcome": g["outcome"],
                                          "new_failures": json.loads(g["new_failures"])} for g in gr]})
             plans.append({"slug": p["slug"], "status": p["status"],
+                          "repair_of": p["repair_of_step_id"],
                           "blocked_reason": p["blocked_reason"], "steps": steps})
         lr = lease.get(s, b["execution_root"])
         out.append({"id": b["id"], "version": b["version"], "project": b["project_id"],
@@ -127,6 +128,22 @@ def doctor() -> int:
         ok = False
         print("worker template: missing")
     print(f"needs_human open: {len(s.open_human_rows())}")
+    from . import batches
+    from .supervisor import HOST_BUDGET, host_config
+    live = {r["project_id"]: r["n"] for r in s.all(
+        "SELECT b.project_id, COUNT(*) n FROM runs r JOIN batches b ON b.id = r.batch_id WHERE "
+        "r.status IN ('starting', 'running') GROUP BY b.project_id")}
+    try:
+        budget = int(host_config().get("host_budget", HOST_BUDGET))
+    except (OSError, ValueError):
+        budget = HOST_BUDGET
+    print(f"runs: {sum(live.values())} of host_budget {budget} (~/.ilk2/host.json, read every tick)")
+    for pr in s.all("SELECT id FROM projects ORDER BY id"):
+        c = batches.project_config(s, pr["id"])
+        queued = s.one("SELECT COUNT(*) n FROM batches WHERE project_id = ? AND status = 'queued'",
+                       pr["id"])["n"]
+        print(f"  {pr['id']}: {live.get(pr['id'], 0)} of {c.concurrency_limit} running, {queued} queued"
+              + (f", reserve {c.reserve}" if c.reserve else ""))
     s.close()
     return 0 if ok else 1
 

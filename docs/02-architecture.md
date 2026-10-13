@@ -332,6 +332,9 @@ flowchart LR
   - **minutes to first edit** per attempt, reported next to thinking time, because the two overlap.
 
   The first three come from the V1 assessment. The last two come from the Oct 12 [evidence](evidence/2026-10-12-v1-stuck-and-slow.md).
+- **`ilk2 report --batch B`** prints the per-step table: kind (work, repair, verification), status, attempts, red, interrupted, minutes, first edit, and whether the step continued the previous step's session. That table is the baseline later batches compare against ([evidence](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md)).
+- **`ilk2 doctor`** shows the release, launchd jobs, supervisor tick age, worker template keys, open human waits, and the concurrency picture: live runs of `host_budget`, and per project its live runs of `concurrency_limit` and its queue.
+- **The SwiftBar item** (`contrib/xbar/ilk2.10s.sh`) shows each running batch as `<done>/<total> done (+N repairs) · <current plan> · attempt N · <phase> <age>`, with every step in a submenu. It counts done steps rather than the current step's position, because repair plans sort first.
 
 ## 2.10 Crash, restart and sleep behaviour
 
