@@ -70,6 +70,7 @@ class Driver:
         self.dir = paths.run_dir(run_id)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.api_spent = 0.0
+        self.spec_changed: set[str] = set()  # gates whose spec this run's steps changed
         self._env_n = 0
 
     # -- phases and events --------------------------------------------------------------
@@ -831,7 +832,8 @@ class Driver:
                                            "spec_version": spec, "outcome": v.outcome,
                                            "new_failures": dumps(v.new_failures),
                                            "details": dumps({"reason": v.reason or r.reason,
-                                                             "comparable_base": base is not None,
+                                                             "comparable_base": base is not None
+                                                             and gate.name not in self.spec_changed,
                                                              "possibly_inherited": inherited,
                                                              "attribution": {a.test_id: a.to_dict()
                                                                              for a in attributions},
@@ -844,9 +846,10 @@ class Driver:
                 raise Stop("blocked (unmeasured)", f"{gate.name}: {r.reason}")
             if v.outcome == "fail":
                 lines = [f"Gate `{gate.name}` failed: `{' '.join(gate.command)}`"]
-                if base is None:
-                    lines.append("(The gate's specification changed in this step, so there is "
-                                 "no comparable base: every failure counts.)")
+                if gate.name in self.spec_changed:
+                    lines.append("(This step changed the gate's specification: failures are "
+                                 "compared with the base measured under the base's own "
+                                 "configuration, by test id and fingerprint.)")
                 for tid in v.new_failures[:30]:
                     f = r.failures.get(tid)
                     tag = " [possibly-inherited: also failing at the step's parent]" \
@@ -1000,7 +1003,13 @@ class Driver:
             return json.loads(row["failures"])
         diag = self.diag_worktree(self.base)
         if gates.spec_version(gate, diag, self.env()) != spec_now:
-            return None  # no comparable base (§2.5.4)
+            # The step changed what decides the gate (a conftest, a runner config). Judgment
+            # call (Oct 14): compare with the base measured under the base's own configuration,
+            # by test id and fingerprint, instead of charging every failure to the step. A
+            # failure identical at the base is not new. gh-resolve P5 batch: the verification's
+            # full suite could never pass, its 12 base failures counted as new. Wrong if a config
+            # change can produce a new failure identical in id and fingerprint to a base one.
+            self.spec_changed.add(gate.name)
         return self.measure_base(gate, diag, self.base)
 
     def parent_probe(self, gate: Gate, parent: str, failing: list[str]) -> list[str]:

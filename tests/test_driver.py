@@ -894,3 +894,20 @@ def test_a_verification_step_reruns_its_gates_on_every_entry(ilk):
     ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test", reason="x")
     assert ilk.drive_inprocess(bid) == "shipped"
     assert ilk.stub_calls() == 1  # the work step only; the verify step needed no worker
+
+
+def test_a_base_failure_is_not_charged_to_a_step_that_changes_the_gates_config(ilk):
+    # gh-resolve P5 batch, Oct 14: the batch changed conftest.py, so the full-suite gate had "no
+    # comparable base" and its 12 base failures counted as new: verification could never pass.
+    ilk.make_repo()
+    root = ilk.repo
+    (root / "tests" / "test_old.py").write_text("def test_old():\n    assert False\n")
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a failing base test")
+    ilk.project()
+    conftest = {"write": "tests/conftest.py", "text": "# the step changes the gate's config\n"}
+    ilk.script([GOOD, conftest])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_old.py")]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    gr = ilk.s.one("SELECT details FROM gate_results ORDER BY id DESC LIMIT 1")
+    assert json.loads(gr["details"])["comparable_base"] is False   # recorded as before
