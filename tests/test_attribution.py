@@ -76,6 +76,11 @@ def test_a7_walk_backwards_finds_the_first_failing_child(ilk):
     assert att[0]["step"] == f"{bid}.p.0"  # the child of the last clean commit, not p.1
     rp = repair_plans(ilk, bid)
     assert len(rp) == 1 and rp[0]["repair_of_step_id"] == f"{bid}.p.0" and rp[0]["status"] == "shipped"
+    # The repair's gate runs only the repaired test, not the whole gate (Oct 14)
+    rg = json.loads(ilk.s.one("SELECT gates FROM steps WHERE plan_id = ?", rp[0]["id"])["gates"])
+    ids = [c for c in rg[0]["command"] if "::" in c]
+    assert len(ids) == 1 and ids[0].startswith("tests/test_b.py::")
+    assert "tests/test_calc.py" not in rg[0]["command"]
     s2 = ilk.s.one("SELECT * FROM steps WHERE id = ?", f"{bid}.p.2")
     assert s2["status"] == "accepted" and s2["attempt_count"] == 1  # pass-with-attributed
     gr = ilk.s.one("SELECT outcome FROM gate_results WHERE gate = 'both' ORDER BY id LIMIT 1")

@@ -17,6 +17,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from . import batches, bounds, clock, faults, gates, gitops, lease, paths, procs, worker
+from .gates import vitest
 from .gates.env import pinned_env
 from .plans import Gate, v1_documents
 from .store import Conflict, Store, StoreBusy, dumps, new_id
@@ -722,10 +723,20 @@ class Driver:
                        "IS NOT NULL", self.batch_id)["n"] + 1
         slug = f"repair-{n}"
         b = self.s.get("batches", self.batch_id)
+        # The repair is judged on the test it repairs, not the whole gate: with the full suite,
+        # any other open failure turned it red (gh-resolve P5 batch, Oct 14). A later full run
+        # (the step's own gate, or a verification step) still catches what the repair breaks.
+        if gate.adapter == "vitest":
+            narrowed = replace(gate, command=vitest.with_test_ids(gate.command, [a.test_id]))
+        elif gate.adapter == "pytest":
+            narrowed = replace(gate, command=gates.with_test_ids(gate.command, [a.test_id],
+                                                                 drop=("--deselect", "-k")))
+        else:
+            narrowed = gate
         batches.amend(self.s, self.batch_id, [{
             "op": "add_plan", "slug": slug, "repair_of_step_id": a.step_id,
             "steps": [{"title": f"Repair {a.test_id}", "instructions": brief,
-                       "gates": [asdict(gate)], "must_pass": [a.test_id]}]}],
+                       "gates": [asdict(narrowed)], "must_pass": [a.test_id]}]}],
             expect_version=b["version"], actor="driver", reason="regression-attributed")
         with self.s.tx() as c:
             c.execute("INSERT INTO repairs(batch_id, test_id, fingerprint, edge_clean, edge_failing, "

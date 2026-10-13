@@ -296,3 +296,12 @@ def test_pinned_path_always_ends_with_the_system_dirs(tmp_path):
     parts = env["PATH"].split(os.pathsep)
     assert parts[:3] == ["/x/venv/bin", "/usr/bin", "/bin"]
     assert "/usr/sbin" in parts and "/sbin" in parts and parts.count("/usr/bin") == 1
+
+
+def test_narrowing_replaces_a_bare_directory_and_keeps_option_values():
+    # gh-resolve P5 batch, Oct 14: `pytest ... tests` narrowed to one id kept `tests`.
+    cmd = ["python3", "-m", "pytest", "-q", "-n", "8", "--dist", "loadfile", "-p", "no:cacheprovider",
+           "tests", "--timeout-method=signal"]
+    out = gates.with_test_ids(cmd, ["tests/test_x.py::t"], drop=("--deselect", "-k"))
+    assert out == ["python3", "-m", "pytest", "-q", "-n", "8", "--dist", "loadfile", "-p",
+                   "no:cacheprovider", "--timeout-method=signal", "tests/test_x.py::t"]

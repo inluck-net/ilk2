@@ -241,7 +241,9 @@ def run_vitest(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: 
 
 
 TAKES_VALUE = {"-k", "-m", "-p", "-c", "--deselect", "--rootdir", "-o", "--junitxml",
-               "--timeout", "--timeout-method", "-n", "--maxfail", "--tb", "--ignore"}
+               "--timeout", "--timeout-method", "-n", "--maxfail", "--tb", "--ignore",
+               "--dist", "-W", "--durations", "--basetemp", "-r", "--log-level", "--cov",
+               "--cov-report", "--confcutdir", "--color", "--import-mode", "--capture"}
 
 
 def with_test_ids(command: list[str], ids: list[str], drop: tuple[str, ...] = ()) -> list[str]:
@@ -255,8 +257,10 @@ def with_test_ids(command: list[str], ids: list[str], drop: tuple[str, ...] = ()
                 out += [a, command[i + 1]]
             i += 2
             continue
-        looks_path = i > 0 and not a.startswith("-") and ("/" in a or a.endswith(".py")) \
-            and not a.endswith(("python", "python3"))
+        # Every positional after the interpreter is a test path. A bare directory ("tests")
+        # used to be kept, so narrowing `pytest ... tests` to one id still ran the whole suite
+        # (gh-resolve P5 batch, Oct 14: every probe and repair gate ran 8,000+ tests).
+        looks_path = i > 0 and not a.startswith("-") and not a.endswith(("python", "python3"))
         if not looks_path:
             out.append(a)
         i += 1
