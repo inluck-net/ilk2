@@ -651,3 +651,29 @@ def test_a_new_run_resets_leftovers_that_are_not_the_steps_work(ilk):
     ilk.script([GOOD])
     assert ilk.drive_inprocess(bid) == "shipped"
     assert not (root / "stray.txt").exists()
+
+
+def test_amend_merges_the_ceremony_of_a_plan_not_started(ilk):
+    # gh-resolve P5 batch, Oct 13: imported before the merge existed, 18 steps.
+    import pytest
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    spec = one_step()
+    spec["plans"][0]["steps"][0]["title"] = "Red-first pins"
+    bid = ilk.submit(spec)
+    v = ilk.s.get("batches", bid)["version"]
+    v = batches.amend(ilk.s, bid, [{"op": "add", "plan": "p", "title": "Implement", "instructions":
+                                    "make it pass", "gates": [gate("tests/test_calc.py")]}],
+                      expect_version=v)
+    assert ilk.s.one("SELECT COUNT(*) n FROM steps WHERE batch_id = ?", bid)["n"] == 2
+    v = batches.amend(ilk.s, bid, [{"op": "merge_ceremony", "plan": "p"}], expect_version=v)
+    rows = ilk.s.all("SELECT * FROM steps WHERE batch_id = ? ORDER BY idx", bid)
+    assert [r["title"] for r in rows] == ["Implement"] and "make it pass" in rows[0]["instructions"]
+    sid = rows[0]["id"]
+    ilk.s.update("steps", sid, {"attempt_count": 1}, actor="test", reason="started")
+    with pytest.raises(batches.SubmitRejected):  # a started plan is never rewritten
+        batches.amend(ilk.s, bid, [{"op": "merge_ceremony", "plan": "p"}], expect_version=v)
+    ilk.s.update("steps", sid, {"attempt_count": 0}, actor="test", reason="reset")
+    ilk.script([GOOD])
+    assert ilk.drive_inprocess(bid) == "shipped"

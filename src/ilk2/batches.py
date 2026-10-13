@@ -365,6 +365,7 @@ def amend(s: Store, batch_id: str, ops: list[dict], *, expect_version: int, acto
     append-only table; the submitted snapshot is never edited. Ops:
       {"op": "replace", "step": <step id>, "instructions"?, "gates"?, "must_pass"?, "scope"?, "title"?}
       {"op": "add", "plan": <slug>, "title", "instructions", "gates", ...}  (appended to the plan)
+      {"op": "merge_ceremony", "plan": <slug>}  (plans.merge_v1_ceremony on a plan not started)
     Returns the new batch version."""
     problems = []
     with s.tx() as c:
@@ -433,6 +434,35 @@ def amend(s: Store, batch_id: str, ops: list[dict], *, expect_version: int, acto
                                        "idx": idx, "title": stp.title, "instructions": stp.instructions,
                                        "gates": dumps([asdict(g) for g in stp.gates]),
                                        "expected_reds": dumps(stp.expect_red), "scope": dumps(stp.scope),
+                                       "must_pass": dumps(stp.must_pass), "status": "pending"})
+            elif op.get("op") == "merge_ceremony":
+                # A batch imported before the merge existed (gh-resolve P5, Oct 13: 18 steps,
+                # 5 of them red-first steps of plans that had not started).
+                p = c.execute("SELECT * FROM plans WHERE batch_id = ? AND slug = ?",
+                              (batch_id, op["plan"])).fetchone()
+                rows = c.execute("SELECT * FROM steps WHERE plan_id = ? ORDER BY idx",
+                                 (p["id"],)).fetchall() if p else []
+                if not p or p["status"] != "pending" or any(
+                        r["status"] != "pending" or r["attempt_count"] for r in rows):
+                    problems.append(f"plan {op['plan']} is missing or has started")
+                    continue
+                spec = plans.from_dict({"plans": [{"slug": p["slug"], "verification": bool(
+                    p["verification"]), "steps": [
+                    {"title": r["title"], "instructions": r["instructions"],
+                     "gates": json.loads(r["gates"]), "scope": json.loads(r["scope"]),
+                     "expect_red": json.loads(r["expected_reds"]),
+                     "must_pass": json.loads(r["must_pass"])} for r in rows]}]})
+                merged = plans.merge_v1_ceremony(spec).plans[0].steps
+                if len(merged) == len(rows):
+                    continue
+                c.execute("DELETE FROM steps WHERE plan_id = ?", (p["id"],))
+                for idx, stp in enumerate(merged):
+                    s.insert("steps", {"id": f"{p['id']}.{idx}", "plan_id": p["id"],
+                                       "batch_id": batch_id, "idx": idx, "title": stp.title,
+                                       "instructions": stp.instructions,
+                                       "gates": dumps([asdict(g) for g in stp.gates]),
+                                       "expected_reds": dumps(stp.expect_red),
+                                       "scope": dumps(stp.scope),
                                        "must_pass": dumps(stp.must_pass), "status": "pending"})
             else:
                 problems.append(f"unknown op {op.get('op')!r}")
