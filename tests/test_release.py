@@ -53,6 +53,9 @@ def test_build_and_install_without_launchd(ilk, monkeypatch, tmp_path):
     out = subprocess.run([str(rel / "venv" / "bin" / "python"), "-m", "ilk2", "--version"],
                          capture_output=True, text=True)
     assert out.stdout.strip().startswith("ilk2 ")
+    # the console script too: its shebang named the temporary build dir (gh-resolve-e1, Oct 13)
+    cli = subprocess.run([str(rel / "venv" / "bin" / "ilk2"), "--version"], capture_output=True, text=True)
+    assert cli.returncode == 0 and cli.stdout.strip().startswith("ilk2 "), cli.stderr
     info = release.install(rel.name, load=False)
     assert os.path.realpath(release.current()) == str(rel)
     sup = plistlib.loads((tmp_path / "agents" / f"{release.SUPERVISOR}.plist").read_bytes())
@@ -88,3 +91,16 @@ def test_cli_contract_smoke(ilk, tmp_path):
     assert run("park", bid).returncode == 0
     assert json.loads(run("status", "--batch", bid, "--json").stdout)["batches"][0]["status"] == "parked"
     assert run("cancel", bid, "--reason", "stand-down").returncode == 0
+
+
+def test_relocate_venv_rewrites_scripts_that_name_the_build_dir(tmp_path):
+    old, new = tmp_path / ".v.tmp", tmp_path / "v"
+    (old / "venv" / "bin").mkdir(parents=True)
+    (old / "venv" / "bin" / "ilk2").write_text(f"#!{old}/venv/bin/python\nimport sys\n")
+    (old / "venv" / "bin" / "activate").write_text(f"VIRTUAL_ENV='{old}/venv'\n")
+    (old / "venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    old.rename(new)
+    release.relocate_venv(new / "venv", old, new)
+    assert (new / "venv" / "bin" / "ilk2").read_text().startswith(f"#!{new}/venv/bin/python")
+    assert str(old) not in (new / "venv" / "bin" / "activate").read_text()
+    assert (new / "venv" / "bin" / "python").is_symlink()  # symlinks are left alone

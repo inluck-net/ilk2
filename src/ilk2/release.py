@@ -64,7 +64,26 @@ def build(repo: Path, version: str | None = None) -> Path:
             "version": version, "commit": sha, "wheel": wheel.name, "wheel_sha256": sha256(wheel),
             "built_at": clock.wall()}, indent=2))
         tmp.rename(dest)
+    relocate_venv(dest / "venv", tmp, dest)
     return dest
+
+
+def relocate_venv(venv: Path, old: Path, new: Path) -> None:
+    """The venv is built under a temporary dir and renamed into place; its console scripts'
+    shebangs and activate scripts still name the temporary dir (`ilk2` failed with "bad
+    interpreter" on both hosts, Oct 13). Rewrite every text file in bin/ that does."""
+    old_s, new_s = str(old), str(new)
+    for f in (venv / "bin").iterdir():
+        if f.is_symlink() or not f.is_file():
+            continue
+        try:
+            text = f.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if old_s in text:
+            mode = f.stat().st_mode
+            f.write_text(text.replace(old_s, new_s))
+            f.chmod(mode)
 
 
 def launchd_path() -> str:
