@@ -362,6 +362,28 @@ class Driver:
             evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
+        if plan["verification"] and n == 0 and not kept:
+            # A verification step checks the batch head: its gates run first, and a worker is
+            # dispatched only when they are red, with their failures as its brief. gh-resolve P5
+            # batch, Oct 14: a worker spent 18 min trying to run and record the full suite that
+            # is this step's own gate.
+            n = 1
+            aid = new_id("a")
+            self.s.insert("attempts", {"id": aid, "run_id": self.run_id, "step_id": step["id"],
+                                       "n": n, "status": "running", "parent_commit": parent,
+                                       "created_at": clock.wall()})
+            self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
+                          reason="gates first (verification)")
+            with self.phase("gates", step=step["id"]):
+                red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass)
+            if red is None:
+                with self.phase("accept", step=step["id"]):
+                    self.accept(step, aid, parent)
+                self.end_attempt(aid, "accepted", "gates green; no worker needed", {},
+                                 gates_out=verdicts)
+                return
+            evidence = red
+            self.end_attempt(aid, "red", red[:300], {}, evidence=red, gates_out=verdicts)
         while n < limit:
             self.check_control()
             n += 1

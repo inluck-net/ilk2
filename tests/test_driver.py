@@ -718,3 +718,22 @@ def test_an_attempt_killed_at_its_bound_mid_edit_does_not_strand_the_step(ilk, m
     atts = ilk.s.all("SELECT outcome, evidence FROM attempts ORDER BY n")
     assert [a["outcome"] for a in atts] == ["red", "accepted"]
     assert "did not finish" in atts[0]["evidence"] and "kept in the worktree" in atts[0]["evidence"]
+
+
+def test_a_green_verification_step_needs_no_worker(ilk):
+    # gh-resolve P5 batch, Oct 14: the verify step's worker spent 18 min trying to run and record
+    # the full suite that is the step's own gate. The gate now runs first.
+    from dataclasses import asdict
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    ilk.script([GOOD])  # only the work step has a worker
+    bid = ilk.submit(_verify_spec())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.stub_calls() == 1
+    v = ilk.s.one("SELECT a.outcome, a.reason FROM attempts a JOIN steps st ON st.id = a.step_id "
+                  "WHERE st.plan_id LIKE '%verify'")
+    assert v["outcome"] == "accepted" and "no worker" in v["reason"]
