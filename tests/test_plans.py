@@ -186,3 +186,30 @@ def test_v1_local_checks_in_every_yaml_scalar_style_with_env_assignments():
     assert g[0].env == {"PYTHONPATH": "tools"} and g[0].cap_s == 120
     assert g[1].adapter == "shell" and g[1].command[:4] == ["bash", "-o", "pipefail", "-c"]
     assert g[2].command == ["python3", "-c", 'print(1)']
+
+
+def test_v1_ceremony_steps_merge_into_one(ilk):
+    # Oct 13: V1's red-first pins / implement / neighbour gate pattern made one piece of work
+    # three steps, each re-exploring the repo. ilk2's must_pass, base comparison and
+    # attribution cover what the extra steps were for.
+    from ilk2 import plans as P
+    g_a = {"name": "a", "adapter": "pytest", "command": ["python3", "-m", "pytest", "-q", "tests/test_a.py"]}
+    g_n = {"name": "n", "adapter": "pytest", "command": ["python3", "-m", "pytest", "-q", "tests/test_a.py", "tests/test_b.py"]}
+    spec = P.from_dict({"plans": [
+        {"slug": "work", "steps": [
+            {"title": "Red-first pins", "instructions": "write the pins", "gates": [g_a],
+             "expect_red": ["tests/test_a.py::test_new"]},
+            {"title": "Implement; remove every xfail", "instructions": "implement it", "gates": [g_a],
+             "must_pass": ["tests/test_a.py"]},
+            {"title": "Neighbour gate", "instructions": "run the neighbours", "gates": [g_n]}]},
+        {"slug": "x-batch-verify", "verification": True, "steps": [
+            {"title": "Red-first pins", "instructions": "never merged", "gates": [g_a]},
+            {"title": "Run the suite", "instructions": "verify", "gates": [g_a]}]}]})
+    P.merge_v1_ceremony(spec)
+    work = spec.plans[0].steps
+    assert len(work) == 1
+    s = work[0]
+    assert all(x in s.instructions for x in ("write the pins", "implement it", "run the neighbours"))
+    assert [g.name for g in s.gates] == ["a", "n"] and s.must_pass == ["tests/test_a.py"]
+    assert s.expect_red == []
+    assert len(spec.plans[1].steps) == 2  # a verification plan is left alone

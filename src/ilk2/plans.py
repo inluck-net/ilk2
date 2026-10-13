@@ -239,6 +239,51 @@ def parse_v1_master(master: Path) -> BatchSpec:
 
 # -- submit checks (§2.11.2) --------------------------------------------------------------
 
+def _merge(a: "Step", b: "Step", keep_reds: bool) -> "Step":
+    gates, seen = [], set()
+    for g in a.gates + b.gates:
+        key = (g.adapter, tuple(g.command), g.cwd)
+        if key not in seen:
+            seen.add(key)
+            gates.append(g)
+    return Step(title=b.title if not keep_reds else a.title,
+                instructions=f"{a.instructions}\n\n--- then, in the same step: {b.title} ---\n\n"
+                             f"{b.instructions}",
+                gates=gates, expect_red=list(a.expect_red if keep_reds else b.expect_red),
+                scope=sorted(set(a.scope) | set(b.scope)),
+                must_pass=list(dict.fromkeys(a.must_pass + b.must_pass)))
+
+
+def merge_v1_ceremony(spec: BatchSpec) -> BatchSpec:
+    """V1's red-first pins / implement / neighbour gate pattern is one piece of work in three
+    steps, and each step starts a session that re-explores the repo (Oct 13: 19 of 27.5 min of a
+    gh-resolve step before its first edit). ilk2's must_pass, base comparison and attribution
+    cover what the extra steps were for, so a 'Red-first…' step folds into the next one and a
+    trailing 'Neighbour gate…' step into the one before. The red-first step's expected reds
+    are dropped: the merged step must turn them green. Verification plans are left alone.
+    Judgment call: wrong if merged steps hit the attempt cap; then the planner should split."""
+    for plan in spec.plans:
+        if plan.verification or len(plan.steps) < 2:
+            continue
+        steps = list(plan.steps)
+        out: list[Step] = []
+        i = 0
+        while i < len(steps):
+            s = steps[i]
+            if s.title.lower().startswith("red-first") and i + 1 < len(steps):
+                out.append(_merge(s, steps[i + 1], keep_reds=False))
+                i += 2
+                continue
+            if s.title.lower().startswith("neighbour gate") and out:
+                out[-1] = _merge(out[-1], s, keep_reds=True)
+                i += 1
+                continue
+            out.append(s)
+            i += 1
+        plan.steps = out
+    return spec
+
+
 def check(spec: BatchSpec, root: Path | None = None, path_dirs: list[str] | None = None) -> list[str]:
     """Every reason to reject the batch at submit, or [] if it may be queued."""
     problems: list[str] = []

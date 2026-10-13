@@ -408,6 +408,21 @@ class Driver:
         self.block_step(step, "attempts", f"{limit} attempts red (3, then an escalation round)",
                         evidence or "")
 
+    def carried_session(self, step) -> str | None:
+        """The session of the previous step of the same plan, if that step was accepted and its
+        session stayed under carry_max_context (docs/02 §2.6: the step is still the bound
+        for a fresh start; carrying is an optimisation that falls back to a fresh session)."""
+        if step["idx"] == 0:
+            return None
+        row = self.s.one("SELECT a.session_id, a.timings FROM attempts a JOIN steps st ON "
+                         "st.id = a.step_id WHERE st.plan_id = ? AND st.idx = ? AND "
+                         "a.outcome = 'accepted' ORDER BY a.created_at DESC LIMIT 1",
+                         step["plan_id"], step["idx"] - 1)
+        if not row or not row["session_id"]:
+            return None
+        peak = json.loads(row["timings"] or "{}").get("peak_context_tokens") or 0
+        return None if peak > self.cfg.carry_max_context else row["session_id"]
+
     def all_evidence(self, step_id: str) -> str:
         """Every red attempt's evidence for the escalation round: a fresh session sees what each
         earlier attempt tried and what stayed red, not only the last one."""
@@ -446,20 +461,31 @@ class Driver:
                  session: str | None) -> tuple[str, dict, str | None]:
         cfg = worker.WorkerConfig(claude_bin=self.cfg.claude_bin, max_turns=self.cfg.max_turns,
                                   sandbox=self.cfg.sandbox, sandbox_allow=self.cfg.sandbox_allow)
-        resume = None
-        prev = self.s.one("SELECT id FROM attempts WHERE step_id = ? AND session_id = ? AND "
-                          "run_id = ? ORDER BY created_at DESC LIMIT 1", step["id"], session,
-                          self.run_id) if (n in bounds.RESUMED_ATTEMPTS and session) else None
-        if prev:
-            # Q6: the 2nd attempt resumes the same session, whose transcript lives in the
-            # previous attempt's config dir. The 3rd starts a fresh session.
+        resume, carried = None, False
+        if n in bounds.RESUMED_ATTEMPTS and session and self.s.one(
+                "SELECT 1 FROM attempts WHERE step_id = ? AND session_id = ? AND run_id = ?",
+                step["id"], session, self.run_id):
+            # Q6: the 2nd attempt resumes the same session. The 3rd starts a fresh one.
             resume = session
-            files = worker.AttemptFiles(self.dir / prev["id"])
+        elif n == 1 and session is None and self.cfg.carry_session:
+            resume = self.carried_session(step)
+            carried = resume is not None
+        if resume:
+            # A session's transcript lives in the config dir of the attempt that created it
+            first = self.s.one("SELECT id, run_id FROM attempts WHERE session_id = ? "
+                               "ORDER BY created_at LIMIT 1", resume)
+            files = worker.AttemptFiles(paths.run_dir(first["run_id"]) / first["id"])
         else:
             files = worker.AttemptFiles(self.dir / aid)
         worker.prepare(cfg, files, self.root, [g.command for g in gate_list],
                        fresh_config=resume is None)
-        if resume:
+        if carried:
+            prompt = ("The previous step of this plan is accepted and committed. Continue in this "
+                      "session with the next step, same rules as before; you already have the "
+                      "context you read.\n\n" + worker.brief(
+                          step["title"], step["instructions"],
+                          [" ".join(g.command) for g in gate_list], evidence, preload=None))
+        elif resume:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
         else:
@@ -470,7 +496,8 @@ class Driver:
                                      [g.command for g in gate_list], diff)
             prompt = worker.brief(step["title"], step["instructions"],
                                   [" ".join(g.command) for g in gate_list], evidence, preload=pre)
-        with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume)):
+        with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume),
+                        carried=carried):
             d = worker.dispatch(cfg, files, self.root, prompt, resume=resume)
             outcome = d.wait(self.b.attempt_cap, self.b.term_grace, self.b.kill_grace)
         summary = d.summary()

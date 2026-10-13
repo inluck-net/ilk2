@@ -52,6 +52,10 @@ class ProjectConfig:
     # batch-verify plan's gates call V1's own tooling (~/.ilk/current scripts writing V1
     # records); on import they are replaced by this command (gh-resolve's P5 master, Oct 13).
     verify_command: list[str] | None = None
+    # Step k of a plan continues step k-1's session (Oct 13: 19 of 27.5 min of a gh-resolve step
+    # went to re-exploring). Judgment call: on, unless that session passed carry_max_context.
+    carry_session: bool = True
+    carry_max_context: int = 400_000
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":
@@ -164,8 +168,13 @@ def preflight(spec: plans.BatchSpec, repo: Path, base_sha: str, cfg: "ProjectCon
     return problems
 
 
+V1_TOOLING = ("verification_record.py", "verify_attribution.py")  # V1's batch-verify scripts
+
+
 def _v1_tooling(g: plans.Gate) -> bool:
-    return any("/.ilk/" in a or ".ilk-data" in a for a in g.command)
+    """A gate that runs V1's own tooling: through ~/.ilk/ or ~/.ilk-data, or V1's batch-verify
+    scripts by name (ilk-skills, V1's own repo, calls them by a repo-relative path)."""
+    return any("/.ilk/" in a or ".ilk-data" in a or Path(a).name in V1_TOOLING for a in g.command)
 
 
 def translate_v1_tooling(spec: plans.BatchSpec, cfg: "ProjectConfig") -> list[str]:
@@ -224,6 +233,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
     problems += translate_v1_tooling(spec, cfg)
+    plans.merge_v1_ceremony(spec)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
     deny = list(cfg.deny_paths) + list(deny_paths or [])
     for p in spec.plans:

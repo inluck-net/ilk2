@@ -537,3 +537,37 @@ def test_a_verification_step_that_changes_nothing_is_accepted_without_a_commit(i
     work = ilk.s.one("SELECT accepted_commit FROM steps WHERE plan_id = ?", f"{bid}.work")["accepted_commit"]
     ver = ilk.s.one("SELECT accepted_commit FROM steps WHERE plan_id LIKE '%verify'")["accepted_commit"]
     assert ver == work == ilk.git(b["execution_root"], "rev-parse", b["branch"])  # no extra commit
+
+
+def test_v1_tooling_is_recognised_by_script_name_too():
+    # ilk-skills is V1's own repo: its verify plans call the same scripts by a repo-relative
+    # path (skills/ilk-loop/scripts/verification_record.py), not through ~/.ilk/.
+    from ilk2 import batches, plans
+    for cmd in (["python3", "skills/ilk-loop/scripts/verification_record.py", "--project", "."],
+                ["python3", "skills/ilk-loop/scripts/verify_attribution.py", "--batch", "x"]):
+        assert batches._v1_tooling(plans.Gate(name="g", adapter="shell", command=cmd))
+    assert not batches._v1_tooling(plans.Gate(name="g", adapter="pytest",
+                                              command=["python3", "-m", "pytest", "tests/test_a.py"]))
+
+
+def test_next_step_of_a_plan_resumes_the_previous_steps_session(ilk):
+    # Oct 13, gh-resolve P5 batch: 19 of 27.5 min went to exploring before the first edit, and
+    # every step of a plan started cold. Step k now continues step k-1's session.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([{"write": "a.txt", "text": "a"}], [{"write": "b.txt", "text": "b"}],
+               [{"write": "c.txt", "text": "c"}])
+    spec = {"plans": [
+        {"slug": "p", "steps": [{"title": f"s{i}", "instructions": f"step {i}", "must_pass": [],
+                                 "gates": [gate("tests/test_calc.py")]} for i in range(2)]},
+        {"slug": "q", "steps": [{"title": "q0", "instructions": "other plan", "must_pass": [],
+                                 "gates": [gate("tests/test_calc.py")]}]}]}
+    bid = ilk.submit(spec)
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT a.session_id, st.plan_id FROM attempts a JOIN steps st ON st.id = a.step_id "
+                     "ORDER BY a.created_at")
+    assert atts[0]["session_id"] == atts[1]["session_id"]   # p.0 -> p.1 carried
+    assert atts[2]["session_id"] != atts[1]["session_id"]   # a new plan starts fresh
+    prompts = ilk.stub_prompts()
+    assert "step 1" in prompts[1] and "previous step" in prompts[1].lower()
+    assert "Preloaded context" not in prompts[1]           # the session already has it
