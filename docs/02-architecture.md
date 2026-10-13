@@ -128,7 +128,7 @@ stateDiagram-v2
   GatesFirst --> Dispatch: red (failures become the brief)
   Dispatch: Worker session<br/>attempt 1 of step k>0 continues step k-1's session (carry-over)<br/>attempt 2 resumes · attempt 3 fresh · 4-5 escalation with all evidence
   Dispatch --> ScopeCheck
-  ScopeCheck: Changed paths vs deny_paths (always hard)<br/>and step scope (hard, or advice for V1-planned projects)
+  ScopeCheck: Changed paths vs deny_paths (always hard),<br/>step scope (hard, or advice for V1-planned projects),<br/>and no copy of the repository inside the worktree
   ScopeCheck --> Gates: ok
   ScopeCheck --> Red: denied path, or out of an enforced scope
   Gates: Run each gate; compare with the batch base;<br/>red-first check on new must_pass pins
@@ -150,11 +150,12 @@ stateDiagram-v2
 ```
 
 Added since the design closed (each with a test; why in [document 6](06-open-items.md), "Batch speed"):
+- **No repository copies.** An attempt that adds 50 or more files repeating tracked paths under a new directory (a scratch checkout of the base inside the worktree) is red; the brief tells workers to keep such copies in `$TMPDIR` (Oct 14: 1,111 such files under `.base-tree/` nearly reached a commit).
 - **Kept work.** A new run (resume, upgrade drain, crash recovery) keeps the step's own uncommitted work when the root is at the branch head and the step's last attempt ended red, interrupted, timed out or crashed. The brief says so. Anything else is reset, and its diff is saved as `leftover-<step>.diff`.
 - **Session carry-over.** The first attempt of step *k* > 0 continues step *k*-1's session when that step was accepted and stayed under `carry_max_context` (400k). It skips re-reading the repo: carried steps took 6-19 min, fresh ones 24-33 min.
 - **V1 ceremony merge.** At import, a V1 "Red-first pins" step folds into the next step, and a trailing "Neighbour gate" step into the one before. `amend merge_ceremony` does the same for a plan that has not started. Gates that look up the folded step's own commit are dropped, since that commit is the merged step itself.
 - **Red-first inside a step.** A `must_pass` test in a file the plan added must fail on the code it replaces: on the step's parent, or on the plan's starting commit when the pin was written in an earlier step of the plan. A control test that passes on the old code by design does not belong in `must_pass`. Repair and verification plans are not checked: a repair's `must_pass` is the failing test it must turn green, not a new pin.
-- **Verification plans run gates first, on every entry** (a fresh step, and again after repairs or a restart, so a worker never gets stale evidence), on the kept work too: kept work that is already green is accepted with no worker. If they are green, the step is accepted with no worker. If they are red, the worker is briefed that the gate already ran and that no V1 record exists.
+- **Verification plans run gates first, on every entry** (a fresh step, and again after repairs or a restart, so a worker never gets stale evidence), on the kept work too: kept work that is already green is accepted with no worker. A gates-first run is recorded but never counts as an attempt, so a red one always leaves the worker its attempts. If they are green, the step is accepted with no worker. If they are red, the worker is briefed that the gate already ran and that no V1 record exists.
 
 What this removes from V1:
 - **Plans ship themselves.** When the driver finalizes a plan's last step, the plan is shipped in that same store transaction. No separate worker ship, `gate_first` marker or ship script is needed, so the Oct 12 #8309 deadlock cannot occur.

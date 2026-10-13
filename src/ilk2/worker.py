@@ -324,6 +324,9 @@ Rules:
 - Do not weaken tests to make them pass.
 - The loop engine is not part of your task: its store, logs and other attempts are not
   readable from here. Everything you need about earlier attempts is in this brief.
+- Keep scratch files and copies of the repository (for example a checkout of the base to
+  compare against) in $TMPDIR, never inside the worktree: everything in the worktree is
+  committed with your change.
 - `git fetch` cannot update this repository's refs from here (the sandbox blocks it, and -q
   hides the error). Do not trust a fetch you ran; use the refs as the driver left them.
 

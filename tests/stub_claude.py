@@ -92,7 +92,11 @@ def main():
             emit({"type": "system", "subtype": "compact_boundary", "session_id": sid,
                   "compact_metadata": {"trigger": "auto", "pre_tokens": a.get("pre_tokens", 0)}})
         elif "delete" in a:
-            os.remove(a["delete"])
+            if os.path.isdir(a["delete"]):
+                import shutil
+                shutil.rmtree(a["delete"])
+            else:
+                os.remove(a["delete"])
         elif "sleep" in a:
             time.sleep(a["sleep"])
         elif a.get("hang"):

@@ -939,3 +939,45 @@ def test_a_verification_step_gates_its_kept_work_first(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
     assert ilk.stub_calls() == 0                           # gated first: no worker needed
     assert ilk.git(root, "show", f"{ilk.s.get('batches', bid)['branch']}:calc.py") == GOOD["text"].strip()
+
+
+def test_a_copy_of_the_repository_inside_the_worktree_is_red(ilk):
+    # gh-resolve P5 batch, Oct 14: 1,111 files under .base-tree/ were nearly committed.
+    ilk.make_repo()
+    root = ilk.repo
+    for i in range(60):
+        (root / f"m{i}.txt").write_text(str(i))
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "60 tracked files")
+    ilk.project()
+    copy = [{"write": f".base-tree/m{i}.txt", "text": str(i)} for i in range(60)]
+    ilk.script([GOOD] + copy, [GOOD, {"delete": ".base-tree"}])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT outcome, evidence FROM attempts ORDER BY n")
+    assert atts[0]["outcome"] == "red" and "copied the repository" in atts[0]["evidence"]
+
+
+def test_a_red_gates_first_run_leaves_the_worker_its_attempt(ilk):
+    # gh-resolve P5 batch, Oct 14: gates-first took the 5th attempt and blocked the step.
+    from dataclasses import asdict
+    from ilk2 import batches, bounds, clock
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    spec = _verify_spec()
+    spec["plans"] = spec["plans"][1:]
+    spec["plans"][0]["depends_on"] = []
+    bid = ilk.submit(spec)
+    root = Path(ilk.s.get("batches", bid)["execution_root"])
+    (root / "tests" / "test_new_red.py").write_text("def test_x():\n    assert False\n")
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "red at the head")
+    vstep = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
+    ilk.s.update("steps", vstep["id"], {"attempt_count": limit - 1}, actor="test", reason="4 used")
+    ilk.script([{"delete": "tests/test_new_red.py"}])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.stub_calls() == 1                            # the worker got the last attempt

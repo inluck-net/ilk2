@@ -572,6 +572,11 @@ class Driver:
                 return
             evidence = red + ("\n\n" + KEPT_NOTE if kept else "")
             self.end_attempt(aid, "red", red[:300], {}, evidence=red, gates_out=verdicts)
+            # A gates-first run is a measurement, not work: it never takes a worker's attempt
+            # (gh-resolve P5 batch, Oct 14: it took the 5th and blocked the step unseen).
+            n -= 1
+            self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
+                          reason="gates-first red: not counted")
         while n < limit:
             self.check_control()
             n += 1
@@ -609,6 +614,11 @@ class Driver:
                 if out_of_scope and not self.cfg.enforce_scope:
                     self.event("scope.advisory", step=step["id"], outside=out_of_scope[:50])
                     out_of_scope = []
+                mirrored = self.mirrored_copy()
+                if mirrored and red is None:
+                    red = (f"The attempt copied the repository into the worktree: {len(mirrored)} added "
+                           f"files repeat tracked paths under a new directory (e.g. {mirrored[0]}). "
+                           "Remove the copy; keep scratch copies in $TMPDIR, outside the worktree.")
                 if denied and red is None:
                     # docs/06 R8: never accepted, whatever the step's scope says
                     red = ("Changes to denied paths (deny_paths: the project's plus this batch's); "
@@ -788,6 +798,17 @@ class Driver:
         self.api_spent += wait
 
     # -- scope and gates ----------------------------------------------------------------
+
+    def mirrored_copy(self) -> list[str]:
+        """Added files that repeat tracked paths under a new top directory: a copy of the
+        repository inside the worktree. gh-resolve P5 batch, Oct 14: a verification worker
+        left 1,111 files under .base-tree/, which would have been committed. Judgment call:
+        50 such files; wrong if a project vendors a copy of its own tree on purpose."""
+        tracked = set(gitops.git(self.root, "ls-files", check=False).split("\n"))
+        added = gitops.git(self.root, "status", "--porcelain", "-uall", check=False).splitlines()
+        new = [ln[3:] for ln in added if ln[:2] in ("??", "A ", "AM")]
+        mirrored = [p for p in new if "/" in p and p.split("/", 1)[1] in tracked]
+        return mirrored if len(mirrored) >= 50 else []
 
     def out_of_scope(self, scope: list[str]) -> list[str]:
         if not scope:
