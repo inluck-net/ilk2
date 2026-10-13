@@ -28,6 +28,7 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
 # Run endings that are not a failure of the run: they never consume a restart (§2.10).
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
+SETUP_DONE = ".ilk2-setup-done"  # in a diagnostic worktree: its setup hook completed
 NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api", "waiting-lease"}
 
 
@@ -199,10 +200,12 @@ class Driver:
         p = paths.diag(self.batch_id) / commit[:12]
         if not (p / ".git").exists():
             gitops.add_worktree(self.repo, p, commit)
-            if self.cfg.setup:
-                # §2.5.7, A5: each diagnostic worktree installs from its own commit's lockfile,
-                # so old source is never tested against later dependencies.
-                self.setup(p)
+        if self.cfg.setup and not (p / SETUP_DONE).exists():
+            # §2.5.7, A5: each diagnostic worktree installs from its own commit's lockfile,
+            # so old source is never tested against later dependencies. Keyed on completion,
+            # not creation: a run that died mid-setup leaves no marker (kira, Oct 13).
+            self.setup(p)
+            (p / SETUP_DONE).write_text(f"{clock.wall():.0f}\n")
         return p
 
     def env(self) -> dict[str, str]:

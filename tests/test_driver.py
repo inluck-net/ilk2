@@ -413,3 +413,32 @@ def test_deny_paths_allow_a_broader_scope_that_contains_them(ilk):
     ilk.make_repo()
     ilk.project(deny_paths=["tests/fixtures/"])
     ilk.submit(one_step(scope=["tests/", "calc.py"]))
+
+
+def test_consumer_git_hooks_do_not_break_ilk2_worktrees(ilk):
+    # kira-cloudflare, Oct 13: lefthook's post-checkout hook made `git worktree add` exit
+    # non-zero, the run errored, and the next run measured a worktree whose setup never ran.
+    ilk.make_repo()
+    hook = ilk.repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text("#!/bin/sh\necho 'consumer hook ran' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+
+
+def test_interrupted_setup_is_rerun_in_a_reused_diag_worktree(ilk):
+    ilk.make_repo()
+    ilk.project(setup={"command": ["python", "-c", "open('setup-ran', 'a').write('x')"]})
+    bid = ilk.submit(one_step())
+    from ilk2.driver import Driver
+    d = Driver(ilk.s, ilk.new_run(bid))
+    base = ilk.s.get("batches", bid)["base_commit"]
+    p = d.diag_worktree(base)
+    assert (p / "setup-ran").read_text() == "x"
+    (p / ".ilk2-setup-done").unlink()  # as if the run died during setup
+    d.diag_worktree(base)
+    assert (p / "setup-ran").read_text() == "xx"  # setup ran again
+    d.diag_worktree(base)
+    assert (p / "setup-ran").read_text() == "xx"  # and not a third time once it completed

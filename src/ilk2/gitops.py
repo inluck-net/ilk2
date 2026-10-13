@@ -22,10 +22,16 @@ class GitError(RuntimeError):
     pass
 
 
+# ilk2's own git operations never run the consumer's hooks: lefthook's post-checkout `bun install`
+# made `git worktree add` exit non-zero on kira-cloudflare (Oct 13), outside the pinned env.
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+
+
 def git(root: Path, *args: str, env: dict | None = None, check: bool = True) -> str:
     e = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
     e.update(env or {})
-    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=e)
+    p = subprocess.run(["git", *NO_HOOKS, "-C", str(root), *args], capture_output=True, text=True,
+                       env=e)
     if check and p.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {p.stderr.strip()[:500]}")
     return p.stdout.strip()
