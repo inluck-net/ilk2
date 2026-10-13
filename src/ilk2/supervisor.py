@@ -249,7 +249,17 @@ class Supervisor:
     # -- requeue, restart counting, crash loops ----------------------------------------------
 
     def current_step(self, batch_id: str, plan_id: str | None = None):
-        """The step a lost run was on: its own plan's, for a lane run."""
+        """The step a lost run was on: its own plan's, for a lane run. A lane lost while
+        merging has every step accepted: its restarts count on the plan's last step, so a
+        crashing merge reaches the crash-loop ladder instead of respawning forever."""
+        if plan_id:
+            st = self.s.one("SELECT * FROM steps WHERE plan_id = ? AND status IN ('pending', "
+                            "'accepting') ORDER BY idx LIMIT 1", plan_id)
+            if st is None and self.s.get("plans", plan_id)["status"] not in ("shipped", "blocked",
+                                                                              "cancelled"):
+                st = self.s.one("SELECT * FROM steps WHERE plan_id = ? ORDER BY idx DESC LIMIT 1",
+                                plan_id)
+            return st
         for p in self.s.all("SELECT * FROM plans WHERE batch_id = ? AND status IN ('pending', 'active') "
                             + ("AND id = ? " if plan_id else "") + "ORDER BY ord",
                             batch_id, *([plan_id] if plan_id else [])):
@@ -294,9 +304,11 @@ class Supervisor:
             self.s.event("crash-backoff", {"step": step["id"], "restarts": n, "seconds": wait},
                          batch_id=run["batch_id"])
             return
-        if n >= bounds.RESTARTS_BEFORE_HUMAN and step["status"] == "pending":
-            self.s.transition("steps", step["id"], "blocked", actor="supervisor", reason="crash-loop",
-                              fields={"blocked_reason": f"crash-loop: {reason}"})
+        merging = step["status"] == "accepted"  # a lane lost while merging (current_step)
+        if n >= bounds.RESTARTS_BEFORE_HUMAN and (step["status"] == "pending" or merging):
+            if not merging:
+                self.s.transition("steps", step["id"], "blocked", actor="supervisor", reason="crash-loop",
+                                  fields={"blocked_reason": f"crash-loop: {reason}"})
             self.s.transition("plans", step["plan_id"], "blocked", actor="supervisor",
                               reason="crash-loop", fields={"blocked_reason": f"step {step['idx']}: crash-loop"})
             reasons = [r["terminal_reason"] for r in self.s.all(

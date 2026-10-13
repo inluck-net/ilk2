@@ -195,6 +195,31 @@ consumer(gen n+2) --consumer release(gen n+2, new_head)--> released(gen n+3) --r
 - **A consumer lease has a time limit and can be renewed.** A consumer doing a long operation calls `ilk2 lease renew --generation <g>` before the limit (§2.11.1). Expiry does **not** release the lease: it moves to `consumer-expired`, which still fences the driver. `resume` fails in that state, and a consumer that is still working can finish, push and release normally. Writer authority returns to `released` only by the consumer's own `ilk2 lease release`, or by `ilk2 lease recover --generation <g>` after an operator or the consumer confirms no consumer process can still write. Expiry creates a `needs_human` row under the project's notification policy (Codex review 3, finding 2).
 - **`ilk2 status --json` reports** `root_lease` (holder, owner, generation, expiry) and `accepted_head`.
 
+### 2.4.2a Lanes: independent plans in parallel (built Oct 14, opt-in)
+
+With `max_lanes` > 1 (a project setting, default 1), independent work plans of one batch run at once. Each lane is a run bound to one plan (`runs.plan_id`). The batch keeps one branch, and consumers see no difference. Over 254 real V1 masters, 2 lanes shorten the critical path by a median 43% ([document 6](06-open-items.md), "Parallel plans").
+
+```mermaid
+flowchart LR
+  H0[batch head] --> LA["lane p1: worktree &lt;batch&gt;.p1<br/>branch &lt;batch-branch&gt;--p1"]
+  H0 --> LB["lane p2: worktree &lt;batch&gt;.p2<br/>branch &lt;batch-branch&gt;--p2"]
+  LA -->|all steps accepted| M1{"take the merge lock;<br/>merge --no-ff into the batch branch;<br/>re-gate the plan's gates on the merged head"}
+  LB -->|all steps accepted| M2{merge lock, merge, re-gate}
+  M1 -->|clean and green| H1[plan p1 shipped]
+  M2 -->|clean and green| H2[plan p2 shipped]
+  M1 -->|conflict or red| R["repair plan merge-p1<br/>(runs in the batch root, before anything else)"]
+  M2 -->|conflict or red| R
+  H2 --> V[verification plan: waits for every work plan]
+```
+
+- **Admission.** The supervisor starts the batch's first run bound to its first ready plan; that run measures the base. Once the base exists, it starts another lane for each ready plan, up to `max_lanes`. "Ready" means: dependencies shipped (merged), not taken by a live run, and no unshipped repair. Repair plans are a barrier (§2.5.7): while one is unshipped, only repairs are ready. Lanes count against `concurrency_limit` and the host budget like any run (§2.2.1).
+- **A lane** cuts its worktree and branch from the batch head when it starts. If its run is requeued, it reuses them, with the step's kept work. Inside the lane, steps run exactly as in §2.4: carry-over, gates against the batch base, attribution, kept work. A step accepted in a lane commits to the lane branch; the batch's accepted head moves only at the merge.
+- **Merging.** When a lane's steps are all accepted, its run takes the batch's **merge lock**: a store row naming the run, free once that run has ended. It merges the lane branch into the batch branch (`--no-ff`, consumer hooks off) in the batch root, then re-runs the plan's gates there against the batch base. The plan ships then, not at its last step, so dependents start from the merged head. The lane worktree is removed after the merge; the lane branch stays. A merge left half-done by a crash is aborted on the next entry, and a lane already merged skips straight to the re-gate.
+- **Conflicts and red re-gates** become a repair plan `merge-<plan>` on the batch branch, with the conflicting files (and how to see the lane's diff) or the new failures as its brief. A failure that first appears at a merge commit is charged to that repair, never walked back into either lane.
+- **Repair and verification plans** run in the batch root, holding the merge lock for their whole run, so nothing merges under them. A verification plan waits for every work plan, not only its declared dependencies.
+- **Lost lanes.** Restarts count on the lane's own step, or on its plan's last step while it merges, so a crashing merge climbs the same crash-loop ladder (§2.10) and ends in a blocked plan with a needs-human row. A blocked lane does not stop the others. When nothing is ready and nothing runs, a plain run ships the batch or blocks it with the reason.
+- **Tests:** `tests/test_lanes.py` covers two lanes in parallel with both merged, a merge conflict becoming a repair, a dependent plan starting from the merged head, a blocked lane while the other ships, a lane whose driver dies mid-attempt, and `max_lanes` = 1 keeping the serial path.
+
 ## 2.5 Gates
 
 ### 2.5.1 What a gate is

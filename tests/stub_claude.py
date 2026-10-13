@@ -2,7 +2,8 @@
 """A stand-in for `claude -p --output-format stream-json`, for tests and the stall suite.
 
 Reads the prompt from stdin, prints an init event, then follows $STUB_SCRIPT (or
-$CLAUDE_CONFIG_DIR/stub.json); {"calls": [script, ...]} gives the Nth call its own script.
+$CLAUDE_CONFIG_DIR/stub.json); {"calls": [script, ...]} gives the Nth call its own script, and
+{"by_cwd": {"part-of-cwd": [script, ...]}} gives each worktree (lane) its own sequence.
 A script is
 {"actions": [...], "resume_actions": [...]} where each action is one of
   {"write": "rel/path", "text": "..."}        write a file in the cwd (via an Edit tool_use)
@@ -44,7 +45,20 @@ def main():
     if os.path.exists(p):
         with open(p) as f:
             script = json.load(f)
-    if "calls" in script:  # a sequence: the Nth start/resume across the test gets calls[N]
+    if "by_cwd" in script:  # lanes run concurrently: each worktree has its own sequence
+        key = next((k for k in script["by_cwd"] if k in os.getcwd()), None)
+        if key is not None:
+            log = p + ".calls." + key.replace("/", "_")
+            n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
+            with open(log, "a") as f:
+                f.write(json.dumps({"prompt": prompt}) + "\n")
+            with open(p + ".calls", "a") as f:  # the overall log tests read too
+                f.write(json.dumps({"prompt": prompt, "cwd": os.getcwd()}) + "\n")
+            seq = script["by_cwd"][key]
+            script = seq[min(n, len(seq) - 1)]
+        else:
+            script = {}
+    elif "calls" in script:  # a sequence: the Nth start/resume across the test gets calls[N]
         log = p + ".calls"
         n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
         with open(log, "a") as f:

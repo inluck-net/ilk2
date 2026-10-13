@@ -109,11 +109,11 @@ class Driver:
             if reason == "cancelled":
                 self.finish_cancel()
             elif reason == "parked":  # §2.4.2: the driver releases at these states
-                row = lease.get(self.s, str(self.root))
+                row = lease.get(self.s, str(self.batch_root))
                 if row and row["holder"] == "driver" and not self.s.one(
                         "SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'", self.batch_id):
-                    lease.driver_release(self.s, str(self.root),
-                                         gitops.branch_head(self.root, self.branch))
+                    lease.driver_release(self.s, str(self.batch_root),
+                                         gitops.branch_head(self.batch_root, self.batch_branch))
         except StoreBusy:
             reason = "store-busy"
         except Exception:  # noqa: BLE001 - recorded, the supervisor requeues
@@ -290,13 +290,15 @@ class Driver:
                     seen.add(json.dumps(g, sort_keys=True))
                     gl.append(g)
         slug = f"merge-{self.plan['slug']}"
+        if self.s.one("SELECT 1 FROM plans WHERE batch_id = ? AND slug = ?", self.batch_id, slug):
+            return  # added before a crash: the retry joins it
         b = self.s.get("batches", self.batch_id)
         batches.amend(self.s, self.batch_id, [{
             "op": "add_plan", "slug": slug, "repair_of_step_id": last,
             "steps": [{"title": f"Repair the merge of plan {self.plan['slug']} ({kind})",
                        "instructions": brief, "gates": gl}]}],
             expect_version=b["version"], actor="driver", reason=f"lane-merge-{kind}")
-        self.event("repair.added", plan=slug, repair_of=last, kind=f"merge-{kind}")
+        self.event("repair.added", plan=slug, repair_of=last, repair_kind=f"merge-{kind}")
 
     # -- activation: setup and base measurement (§2.5.3, §2.11.2) -------------------------
 
@@ -486,8 +488,8 @@ class Driver:
         self.s.transition("batches", self.batch_id, "blocked", actor="driver",
                           reason="nothing runnable", expect_from={"active"},
                           fields={"blocked_reason": "; ".join(blocked)})
-        head = gitops.branch_head(self.root, self.branch)
-        lease.driver_release(self.s, str(self.root), head)  # batch.blocked: emitted by the store
+        head = gitops.branch_head(self.batch_root, self.batch_branch)
+        lease.driver_release(self.s, str(self.batch_root), head)  # batch.blocked: emitted by the store
 
     def block_batch(self, reason: str, detail: str, clear: str, release: bool = True) -> None:
         self.s.transition("batches", self.batch_id, "blocked", actor="driver", reason=reason,
@@ -495,9 +497,9 @@ class Driver:
         self.s.open_needs_human(reason, detail[:2000], clear, batch_id=self.batch_id)
         if not release:  # the root stays fenced: survivors may still be writing to it
             raise Stop(f"blocked ({reason})", detail[:300])
-        head = gitops.branch_head(self.root, self.branch)
+        head = gitops.branch_head(self.batch_root, self.batch_branch)
         try:
-            lease.driver_release(self.s, str(self.root), head)
+            lease.driver_release(self.s, str(self.batch_root), head)
         except Conflict:
             pass
         raise Stop(f"blocked ({reason})", detail[:300])
@@ -1015,7 +1017,7 @@ class Driver:
     # -- acceptance (§2.4.1, I12) ---------------------------------------------------------
 
     def accept(self, step, aid: str, parent: str) -> None:
-        if not lease.holder_is_driver(self.s, str(self.root)):
+        if not lease.holder_is_driver(self.s, str(self.batch_root)):  # a lane holds its batch's
             raise Stop("lease", "the root lease is not held by the driver")
         tree = gitops.worktree_tree(self.root)
         intent = {"attempt_id": aid, "parent": parent, "tree": tree}
@@ -1051,7 +1053,8 @@ class Driver:
             if last and not self.lane:  # a lane's plan ships when it has merged
                 self.s.transition("plans", step["plan_id"], "shipped", actor="driver",
                                   reason="last step accepted")
-            lease.set_accepted_head(self.s, str(self.root), sha)
+            if not self.lane:  # a lane's commit reaches the batch head when it merges
+                lease.set_accepted_head(self.s, str(self.batch_root), sha)
             self.event("step.accepted", step=step_id, commit=sha, plan_shipped=last)
 
     def recover_accepting(self) -> None:
@@ -1108,9 +1111,10 @@ class Driver:
             for p in self.s.all("SELECT id FROM plans WHERE batch_id = ? AND status IN "
                                 "('pending', 'active', 'blocked')", self.batch_id):
                 self.s.transition("plans", p["id"], "cancelled", actor="driver", reason="batch cancelled")
-        row = lease.get(self.s, str(self.root))
+        row = lease.get(self.s, str(self.batch_root))
         if row and row["holder"] == "driver" and not root_in_use_by_other(self.s, self.batch_id):
-            lease.driver_release(self.s, str(self.root), gitops.branch_head(self.root, self.branch))
+            lease.driver_release(self.s, str(self.batch_root),
+                                 gitops.branch_head(self.batch_root, self.batch_branch))
         self.s.clear_needs_human(self.batch_id)
         return True
 

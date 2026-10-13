@@ -220,7 +220,9 @@ flowchart LR
 2. **On a merge conflict, or a red re-gate** (proposed: add a one-step repair plan on the batch branch, with the conflict hunks or the new failures as its brief; the same mechanism as attribution repairs).
 3. **Attribution across lanes:** a failure that first appears at a merge commit is attributed to the merge (that repair step), not walked back into either lane.
 
-**Cost:** about 400-600 lines in the driver: lane scheduling, a worktree per lane, merge plus re-gate, and repair on conflict. It needs a stall-suite extension (lane crash, merge conflict, a lane blocked while the other ships). Not started; built only after Chad's review.
+**Status: approved by Chad (Oct 14, ~02:55, all three decisions as proposed) and built the same night** ([document 2](02-architecture.md) §2.4.2a). It is opt-in: `max_lanes` defaults to 1. Lanes are enabled for gh-resolve and ilk-skills (2 each) after the first release that carries them, and judged on their first real batch. `tests/test_lanes.py` has 6 cases, among them a lane crash, a merge conflict, and a lane blocked while the other ships.
+
+Found while building: a lane lost during its merge had no pending step to count restarts on, so it would have respawned forever instead of climbing the crash-loop ladder. Restarts now count on the plan's last step, and the plan blocks with a needs-human row.
 
 ### Upgrades block admission (found Oct 14, for P6)
 
