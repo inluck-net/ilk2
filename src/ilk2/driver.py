@@ -303,8 +303,8 @@ class Driver:
         plan = self.s.get("plans", step["plan_id"])
         if plan["status"] == "pending":
             self.s.transition("plans", plan["id"], "active", actor="driver", reason="first step")
-        if step["restart_count"] >= bounds.RESTARTS_PER_STEP:
-            self.block_step(step, "crash-loop", "3 restarts of this step",
+        if step["restart_count"] >= bounds.RESTARTS_BEFORE_HUMAN:
+            self.block_step(step, "crash-loop", f"{step['restart_count']} restarts of this step",
                             self.restart_reasons(step["id"]))
             return
         gate_list = [Gate(**g) for g in json.loads(step["gates"])]
@@ -322,7 +322,8 @@ class Driver:
                           "ORDER BY created_at DESC LIMIT 1", step["id"])
         evidence = last["evidence"] if last else None
         session = None
-        while n < bounds.ATTEMPTS_PER_STEP:
+        limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
+        while n < limit:
             self.check_control()
             n += 1
             aid = new_id("a")
@@ -331,6 +332,9 @@ class Driver:
                                        "created_at": clock.wall()})
             self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
                           reason=f"attempt {n}")
+            if n == bounds.ATTEMPTS_PER_STEP + 1:
+                evidence = self.all_evidence(step["id"])  # the escalation round's brief
+                session = None
             outcome, summary, session = self.dispatch(step, aid, n, gate_list, evidence, session)
             if outcome in ("api", "quota"):
                 n -= 1
@@ -373,7 +377,17 @@ class Driver:
                 return
             evidence = red
             self.end_attempt(aid, "red", red[:300], summary, evidence=red, gates_out=verdicts)
-        self.block_step(step, "attempts", f"{bounds.ATTEMPTS_PER_STEP} attempts red", evidence or "")
+        self.block_step(step, "attempts", f"{limit} attempts red (3, then an escalation round)",
+                        evidence or "")
+
+    def all_evidence(self, step_id: str) -> str:
+        """Every red attempt's evidence for the escalation round: a fresh session sees what each
+        earlier attempt tried and what stayed red, not only the last one."""
+        rows = self.s.all("SELECT n, outcome, evidence FROM attempts WHERE step_id = ? AND "
+                          "evidence IS NOT NULL ORDER BY n", step_id)
+        parts = [f"Attempt {r['n']} ({r['outcome']}):\n{r['evidence'][-6000:]}" for r in rows]
+        return ("Earlier attempts at this step were all red. Read what each one left red before "
+                "you start; do not repeat an approach that already failed.\n\n" + "\n\n".join(parts))
 
     def restart_reasons(self, step_id: str) -> str:
         rows = self.s.all("SELECT a.outcome, a.reason FROM attempts a WHERE a.step_id = ? "
@@ -407,7 +421,7 @@ class Driver:
         resume = None
         prev = self.s.one("SELECT id FROM attempts WHERE step_id = ? AND session_id = ? AND "
                           "run_id = ? ORDER BY created_at DESC LIMIT 1", step["id"], session,
-                          self.run_id) if (n == 2 and session) else None
+                          self.run_id) if (n in bounds.RESUMED_ATTEMPTS and session) else None
         if prev:
             # Q6: the 2nd attempt resumes the same session, whose transcript lives in the
             # previous attempt's config dir. The 3rd starts a fresh session.

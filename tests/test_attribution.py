@@ -253,5 +253,5 @@ def test_a10_blocked_repair_blocks_the_batch(ilk):
     assert len(rp) == 1 and rp[0]["status"] == "blocked"
     r0 = ilk.s.one("SELECT * FROM steps WHERE id = ?", f"{bid}.r.0")
     assert r0["status"] == "pending" and r0["attempt_count"] == 0
-    assert ilk.stub_calls() == 5  # break, declares, 3 repair attempts; never the independent step
+    assert ilk.stub_calls() == 7  # break, declares, 5 repair attempts; never the independent step
     assert [r["reason"] for r in ilk.s.open_human_rows(bid)] == ["attempts"]

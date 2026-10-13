@@ -41,10 +41,21 @@ class Bounds:
     host_slept_gap: float = 60
     load_timeout_window: float = 30 * 60
     attribution_wall: float = 20 * 60     # the whole attribute phase (§2.5.7)
+    # Self-resolution (docs/06): a crash loop backs off before it asks a human. Judgment call:
+    # 15 min then 1 h; wrong if crash loops are nearly always deterministic (they then reach
+    # the human 75 min later than before).
+    crash_backoff_first: float = 15 * 60
+    crash_backoff_second: float = 60 * 60
 
 
 ATTEMPTS_PER_STEP = 3        # Q6
-RESTARTS_PER_STEP = 3
+# Self-resolution (docs/06, Chad Oct 13): after 3 reds, one escalation round before a human:
+# attempt 4 is a fresh session briefed with every earlier attempt's evidence, attempt 5
+# resumes it. Judgment call: 2 more; wrong if escalated attempts rarely succeed (ilk2 report).
+ESCALATION_ATTEMPTS = 2
+RESUMED_ATTEMPTS = (2, ATTEMPTS_PER_STEP + 2)   # each resumes the attempt just before it
+RESTARTS_PER_STEP = 3               # a backoff after every 3 restarts of one step ...
+RESTARTS_BEFORE_HUMAN = 3 * RESTARTS_PER_STEP   # ... and a human after the third round
 KICKSTARTS_PER_HOUR = 3
 LOAD_TIMEOUTS = 3            # gate timeouts in the window that refuse new runs
 PROBES_PER_FAILURE = 12      # §2.5.7: confirmation probes included, cached probes not

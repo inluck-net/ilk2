@@ -156,14 +156,23 @@ class Supervisor:
                                             f"{path.name.replace(v1.CLAIMED, '')} to resubmit",
                                             project_id=p["id"])
 
+    def uncount_attempt(self, step_id: str, reason: str) -> None:
+        """An interrupted attempt was never judged: like an API error (S5) it does not count
+        toward the attempt limit. Lost runs are bounded by the crash-loop ladder instead."""
+        st = self.s.get("steps", step_id)
+        if st and st["attempt_count"] > 0 and st["status"] == "pending":
+            self.s.update("steps", step_id, {"attempt_count": st["attempt_count"] - 1},
+                          actor="supervisor", reason=f"interrupted attempt not counted ({reason})")
+
     def close_orphan_attempts(self) -> None:
         """An attempt still `running` under an ended run can never finish: close it (I11)."""
-        for a in self.s.all("SELECT a.id, r.ended_at AS run_ended FROM attempts a JOIN runs r ON "
+        for a in self.s.all("SELECT a.id, a.step_id, r.ended_at AS run_ended FROM attempts a JOIN runs r ON "
                             "r.id = a.run_id WHERE a.status = 'running' AND r.status = 'ended'"):
             # It stopped when its run ended; the time until someone noticed is not work.
             self.s.transition("attempts", a["id"], "done", actor="supervisor", reason="run ended",
                               fields={"outcome": "interrupted", "reason": "its run had ended",
                                       "ended_at": a["run_ended"] or clock.wall()})
+            self.uncount_attempt(a["step_id"], "its run had ended")
 
     # -- stalls (§2.11.1) -------------------------------------------------------------------
 
@@ -247,11 +256,13 @@ class Supervisor:
 
     def after_run_ended(self, run, reason: str, count: bool = True) -> None:
         self.s.event("run.lost", {"run": run["id"], "reason": reason}, batch_id=run["batch_id"])
-        for a in self.s.all("SELECT id FROM attempts WHERE run_id = ? AND status = 'running'", run["id"]):
+        for a in self.s.all("SELECT id, step_id FROM attempts WHERE run_id = ? AND status = 'running'",
+                            run["id"]):
             # the attempt in flight is the cost of a lost run (§2.10); close it as interrupted
             self.s.transition("attempts", a["id"], "done", actor="supervisor", reason=reason,
                               fields={"outcome": "interrupted", "reason": reason,
                                       "ended_at": clock.wall()})
+            self.uncount_attempt(a["step_id"], reason)
         batch = self.s.get("batches", run["batch_id"])
         if batch["status"] != "active":
             return
@@ -261,7 +272,15 @@ class Supervisor:
         n = step["restart_count"] + 1
         self.s.update("steps", step["id"], {"restart_count": n}, actor="supervisor",
                       reason=f"restart after {reason}")
-        if n >= bounds.RESTARTS_PER_STEP and step["status"] == "pending":
+        if n < bounds.RESTARTS_BEFORE_HUMAN and n % bounds.RESTARTS_PER_STEP == 0:
+            wait = self.b.crash_backoff_first if n == bounds.RESTARTS_PER_STEP else self.b.crash_backoff_second
+            self.s.refuse(run["batch_id"], "crash-backoff",
+                          f"step {step['id']} lost its run {n} times ({reason}); retrying after "
+                          f"{wait / 60:.0f} min", "the backoff ends (automatic)", "supervisor")
+            self.s.event("crash-backoff", {"step": step["id"], "restarts": n, "seconds": wait},
+                         batch_id=run["batch_id"])
+            return
+        if n >= bounds.RESTARTS_BEFORE_HUMAN and step["status"] == "pending":
             self.s.transition("steps", step["id"], "blocked", actor="supervisor", reason="crash-loop",
                               fields={"blocked_reason": f"crash-loop: {reason}"})
             self.s.transition("plans", step["plan_id"], "blocked", actor="supervisor",
@@ -269,7 +288,8 @@ class Supervisor:
             reasons = [r["terminal_reason"] for r in self.s.all(
                 "SELECT terminal_reason FROM runs WHERE batch_id = ? ORDER BY created_at DESC LIMIT 3",
                 run["batch_id"])]
-            self.s.open_needs_human("crash-loop", f"step {step['id']} lost its run 3 times: {reasons}",
+            self.s.open_needs_human("crash-loop", f"step {step['id']} lost its run {n} times, "
+                                    f"after two backoffs: {reasons}",
                                     f"ilk2 resume {run['batch_id']}", batch_id=run["batch_id"])
             others = self.s.one("SELECT COUNT(*) n FROM plans WHERE batch_id = ? AND status IN "
                                 "('pending', 'active')", run["batch_id"])["n"]
@@ -351,6 +371,12 @@ class Supervisor:
                 return False
             if r["reason"] == "quota" and now - r["opened_at"] < self.b.quota_probe:
                 return False
+            if r["reason"] == "crash-backoff":
+                step = self.current_step(batch_id)
+                second = step is not None and step["restart_count"] > bounds.RESTARTS_PER_STEP
+                wait = self.b.crash_backoff_second if second else self.b.crash_backoff_first
+                if now - r["opened_at"] < wait:
+                    return False
         return True
 
     # -- admission (§2.11.1 host load, I10) -------------------------------------------------
@@ -402,7 +428,8 @@ class Supervisor:
             if load:
                 self.s.refuse(b["id"], "host-load", load, "host load falls", "supervisor")
                 continue
-            for reason in ("project-limit", "host-budget", "host-load", "waiting-api", "quota"):
+            for reason in ("project-limit", "host-budget", "host-load", "waiting-api", "quota",
+                           "crash-backoff"):
                 self.s.clear_refusal(b["id"], reason)
             self.spawn(b)
             live.add(b["id"])

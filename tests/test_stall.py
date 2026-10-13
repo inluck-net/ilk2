@@ -122,12 +122,16 @@ def test_s4_runner_missing_blocks_at_once(stall, tmp_path):
 # -- S6: driver killed at every start ----------------------------------------------------------
 
 def test_s6_crash_loop(stall, monkeypatch):
+    # Self-resolution: 3 restarts back off, 6 back off longer, 9 block for a human.
     monkeypatch.setenv("ILK2_FAULTS", "phase-recover")
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"crash_backoff_first": 1, "crash_backoff_second": 2}))
     stall.script([GOOD])
     bid = stall.submit(one_step())
     sp = sup(stall)
-    assert until(sp, lambda: status(stall, bid) == "blocked", timeout=30)
-    assert reasons(stall, bid) == ["interrupted"] * 3
+    assert until(sp, lambda: status(stall, bid) == "blocked", timeout=90)
+    assert reasons(stall, bid) == ["interrupted"] * 9
+    backoffs = stall.s.all("SELECT * FROM refusals WHERE batch_id = ? AND reason = 'crash-backoff'", bid)
+    assert len(backoffs) == 2 and all(r["cleared_at"] for r in backoffs)
     rows = stall.s.open_human_rows(bid)
     assert [r["reason"] for r in rows] == ["crash-loop"]
 
@@ -539,11 +543,12 @@ def test_driver_error_counts_toward_the_crash_loop(stall, monkeypatch):
     # Codex M1 review #3: a driver that records its own `error` must still consume a restart,
     # and the attempt it left running is closed.
     monkeypatch.setenv("ILK2_FAULTS", "phase-dispatch=raise")
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"crash_backoff_first": 1, "crash_backoff_second": 1}))
     stall.script([GOOD])
     bid = stall.submit(one_step())
     sp = sup(stall)
-    assert until(sp, lambda: status(stall, bid) == "blocked", timeout=30)
-    assert reasons(stall, bid) == ["error"] * 3
+    assert until(sp, lambda: status(stall, bid) == "blocked", timeout=90)
+    assert reasons(stall, bid) == ["error"] * 9
     assert [r["reason"] for r in stall.s.open_human_rows(bid)] == ["crash-loop"]
     assert stall.s.all("SELECT id FROM attempts WHERE status = 'running'") == []
 
@@ -600,3 +605,23 @@ def test_notifications_are_opt_in(stall):
     assert notify.due(stall.s, b) == 0
     from ilk2 import paths
     assert not (paths.logs() / "notify.log").exists()
+
+
+def test_crash_backoff_holds_the_batch_then_clears_itself(stall, monkeypatch):
+    monkeypatch.setenv("ILK2_FAULTS", "phase-recover")
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"crash_backoff_first": 600, "crash_backoff_second": 600}))
+    stall.script([GOOD])
+    bid = stall.submit(one_step())
+    sp = sup(stall)
+    assert until(sp, lambda: [r["reason"] for r in stall.s.open_refusals(bid)] == ["crash-backoff"], timeout=30)
+    n = len(reasons(stall, bid))
+    for _ in range(4):
+        sp.tick()
+        time.sleep(sp.b.tick)
+    assert len(reasons(stall, bid)) == n and status(stall, bid) == "active"  # held, not respawned
+    assert stall.s.open_human_rows(bid) == []  # nobody paged for a backoff
+    with stall.s.tx() as c:  # the backoff period passes
+        c.execute("UPDATE refusals SET opened_at = opened_at - 601 WHERE reason = 'crash-backoff'")
+    monkeypatch.setenv("ILK2_FAULTS", "")
+    sp2 = supervisor.Supervisor(stall.s, load_check=False)
+    assert until(sp2, lambda: status(stall, bid) == "shipped", timeout=60)

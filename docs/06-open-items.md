@@ -91,8 +91,8 @@ Gate *specification versions* are not frozen. They change legitimately when a st
 | needs_human reason | Automatic rungs before it | Status |
 |---|---|---|
 | `base-unmeasured` | Collect-only preflight of every pytest gate at the base, in the pinned env, at `submit`: the submitter gets a synchronous rejection. Judgment call: projects with a setup hook are skipped (their gates may need the install); wrong if those turn out to be where base blocks happen | **done** (`test_submit_preflight_rejects_a_gate_that_cannot_run`) |
-| `attempts` | One escalation round: fresh session with all attempts' evidence, 2 more attempts. Then, if Q17 adopts a planning pass, a re-plan inside the sealed goal and verification | escalation round building; re-plan waits for Q17 |
-| `crash-loop`, `setup` | Backoff and retry (15 min, then 1 h), counted, before a human | building |
+| `attempts` | One escalation round: fresh session with all attempts' evidence, 2 more attempts. Then, if Q17 adopts a planning pass, a re-plan inside the sealed goal and verification | **escalation round done** (attempt 4 fresh with every attempt's evidence, attempt 5 resumes it; `test_escalation_round_gets_all_the_evidence_in_a_fresh_session`); re-plan waits for Q17 |
+| `crash-loop`, `setup` | Backoff and retry (15 min, then 1 h), counted, before a human | **crash-loop done**: 3 restarts back off 15 min, 6 back off 1 h (a `crash-backoff` refusal row that clears itself), 9 block for a human; an interrupted attempt no longer counts toward the attempt limit (like an API error). `setup` backoff still to do |
 | `unmeasured`, `acceptance-mismatch`, `unkillable` | None: something outside ilk2 is wrong; expected rare | stays human |
 | `api`, `quota` | Already automatic | done |
 

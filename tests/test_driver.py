@@ -54,7 +54,8 @@ def test_three_reds_block_step_with_one_human_row(ilk):
     assert ilk.s.get("batches", bid)["status"] == "blocked"
     rows = ilk.s.open_human_rows(bid)
     assert [r["reason"] for r in rows] == ["attempts"]
-    assert ilk.stub_calls() == 3
+    assert ilk.stub_calls() == 5  # 3 attempts, then the escalation round of 2 (self-resolution)
+    assert "5 attempts red" in rows[0]["detail"]
 
 
 def test_s7_dependency_blocked_independent_ships(ilk):
@@ -278,7 +279,7 @@ def test_attempt_that_changes_nothing_is_red(ilk):
     bid = ilk.submit(one_step(must_pass=[]))
     assert ilk.drive_inprocess(bid) == "blocked"
     atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
-    assert [a["outcome"] for a in atts] == ["red"] * 3
+    assert [a["outcome"] for a in atts] == ["red"] * 5  # 3, then the escalation round
     assert "no change" in atts[0]["evidence"]
     b = ilk.s.get("batches", bid)
     assert commits_with_trailer(ilk, b["execution_root"], b["branch"]) == []
@@ -388,3 +389,19 @@ def test_deny_paths_reject_a_scope_that_names_them(ilk):
     ilk.project(deny_paths=["migrations/"])
     with pytest.raises(batches.SubmitRejected, match="denied"):
         ilk.submit(one_step(scope=["migrations/0002.py"]))
+
+
+def test_escalation_round_gets_all_the_evidence_in_a_fresh_session(ilk):
+    # docs/06 "Self-resolution": after 3 reds, attempt 4 starts a fresh session briefed with
+    # every earlier attempt's evidence, before any human is asked.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([BAD], [BAD], [BAD], [GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "red", "red", "accepted"]
+    assert atts[3]["session_id"] not in {a["session_id"] for a in atts[:3]}  # fresh
+    prompt = ilk.stub_prompts()[3]
+    assert all(f"Attempt {k}" in prompt for k in (1, 2, 3)) and "test_add" in prompt
+    assert ilk.s.open_human_rows(bid) == []
