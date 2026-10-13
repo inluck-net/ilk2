@@ -184,6 +184,10 @@ An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; 
 | The Neighbour gate step went red on two more base failures: commit SHAs and short hex ids in their messages differ per run | Hex tokens of 7+ characters mixing digits and letters are volatile (fingerprint v3) |
 | My merge kept the implement step's gate that looks up the pins commit (`plan:<slug>#step-0`, then `pins_only_lose_xfail.py`): merged, that commit is the step itself, made after its gates pass, so 5 steps could never pass. The first one's worker spent 7.6 min reading git history and ilk2's source over it | The merge drops gates that reference the folded step's own commit; the 5 live steps were amended (batch version 19) |
 | After the merge, 3 plans write pins in their first step and name them in `must_pass` in a later one, where the red-first check (files changed in this step) never looked | Such pins run against the plan's starting commit |
+| A verification step dispatched a worker that spent 28 min trying to run and record the suite that is its own gate | Verification plans run their gates first; green needs no worker; red briefs the worker that the gate already ran |
+| Repair steps were judged on the whole failing gate (the full suite), so any other open failure turned them red; narrowing to a test id kept a bare `tests` directory, so probes and repairs ran 8,000+ tests | A repair's gate runs only the repaired test; every positional after the interpreter is a test path |
+| Red-first was applied to repair steps: a repair that edited its test's file was judged unable to detect anything | No red-first in repair or verification plans |
+| Each release drained the supervisor, which admits nothing while draining; releases every 20-30 min kept new batches queued | Upgrades drain only when the supervisor's own code changed |
 
 After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
 
