@@ -77,7 +77,8 @@ def status(s, batch_id: str | None) -> dict:
                     "accepted_head": lr["accepted_head"] if lr else None, "plans": plans,
                     "refusals": [dict(r) for r in s.open_refusals(b["id"])]})
     nh = [dict(r) for r in s.open_human_rows(batch_id)]
-    return {"batches": out, "needs_human": nh}
+    draining = s.one("SELECT 1 FROM meta WHERE key = 'draining' AND value = '1'") is not None
+    return {"batches": out, "needs_human": nh, "draining": draining}  # B4: upgrade in progress
 
 
 def report(s) -> dict:
@@ -149,6 +150,8 @@ def shadow_problem(clone: str, of: str) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ilk2")
     ap.add_argument("--version", action="version", version=f"ilk2 {__version__}")
+    ap.add_argument("--api-version", type=int, default=API_VERSION,
+                    help="the JSON contract version the caller expects (B2); only 1 exists")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("drive").add_argument("run_id")
@@ -174,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--consumer-ref")
     sm.add_argument("--base")
     sm.add_argument("--root")
+    sm.add_argument("--branch", help="the branch to build on (created from --base if new; B1)")
     sm.add_argument("--json", action="store_true")
 
     st = sub.add_parser("status")
@@ -249,6 +253,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             release.uninstall()
         return 0
+    if a.api_version != API_VERSION:
+        _out({"error": "unsupported-api-version", "supported": [API_VERSION],
+              "requested": a.api_version}, True)
+        return 2
     if a.cmd == "doctor":
         return doctor()
     if a.cmd == "xbar":
@@ -301,9 +309,9 @@ def main(argv: list[str] | None = None) -> int:
                 bid = batches.submit(s, a.project, spec, base=a.base, priority=a.priority,
                                      consumer_ref=a.consumer_ref,
                                      root=Path(a.root) if a.root else None,
-                                     originals={f.name: f.read_text()})
+                                     originals={f.name: f.read_text()}, branch=a.branch)
             except batches.SubmitRejected as e:
-                _out({"rejected": e.problems}, True)
+                _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
             _out({"batch": bid}, a.json) if a.json else print(bid)
         elif a.cmd == "status":

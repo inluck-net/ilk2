@@ -137,12 +137,28 @@ class SubmitRejected(ValueError):
 
 def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None = None,
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
-           originals: dict | None = None) -> str:
+           originals: dict | None = None, branch: str | None = None) -> str:
     proj = s.get("projects", project_id)
     cfg = ProjectConfig.from_json(proj["config"])
     repo = Path(proj["repo_root"])
+    problems = []
+    existing = gitops.branch_head(repo, branch) if branch else None
+    if existing:
+        # B1 (gh-resolve rework on resolver-<issue>): the batch builds on the branch's head. With
+        # base refresh off, the consumer merges its base into the branch before it submits.
+        if base and gitops.rev(repo, base) not in (None, existing):
+            problems.append(f"branch {branch} is at {existing[:12]}, not the requested base "
+                            f"{base[:12]}: merge the base into the branch first, or omit --base")
+        base = existing
     base_sha = gitops.rev(repo, base or proj["default_branch"])
-    problems = [] if base_sha else [f"base {base or proj['default_branch']!r} is not a commit"]
+    if base_sha is None and cfg.shadow_of:
+        # B6: a shadow clone may not have the base yet; fetch only (its push URL is disabled)
+        gitops.git(repo, "fetch", "-q", "origin", check=False)
+        if base:
+            gitops.git(repo, "fetch", "-q", "origin", base, check=False)
+        base_sha = gitops.rev(repo, base or proj["default_branch"])
+    if base_sha is None:
+        problems.append(f"base {base or proj['default_branch']!r} is not a commit")
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
@@ -159,8 +175,16 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if problems:
         raise SubmitRejected(problems)
     bid = new_id("b")
-    branch = f"ilk2/{bid}"
-    if root is None:
+    branch = branch or f"ilk2/{bid}"
+    if root is None and existing:
+        prior = s.one("SELECT execution_root FROM batches WHERE project_id = ? AND branch = ? "
+                      "ORDER BY created_at DESC LIMIT 1", project_id, branch)
+        if prior and Path(prior["execution_root"]).exists():
+            root = Path(prior["execution_root"])  # rework runs in the branch's root (R4)
+        else:
+            root = paths.worktrees() / bid
+            gitops.git(repo, "worktree", "add", "-q", str(root), branch)
+    elif root is None:
         root = gitops.add_worktree(repo, paths.worktrees() / bid, base_sha, branch=branch)
     else:
         # An existing root may be held by a consumer or another batch: nothing is written to it
@@ -242,6 +266,8 @@ def cancel(s: Store, batch_id: str, reason: str, superseded_by: str | None = Non
            actor: str = "human") -> None:
     if reason not in CANCEL_REASONS:
         raise SubmitRejected([f"cancel reason must be one of {sorted(CANCEL_REASONS)}"])
+    if s.get("batches", batch_id)["status"] == "cancelled":
+        return  # B8: idempotent; a shipped batch still refuses (Conflict, exit 3)
     s.transition("batches", batch_id, "cancelled", actor=actor, reason=reason,
                  expect_from={"queued", "active", "blocked", "parked"},
                  fields={"terminal_reason": f"cancelled ({reason})",

@@ -119,7 +119,9 @@ def recover(s: Store, root: str, generation: int, new_head: str) -> int:
     found = procs.strays(Path(root))
     if found:
         raise Conflict(f"processes are still inside {root}: {found} (R1)")
-    return _cas(s, root, generation, {"consumer-expired"}, "released", None,
+    # B5: also from `consumer`: gh-resolve calls this only once its reap lock is free, and the
+    # check above proves no process remains in the root
+    return _cas(s, root, generation, {"consumer-expired", "consumer"}, "released", None,
                 expected_head=new_head, expiry_wall=None)
 
 

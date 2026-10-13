@@ -131,3 +131,94 @@ def test_r5_reserved_runs_are_left_for_their_project(p5, tmp_path):
     assert len(live & {a, b}) == 1
     refused = [r["reason"] for bid in (a, b) for r in p5.s.open_refusals(bid)]
     assert "host-budget" in refused or "project-limit" in refused
+
+
+# -- gh-resolve's adapter review (gh-resolve-e1, Oct 13, against ceb788c) ------------------------
+
+def cli(*args):
+    import io, contextlib
+    from ilk2 import cli as c
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = c.main(list(args))
+    out = buf.getvalue().strip()
+    return code, (json.loads(out) if out.startswith("{") else out)
+
+
+def spec_file(tmp_path):
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(one_step()))
+    return str(f)
+
+
+def test_b1_submit_onto_a_named_branch_and_rework_on_it(p5, tmp_path):
+    p5.script([GOOD], [{"write": "notes.txt", "text": "rework"}])
+    code, out = cli("submit", spec_file(tmp_path), "--project", "proj", "--branch", "resolver-42", "--json")
+    assert code == 0
+    b = p5.s.get("batches", out["batch"])
+    assert b["branch"] == "resolver-42"
+    sp = sup(p5)
+    assert until(sp, lambda: p5.s.get("batches", b["id"])["status"] == "shipped")
+    first_head = p5.git(str(p5.repo), "rev-parse", "resolver-42")
+    # rework: a second batch on the same branch builds on its head
+    f2 = tmp_path / "b2.json"
+    f2.write_text(json.dumps({"plans": [{"slug": "rw", "steps": [{"title": "rework", "instructions": "x",
+                  "gates": [{"name": "unit", "adapter": "pytest", "command": ["python", "-m", "pytest", "-q",
+                  "-p", "no:cacheprovider", "tests/test_calc.py"]}], "must_pass": []}]}]}))
+    code, out = cli("submit", str(f2), "--project", "proj", "--branch", "resolver-42", "--json")
+    assert code == 0
+    b2 = p5.s.get("batches", out["batch"])
+    assert b2["base_commit"] == first_head
+    assert until(sp, lambda: p5.s.get("batches", b2["id"])["status"] == "shipped")
+    assert p5.git(str(p5.repo), "rev-parse", "resolver-42^") == first_head
+
+
+def test_b2_api_version(p5):
+    assert cli("--api-version", "1", "status", "--json")[0] == 0
+    code, out = cli("--api-version", "2", "status", "--json")
+    assert code == 2 and out["error"] == "unsupported-api-version"
+
+
+def test_b3_one_rejection_shape(p5, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"plans": [{"slug": "p", "steps": [{"title": "t", "instructions": "x", "gates": []}]}]}))
+    code, out = cli("submit", str(bad), "--project", "proj", "--json")
+    assert code == 2 and out["error"] == "rejected" and out["problems"]
+
+
+def test_b4_status_says_draining(p5):
+    with p5.s.tx() as c:
+        c.execute("INSERT INTO meta(key, value) VALUES ('draining', '1') ON CONFLICT(key) DO UPDATE SET value = '1'")
+    assert cli("status", "--json")[1]["draining"] is True
+
+
+def test_b5_recover_from_a_consumer_whose_process_is_gone(p5):
+    bid = p5.submit(one_step())
+    root = p5.s.get("batches", bid)["execution_root"]
+    head = p5.git(root, "rev-parse", "HEAD")
+    g = lease.driver_release(p5.s, root, head)
+    g = lease.consumer_acquire(p5.s, root, g, head, "gh-resolve", head, 600)
+    assert lease.recover(p5.s, root, g, head) == g + 1  # reap's flock is free: its process is gone
+    assert lease.get(p5.s, root)["holder"] == "released"
+
+
+def test_b6_shadow_fetches_a_base_it_does_not_have(p5, tmp_path):
+    import subprocess as sp_
+    shadow = tmp_path / "sh"
+    sp_.run(["git", "clone", "-q", str(p5.repo), str(shadow)], check=True)
+    sp_.run(["git", "-C", str(shadow), "remote", "set-url", "--push", "origin", "DISABLED"], check=True)
+    (p5.repo / "later.txt").write_text("x")
+    p5.git(str(p5.repo), "add", "later.txt")
+    p5.git(str(p5.repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "later")
+    new_base = p5.git(str(p5.repo), "rev-parse", "HEAD")
+    from dataclasses import asdict
+    cfg = batches.project_config(p5.s, "proj")
+    batches.project_add(p5.s, "sh", shadow, batches.ProjectConfig(**{**asdict(cfg), "shadow_of": str(p5.repo)}))
+    bid = batches.submit(p5.s, "sh", __import__("ilk2").plans.from_dict(one_step()), base=new_base)
+    assert p5.s.get("batches", bid)["base_commit"] == new_base
+
+
+def test_b8_cancel_is_idempotent(p5, tmp_path):
+    bid = p5.submit(one_step())
+    assert cli("cancel", bid, "--reason", "stand-down")[0] == 0
+    assert cli("cancel", bid, "--reason", "stand-down")[0] == 0  # already cancelled: done
