@@ -571,3 +571,35 @@ def test_next_step_of_a_plan_resumes_the_previous_steps_session(ilk):
     prompts = ilk.stub_prompts()
     assert "step 1" in prompts[1] and "previous step" in prompts[1].lower()
     assert "Preloaded context" not in prompts[1]           # the session already has it
+
+
+def test_red_first_a_must_pass_test_that_passes_without_the_change_is_red(ilk):
+    # gh-resolve-e1, Oct 13: folding V1's "Red-first pins" step must keep its guarantee, that a
+    # new pin fails on the old code ("loop-written tests copy the code's assumptions").
+    ilk.make_repo()
+    ilk.project()
+    weak = {"write": "tests/test_new.py", "text": "def test_new():\n    assert True\n"}
+    strong = {"write": "tests/test_new.py", "text":
+              "from calc import add\n\ndef test_new():\n    assert add(1, 1) == 2\n"}
+    ilk.script([GOOD, weak], [strong])
+    spec = one_step(gates_=[gate("tests/test_calc.py", "tests/test_new.py")],
+                    must_pass=["tests/test_new.py::test_new"])
+    bid = ilk.submit(spec)
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "accepted"]
+    assert "without your change" in atts[0]["evidence"] and "test_new" in atts[0]["evidence"]
+
+
+def test_red_first_whole_file_needs_one_failing_test_not_all(ilk):
+    # a sensitivity control may pass on the old code too (D-523's control did)
+    ilk.make_repo()
+    ilk.project()
+    pins = {"write": "tests/test_pins.py", "text":
+            "from calc import add\n\ndef test_pin():\n    assert add(2, 2) == 4\n\n"
+            "def test_control():\n    assert callable(add)\n"}
+    ilk.script([GOOD, pins])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_pins.py")],
+                              must_pass=["tests/test_pins.py"]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts")] == ["accepted"]

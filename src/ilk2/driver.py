@@ -595,6 +595,14 @@ class Driver:
                 lines.append("\nOutput tail:\n" + r.tail[-2500:])
                 reds.append("\n".join(lines))
         unmet, missing_reds = gates.unmet_obligations(runs, expect_red, list(must_pass))
+        if not reds and not unmet and not missing_reds and must_pass:
+            weak = self.red_first(gate_list, list(must_pass), parent, aid)
+            if weak:
+                verdicts["red-first"] = {"outcome": "fail", "pass_without_change": weak}
+                reds.append("These must_pass tests pass without your change, so they cannot detect "
+                            "the defect (run against the step's parent code with your new tests): "
+                            + ", ".join(weak) + "\nMake each fail on the old code, or name only the "
+                            "tests that do in must_pass.")
         if unmet or missing_reds:
             verdicts["step"] = {"outcome": "fail", "must_pass": unmet, "expected_red": missing_reds}
             reds.append("The step's own obligations are not met:\n" + "\n".join(
@@ -644,6 +652,51 @@ class Driver:
                       (self.batch_id, a.test_id, a.fingerprint, clean, failing,
                        f"{self.batch_id}.{slug}", clock.wall()))
         self.event("repair.added", plan=slug, test=a.test_id, repair_of=a.step_id)
+
+    def red_first(self, gate_list: list[Gate], must_pass: list[str], parent: str,
+                  aid: str) -> list[str]:
+        """V1's red-first guarantee, kept inside one step (gh-resolve-e1, Oct 13): must_pass tests
+        in files this step added or changed must fail on the step's parent code. They run in a
+        throwaway worktree at the parent with only the new test files overlaid. An id must fail
+        there; a whole file needs at least one failing test (a sensitivity control may pass).
+        Returns the must_pass entries that pass without the change."""
+        import shutil
+        changed = set(gitops.changed_paths(self.root))
+        mine = [t for t in must_pass if t.split("::")[0] in changed]
+        if not mine:
+            return []
+        files = sorted({t.split("::")[0] for t in mine})
+        gate = next((g for g in gate_list if g.adapter in ("pytest", "vitest")
+                     and any(f in " ".join(g.command) for f in files)), None) or \
+            next((g for g in gate_list if g.adapter in ("pytest", "vitest")), None)
+        if gate is None:
+            return []
+        where = paths.diag(self.batch_id) / f"red-first-{aid}"
+        gitops.add_worktree(self.repo, where, parent)
+        try:
+            if self.cfg.setup:
+                self.setup(where)
+            for f in files:
+                (where / f).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.root / f, where / f)
+            ids = [t for t in mine]
+            cmd = (gates.vitest.with_test_ids(gate.command, ids) if gate.adapter == "vitest"
+                   else gates.with_test_ids(gate.command, ids, drop=("--deselect", "-k")))
+            r = gates.measure(replace(gate, name=gate.name + "-red-first", command=cmd), where,
+                              self.env(), self.dir / "gates")
+            if r.outcome == "unmeasured":
+                return []  # cannot run on the old code (e.g. imports the new module): not proven weak
+            weak = []
+            for t in mine:
+                if "::" in t:
+                    if t in r.passed:
+                        weak.append(t)
+                elif not any(k.startswith(t + "::") or k.startswith(t) for k in r.failures):
+                    weak.append(t)  # every test in the file passed on the old code
+            self.event("red-first", checked=mine, pass_without_change=weak)
+            return weak
+        finally:
+            gitops.remove_worktree(self.repo, where)
 
     def base_for(self, gate: Gate, spec_now: str) -> dict[str, str] | None:
         row = self.s.one("SELECT failures FROM base_measurements WHERE batch_id = ? AND gate = ? "
