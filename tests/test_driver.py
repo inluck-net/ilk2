@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from conftest import gate, one_step
 
@@ -617,3 +618,36 @@ def test_advisory_scope_records_but_never_reds(ilk):
     assert [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts")] == ["accepted"]
     ev = [e for e in ilk.s.events_since(0) if e["kind"] == "scope.advisory"]
     assert ev and "notes/extra.txt" in ev[0]["payload"]["outside"]
+
+
+def test_a_new_run_keeps_the_steps_own_leftover_work(ilk):
+    # gh-resolve P5 batch, Oct 13: an upgrade drain started a new run, whose prepare reset the
+    # worktree and discarded a red attempt's 554-line diff. The step's own work is kept.
+    from ilk2 import clock
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    root = Path(ilk.s.get("batches", bid)["execution_root"])
+    step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    rid = ilk.new_run(bid)
+    ilk.s.insert("attempts", {"id": "a-old", "run_id": rid, "step_id": step["id"], "n": 1,
+                              "status": "done", "outcome": "interrupted", "parent_commit": "x",
+                              "created_at": clock.wall()})
+    ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test",
+                 reason="drained")
+    (root / "calc.py").write_text(GOOD["text"])           # the earlier attempt's work
+    ilk.script([])                                          # this attempt changes nothing more
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert "still holds the previous attempt's changes" in ilk.stub_prompts()[0]
+    assert any(e["kind"] == "worktree.kept" for e in ilk.s.events_since(0))
+
+
+def test_a_new_run_resets_leftovers_that_are_not_the_steps_work(ilk):
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    root = Path(ilk.s.get("batches", bid)["execution_root"])
+    (root / "stray.txt").write_text("x")                    # no attempt of this step left it
+    ilk.script([GOOD])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert not (root / "stray.txt").exists()

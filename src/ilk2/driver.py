@@ -44,6 +44,11 @@ class Stop(Exception):
         self.reason, self.detail = reason, detail
 
 
+KEPT_NOTE = ("The worktree still holds the previous attempt's changes (the driver restarted "
+             "between attempts and kept them). Start from them: check what they do against the "
+             "evidence above and finish the step rather than starting over.")
+
+
 class Driver:
     def __init__(self, s: Store, run_id: str, b: bounds.Bounds | None = None):
         self.s = s
@@ -337,16 +342,24 @@ class Driver:
         expect_red = json.loads(step["expected_reds"])
         must_pass = json.loads(step["must_pass"])
         scope = json.loads(step["scope"])
+        kept = False
         with self.phase("prepare", step=step["id"]):
             head = gitops.branch_head(self.root, self.branch)
             if gitops.changed_paths(self.root):
                 (self.dir / f"leftover-{step['id']}.diff").write_text(gitops.diff_text(self.root))
-                gitops.reset_hard(self.root, head)
+                kept = self.keeps_leftover(step, head)
+                if kept:
+                    self.event("worktree.kept", step=step["id"],
+                               paths=gitops.changed_paths(self.root)[:50])
+                else:
+                    gitops.reset_hard(self.root, head)
             parent = head
         n = step["attempt_count"]
         last = self.s.one("SELECT evidence FROM attempts WHERE step_id = ? AND evidence IS NOT NULL "
                           "ORDER BY created_at DESC LIMIT 1", step["id"])
         evidence = last["evidence"] if last else None
+        if kept:
+            evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
         while n < limit:
@@ -410,6 +423,18 @@ class Driver:
             self.end_attempt(aid, "red", red[:300], summary, evidence=red, gates_out=verdicts)
         self.block_step(step, "attempts", f"{limit} attempts red (3, then an escalation round)",
                         evidence or "")
+
+    def keeps_leftover(self, step, head: str) -> bool:
+        """Changes left in the root by an earlier run are kept when they are this step's own
+        work: the root is at the branch head, and the step's last attempt ended without being
+        accepted. Within a run the next attempt continues from the worktree; a new run (resume,
+        upgrade drain, crash recovery) used to reset it. gh-resolve P5 batch, Oct 13: a 554-line
+        diff, red only on failures inherited from the base, was discarded by an upgrade drain."""
+        if gitops.head(self.root) != head:
+            return False
+        last = self.s.one("SELECT outcome FROM attempts WHERE step_id = ? AND outcome IS NOT NULL "
+                          "ORDER BY created_at DESC LIMIT 1", step["id"])
+        return bool(last) and last["outcome"] in ("red", "interrupted", "timeout", "crashed")
 
     def carried_session(self, step) -> str | None:
         """The session of the previous step of the same plan, if that step was accepted and its
