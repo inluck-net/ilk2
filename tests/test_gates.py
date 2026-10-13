@@ -189,3 +189,42 @@ def test_must_pass_file_entry_means_every_test_in_it(tmp_path):
     root2 = project(tmp_path / "x", {"tests/__init__.py": ""})
     r3 = m(gate("tests/test_none.py"), root2, tmp_path)  # file absent: nothing passed
     assert gates.judge(r3, {}, must_pass=["tests/test_none.py"]).outcome == "fail"
+
+
+def test_must_pass_file_entry_rejects_skipped_and_xfailed(tmp_path):
+    # Codex M1 review #6: "every test in the file" must not accept a still-xfailed or skipped test.
+    body = ("import pytest\ndef test_a():\n    pass\n"
+            "@pytest.mark.xfail(strict=False)\ndef test_b():\n    assert 0\n")
+    root = project(tmp_path, {"tests/test_f.py": body})
+    r = m(gate("tests/test_f.py"), root, tmp_path)
+    assert gates.judge(r, r.failure_map(), must_pass=["tests/test_f.py"]).outcome == "fail"
+    (root / "tests/test_f.py").write_text(body.replace("@pytest.mark.xfail(strict=False)",
+                                                       "@pytest.mark.skip"))
+    r2 = m(gate("tests/test_f.py"), root, tmp_path)
+    assert gates.judge(r2, r.failure_map(), must_pass=["tests/test_f.py"]).outcome == "fail"
+
+
+def test_shell_gate_is_exit_code_only(tmp_path):
+    root = project(tmp_path, {"ok.txt": ""})
+    ok = Gate(name="lint", adapter="shell", command=["python", "-c", "pass"], declares_tests=False)
+    bad = Gate(name="lint", adapter="shell", command=["python", "-c", "raise SystemExit(2)"],
+               declares_tests=False)
+    assert m(ok, root, tmp_path).outcome == "pass"
+    r = m(bad, root, tmp_path)
+    assert r.outcome == "fail" and list(r.failures) == ["lint::<exit>"]
+    missing = Gate(name="lint", adapter="shell", command=["no-such-tool-xyz"], declares_tests=False)
+    assert m(missing, root, tmp_path).outcome == "unmeasured"
+
+
+def test_step_obligations_span_gates(tmp_path):
+    # Found while fixing #7: must_pass and expected reds belong to the step, not to each gate.
+    root = project(tmp_path, {"tests/test_a.py": "def test_a():\n    pass\n",
+                              "tests/test_b.py": "def test_b():\n    assert 0\n"})
+    ra = m(gate("tests/test_a.py", name="a"), root, tmp_path)
+    rb = m(gate("tests/test_b.py", name="b"), root, tmp_path)
+    unmet, missing = gates.unmet_obligations([ra, rb], ["tests/test_b.py::test_b"],
+                                             ["tests/test_a.py::test_a"])
+    assert unmet == [] and missing == []
+    unmet, missing = gates.unmet_obligations([ra], ["tests/test_b.py::test_b"],
+                                             ["tests/test_b.py::test_b"])
+    assert unmet == ["tests/test_b.py::test_b"] and missing == ["tests/test_b.py::test_b"]

@@ -25,8 +25,8 @@ BUSY_RETRIES = 3
 
 STATES: dict[str, set[str]] = {
     "batches": {"queued", "active", "shipped", "blocked", "parked", "cancelled"},
-    "plans": {"pending", "active", "shipped", "blocked"},
-    "steps": {"pending", "accepting", "accepted", "blocked"},
+    "plans": {"pending", "active", "shipped", "blocked", "cancelled"},
+    "steps": {"pending", "accepting", "accepted", "blocked", "cancelled"},
     "runs": {"starting", "running", "ended"},
     "attempts": {"running", "done"},
 }

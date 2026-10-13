@@ -216,3 +216,80 @@ def test_declared_test_path_still_absent_after_step_is_red(ilk):
     assert ilk.drive_inprocess(bid) == "blocked"
     ev = ilk.s.all("SELECT evidence FROM attempts WHERE evidence IS NOT NULL")[0]["evidence"]
     assert "tests/test_new.py" in ev
+
+
+def test_worker_that_did_not_finish_is_never_accepted(ilk):
+    # Codex M1 review #2: the worker writes the right code, then exits without a result.
+    # The gates are green, but a crashed attempt is red evidence, not an acceptance.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD, {"exit": 3}], [GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "accepted"]
+    assert "crashed" in atts[0]["evidence"]
+
+
+def test_attempt_that_changes_nothing_is_red(ilk):
+    # Codex M1 review #2: gates already green and no edit must not become an empty commit.
+    ilk.make_repo({"calc.py": "def add(a, b):\n    return a + b\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n",
+                   "tests/conftest.py": "import sys, os\n"
+                   "sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n"})
+    ilk.project()
+    ilk.script([], [], [])
+    bid = ilk.submit(one_step(must_pass=[]))
+    assert ilk.drive_inprocess(bid) == "blocked"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red"] * 3
+    assert "no change" in atts[0]["evidence"]
+    b = ilk.s.get("batches", bid)
+    assert commits_with_trailer(ilk, b["execution_root"], b["branch"]) == []
+
+
+def test_unkillable_worker_fences_the_batch_and_keeps_the_lease(ilk, monkeypatch):
+    # Codex M1 review #5: survivors of SIGKILL must stop the batch with the root still held.
+    import json as _json
+    from ilk2 import procs
+    monkeypatch.setenv("ILK2_BOUNDS", _json.dumps({"attempt_cap": 2}))
+    real = procs.terminate_group
+
+    def fake(*a, **kw):
+        res = real(*a, **kw)
+        res["survivors"] = [(999999, "stuck")]
+        return res
+    monkeypatch.setattr(procs, "terminate_group", fake)
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([{"hang": True}])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "blocked (unkillable)"
+    b = ilk.s.get("batches", bid)
+    assert b["status"] == "blocked"
+    assert [r["reason"] for r in ilk.s.open_human_rows(bid)] == ["unkillable"]
+    assert lease.get(ilk.s, b["execution_root"])["holder"] == "driver"
+
+
+def test_shell_gate_runs_green_at_base(ilk):
+    # Codex M1 review #7 / docs/02 §2.5.1: a shell check (exit code only) is a real gate.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    lint = {"name": "lint", "adapter": "shell", "declares_tests": False,
+            "command": ["python", "-c", "import ast; ast.parse(open('calc.py').read())"]}
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py"), lint]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+
+
+def test_shell_gate_red_at_base_blocks_the_batch(ilk):
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    lint = {"name": "lint", "adapter": "shell", "declares_tests": False,
+            "command": ["python", "-c", "raise SystemExit(1)"]}
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py"), lint]))
+    assert ilk.drive_inprocess(bid) == "blocked (base-unmeasured)"
+    assert ilk.stub_calls() == 0
+    row = ilk.s.open_human_rows(bid)[0]
+    assert "red at the base" in row["detail"]

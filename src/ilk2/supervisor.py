@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import batches, bounds, clock, faults, lease, paths, procs
+from .driver import counts_as_restart, fenced, finish_cancel, has_unfinished_cancel
 from .store import Conflict, Store, new_id
 
 HOST_BUDGET = 2  # Q15: ilk2 runs per host, an experiment guarded by load admission
@@ -69,8 +70,10 @@ class Supervisor:
         for run in self.s.all("SELECT * FROM runs WHERE status IN ('starting', 'running')"):
             reboot = run["boot_time"] is not None and run["boot_time"] != clock.boot_time()
             if not reboot and procs.is_same_process(run["pid"], run["proc_start"]):
-                procs.terminate_group(run["pgid"] or run["pid"], term_grace_s=self.b.term_grace,
-                                      kill_grace_s=self.b.kill_grace)
+                res = procs.terminate_group(run["pgid"] or run["pid"], term_grace_s=self.b.term_grace,
+                                            kill_grace_s=self.b.kill_grace)
+                if res["survivors"]:
+                    self.fence(run, res["survivors"])
             self.end_and_requeue(run, "lost (reboot)" if reboot else "lost", count=not reboot)
 
     # -- the tick ---------------------------------------------------------------------------
@@ -84,6 +87,7 @@ class Supervisor:
         with self.s.tx() as c:
             c.execute("UPDATE supervisor SET tick_wall = ?, tick_mono = ? WHERE id = 1", (now_w, now_m))
         self.reap()
+        self.close_orphan_attempts()
         self.check_stalls()
         self.handle_cancels()
         for root in lease.expire_due(self.s):
@@ -125,6 +129,18 @@ class Supervisor:
             run = self.s.get("runs", rid)
             if run["status"] != "ended":
                 self.end_and_requeue(run, "interrupted")
+            elif counts_as_restart(run["terminal_reason"]):
+                # The driver ended its own run with a failure (error, store-busy, ...): that
+                # is a restart like a crash, or it would respawn forever (Codex M1 review #3).
+                self.after_run_ended(run, run["terminal_reason"])
+
+    def close_orphan_attempts(self) -> None:
+        """An attempt still `running` under an ended run can never finish: close it (I11)."""
+        for a in self.s.all("SELECT a.id FROM attempts a JOIN runs r ON r.id = a.run_id "
+                            "WHERE a.status = 'running' AND r.status = 'ended'"):
+            self.s.transition("attempts", a["id"], "done", actor="supervisor", reason="run ended",
+                              fields={"outcome": "interrupted", "reason": "its run had ended",
+                                      "ended_at": clock.wall()})
 
     # -- stalls (§2.11.1) -------------------------------------------------------------------
 
@@ -170,10 +186,19 @@ class Supervisor:
         res = procs.terminate_group(pgid, reap=(child.poll if child else lambda: None),
                                     term_grace_s=self.b.term_grace, kill_grace_s=self.b.kill_grace)
         if res["survivors"]:
-            self.s.open_needs_human("unkillable", f"run {run['id']} group {pgid} survived "
-                                    f"SIGKILL: {res['survivors']}", "kill the listed pids, then: "
-                                    f"ilk2 resume {run['batch_id']}", batch_id=run["batch_id"])
+            self.fence(run, res["survivors"])
         return res
+
+    def fence(self, run, survivors) -> None:
+        """Survivors of SIGKILL may still write to the root: stop the batch where it is, with
+        the root lease kept, so nothing requeues or releases it (Codex M1 review #5). `ilk2
+        resume` refuses while a process is still inside the root."""
+        bid = run["batch_id"]
+        self.s.open_needs_human("unkillable", f"run {run['id']} survived SIGKILL: {survivors}",
+                                f"kill the listed pids, then: ilk2 resume {bid}", batch_id=bid)
+        if self.s.get("batches", bid)["status"] in ("queued", "active", "parked"):
+            self.s.transition("batches", bid, "blocked", actor="supervisor", reason="unkillable",
+                              fields={"blocked_reason": f"unkillable: {str(survivors)[:400]}"})
 
     # -- requeue, restart counting, crash loops ----------------------------------------------
 
@@ -193,6 +218,9 @@ class Supervisor:
                               fields={"terminal_reason": reason, "ended_at": clock.wall()})
         except Conflict:
             return
+        self.after_run_ended(run, reason, count)
+
+    def after_run_ended(self, run, reason: str, count: bool = True) -> None:
         self.s.event("run.lost", {"run": run["id"], "reason": reason}, batch_id=run["batch_id"])
         for a in self.s.all("SELECT id FROM attempts WHERE run_id = ? AND status = 'running'", run["id"]):
             # the attempt in flight is the cost of a lost run (§2.10); close it as interrupted
@@ -229,7 +257,7 @@ class Supervisor:
         b = self.s.get("batches", batch_id)
         root = b["execution_root"]
         row = lease.get(self.s, root)
-        if row and row["holder"] == "driver":
+        if row and row["holder"] == "driver" and not fenced(self.s, batch_id, Path(root)):
             from . import gitops
             lease.driver_release(self.s, root, gitops.branch_head(Path(root), b["branch"]))
 
@@ -245,35 +273,33 @@ class Supervisor:
             self.kill_run(run)
             why = "cancelled" if self.s.get("batches", run["batch_id"])["status"] == "cancelled" \
                 else "parked"
-            try:
-                self.s.transition("runs", run["id"], "ended", actor="supervisor", reason=why,
-                                  expect_from=set(ACTIVE_RUN),
-                                  fields={"terminal_reason": why, "ended_at": clock.wall()})
-            except Conflict:
-                pass
+            self.end_and_requeue(run, why, count=False)  # also closes its running attempt
         for b in self.s.all("SELECT * FROM batches WHERE status = 'cancelled' OR (status = 'parked' "
                             "AND control = 'park-now')"):
             if self.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', 'running')",
                           b["id"]):
                 continue
+            if b["status"] == "cancelled":
+                if has_unfinished_cancel(self.s, b["id"]):
+                    finish_cancel(self.s, b["id"], self.b)
+                continue
             row = lease.get(self.s, b["execution_root"])
             accepting = self.s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'",
                                    b["id"])
-            if accepting or (row and row["holder"] == "driver"):
-                self.finish_cancel(b["id"])
+            if (accepting or (row and row["holder"] == "driver")) and \
+                    not fenced(self.s, b["id"], Path(b["execution_root"])):
+                self.finish_park(b["id"])
             if b["status"] == "parked":
                 self.s.update("batches", b["id"], {"control": None}, actor="supervisor",
                               reason="park-now done")
 
-    def finish_cancel(self, batch_id: str) -> None:
+    def finish_park(self, batch_id: str) -> None:
         from .driver import Driver
         rid = new_id("r")
         self.s.insert("runs", {"id": rid, "batch_id": batch_id, "status": "ended",
-                               "terminal_reason": "cancel-recovery", "created_at": clock.wall()})
+                               "terminal_reason": "park-recovery", "created_at": clock.wall()})
         Driver(self.s, rid, self.b).recover_accepting()
         self.release_lease(batch_id)
-        if self.s.get("batches", batch_id)["status"] == "cancelled":
-            self.s.clear_needs_human(batch_id)
 
     # -- waits: api and quota refusals ------------------------------------------------------
 

@@ -1,7 +1,8 @@
 """Named fault-injection points for the stall suite (docs/02 §2.11.4).
 
 ILK2_FAULTS is a comma-separated list of point names; a listed point acts when reached:
-`<name>` kills this process (SIGKILL, as a crash would), `<name>=hang` blocks forever, and
+`<name>` kills this process (SIGKILL, as a crash would), `<name>=hang` blocks forever,
+`<name>=raise` raises RuntimeError (an ordinary driver bug), and
 `<name>=kill-once` / `<name>=hang-once` act only the first time any process reaches the point
 (a marker file under the data dir records it).
 Unset in production, so every call is a dictionary lookup that does nothing.
@@ -39,4 +40,6 @@ def hit(name: str) -> None:
     if mode == "hang":
         while True:
             time.sleep(3600)
+    if mode == "raise":
+        raise RuntimeError(f"injected fault at {name}")
     os.kill(os.getpid(), signal.SIGKILL)

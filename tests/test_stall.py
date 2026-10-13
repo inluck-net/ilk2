@@ -302,6 +302,15 @@ def test_s23_cancel_mid_attempt(stall):
     assert status(stall, bid) == "cancelled"
     root = stall.s.get("batches", bid)["execution_root"]
     assert lease.get(stall.s, root)["holder"] == "released"
+    assert_cancelled_hierarchy(stall, bid)
+
+
+def assert_cancelled_hierarchy(ilk, bid):
+    # Codex M1 review #1: the whole hierarchy ends, not only the batch and run.
+    assert [p["status"] for p in ilk.s.all("SELECT status FROM plans WHERE batch_id = ?", bid)] == ["cancelled"]
+    assert {s["status"] for s in ilk.s.all("SELECT status FROM steps WHERE batch_id = ?", bid)} == {"cancelled"}
+    assert ilk.s.all("SELECT a.id FROM attempts a JOIN steps s ON s.id = a.step_id "
+                     "WHERE s.batch_id = ? AND a.status = 'running'", bid) == []
 
 
 def test_s23_cancel_while_accepting(stall, monkeypatch):
@@ -314,10 +323,37 @@ def test_s23_cancel_while_accepting(stall, monkeypatch):
     batches.cancel(stall.s, bid, "stand-down")
     assert until(sp, lambda: not stall.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status != 'ended'", bid),
                  timeout=30)
-    step = stall.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
-    assert step["status"] == "pending"  # recovered: undo (no commit had been made)
     root = stall.s.get("batches", bid)["execution_root"]
     assert lease.get(stall.s, root)["holder"] == "released"
+    assert_cancelled_hierarchy(stall, bid)  # recovered by undo (no commit), then cancelled
+    # Codex M1 review #4: undo resets the worktree before the root is released
+    assert stall.git(root, "status", "--porcelain") == ""
+
+
+def test_cancel_of_a_queued_batch_ends_its_hierarchy(stall):
+    bid = stall.submit(one_step())
+    batches.cancel(stall.s, bid, "human")
+    assert_cancelled_hierarchy(stall, bid)
+
+
+def test_cancel_keeps_the_root_while_a_process_is_in_it(stall):
+    # Codex M1 review #5: a process left in the root fences it; the lease is released only
+    # after a later check finds the root empty.
+    bid = stall.submit(one_step())
+    root = stall.s.get("batches", bid)["execution_root"]
+    stray = subprocess.Popen(["sleep", "60"], cwd=root, start_new_session=True)
+    try:
+        sp = sup(stall)
+        batches.cancel(stall.s, bid, "human")
+        sp.tick()
+        assert lease.get(stall.s, root)["holder"] == "driver"
+        assert [r["reason"] for r in stall.s.open_human_rows(bid)] == ["unkillable"]
+    finally:
+        stray.kill()
+        stray.wait()
+    sp.tick()
+    assert lease.get(stall.s, root)["holder"] == "released"
+    assert_cancelled_hierarchy(stall, bid)
 
 
 # -- S24: setup hook ---------------------------------------------------------------------------
@@ -405,4 +441,50 @@ def test_lost_run_closes_its_running_attempt(stall):
     sp.kill_run(run)
     sp.end_and_requeue(run, "lost")
     a = stall.s.one("SELECT * FROM attempts WHERE run_id = ?", run["id"])
+    assert a["status"] == "done" and a["outcome"] == "interrupted"
+
+
+def test_driver_error_counts_toward_the_crash_loop(stall, monkeypatch):
+    # Codex M1 review #3: a driver that records its own `error` must still consume a restart,
+    # and the attempt it left running is closed.
+    monkeypatch.setenv("ILK2_FAULTS", "phase-dispatch=raise")
+    stall.script([GOOD])
+    bid = stall.submit(one_step())
+    sp = sup(stall)
+    assert until(sp, lambda: status(stall, bid) == "blocked", timeout=30)
+    assert reasons(stall, bid) == ["error"] * 3
+    assert [r["reason"] for r in stall.s.open_human_rows(bid)] == ["crash-loop"]
+    assert stall.s.all("SELECT id FROM attempts WHERE status = 'running'") == []
+
+
+def test_supervised_kill_with_survivors_fences_instead_of_requeueing(stall, monkeypatch):
+    # Codex M1 review #5, supervisor side.
+    stall.script([{"sleep": 30}, GOOD])
+    bid = stall.submit(one_step())
+    sp = sup(stall)
+    assert until(sp, lambda: stall.s.one("SELECT 1 FROM attempts WHERE status = 'running'"), timeout=30)
+    run = stall.s.one("SELECT * FROM runs WHERE batch_id = ? AND status != 'ended'", bid)
+    real = procs.terminate_group
+    monkeypatch.setattr(procs, "terminate_group",
+                        lambda *a, **kw: {**real(*a, **kw), "survivors": [(999999, "stuck")]})
+    sp.kill_run(run)
+    sp.end_and_requeue(run, "stalled (dispatch)")
+    assert status(stall, bid) == "blocked"
+    root = stall.s.get("batches", bid)["execution_root"]
+    assert lease.get(stall.s, root)["holder"] == "driver"
+    sp.tick()
+    assert stall.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status != 'ended'", bid) is None
+
+
+def test_attempt_left_running_by_an_ended_run_is_closed(stall):
+    # The M1 store kept one such row from before lost runs closed their attempts.
+    bid = stall.submit(one_step())
+    rid = stall.new_run(bid)
+    step = stall.s.one("SELECT id FROM steps WHERE batch_id = ?", bid)
+    stall.s.insert("attempts", {"id": "a-orphan", "run_id": rid, "step_id": step["id"], "n": 1,
+                                "status": "running", "created_at": clock.wall()})
+    stall.s.update("runs", rid, {"status": "ended", "terminal_reason": "lost"}, actor="test", reason="x")
+    sp = sup(stall)
+    sp.tick()
+    a = stall.s.get("attempts", "a-orphan")
     assert a["status"] == "done" and a["outcome"] == "interrupted"

@@ -82,6 +82,30 @@ Gate *specification versions* are not frozen. They change legitimately when a st
 | B5 | Three vacuous passes or refusals came from the same shape, an absent signal read as a pass: a base-red test that stays red (B1), a `must_pass` test in a file that fails to collect, and a parser that dropped a path's first letter so the first live M1 run refused its own step | `must_pass` requires the id among passed tests; changed paths read raw git output; each has a test that fails without the fix. The M1 review should look for this shape elsewhere |
 | B6 | Observed on the M1 run (Oct 13 04:21): SIGKILL of the launchd-managed supervisor also ended its driver within a second, although the driver runs in its own session. Its worker was gone too: the only process left in the worktree was the next run's. Mechanism not verified (launchd job teardown is the likely one). S11 assumed drivers outlive their supervisor | Recovery is the same either way: reconcile finds no live driver, marks the run `lost` and requeues. S11 still covers the case where a driver survives (supervisor run outside launchd). Lost runs now close their in-flight attempt as `interrupted` |
 
+## M1 code review (Codex, Oct 13): findings and fixes
+
+Codex reviewed the core at `fcacd95` (prompt: `~/Documents/handoffs/ilk2-m1-code-review-prompt.md`). The builder checked each finding against the code before fixing it; all 7 held. Each fix has a test that fails without it.
+
+| # | Finding | Fix | Test |
+|---|---|---|---|
+| C1 | Cancel ended the batch and run only: plans, steps and the attempt in flight stayed non-terminal (the live store's `b-1b3841db9323` showed it) | `Driver.finish_cancel`: recover `accepting`, close running attempts, plans and steps → `cancelled`, then release the root. Run from the driver's own `cancelled` stop, from `ilk2 cancel` when nothing runs, and by the supervisor for any cancelled batch with something left to end | S23 (both) assert the whole hierarchy; `test_cancel_of_a_queued_batch_ends_its_hierarchy` |
+| C2 | A worker that crashed, errored or timed out was judged like a finished one, so green gates accepted it; an attempt with no change made an empty commit | Only `done` can be accepted; any other outcome is a counted red with the gate output as evidence. An unchanged tree is red | `test_worker_that_did_not_finish_is_never_accepted`, `test_attempt_that_changes_nothing_is_red` |
+| C3 | A driver that ended its own run with `error` was never counted, so the supervisor respawned it every tick forever (I11) | `reap` counts any self-ended run whose reason is a failure (`driver.counts_as_restart`); the third reaches `blocked (crash-loop)`. Attempts under an ended run are closed every tick | `test_driver_error_counts_toward_the_crash_loop`, `test_attempt_left_running_by_an_ended_run_is_closed` |
+| C4 | Recovery "undo" reset only the store, so a cancel could release a root with the uncommitted accepted tree in it | Undo runs `reset_hard(parent)` first | S23 cancel-while-accepting asserts a clean worktree |
+| C5 | Survivors of SIGKILL opened a row but the run was still requeued, and a cancel could still release the root | Survivors fence the batch: `blocked (unkillable)` with the lease kept; a cancelled batch keeps its lease while any process is inside the root (`procs.strays`); `ilk2 resume` refuses until the root is empty | `test_unkillable_worker_fences_the_batch_and_keeps_the_lease`, `test_supervised_kill_with_survivors_fences_instead_of_requeueing`, `test_cancel_keeps_the_root_while_a_process_is_in_it` |
+| C6 | A whole-file `must_pass` passed with a test still skipped or xfailed | Reports keep skipped and xfailed ids; a whole file needs none of them | `test_must_pass_file_entry_rejects_skipped_and_xfailed` |
+| C7 | A `shell` gate passed submission but had no runner, so it always blocked as `base-unmeasured` | A shell runner per §2.5.1: exit code only, one pseudo-test `<gate>::<exit>`, and red at the base blocks the batch | `test_shell_gate_is_exit_code_only`, `test_shell_gate_runs_green_at_base`, `test_shell_gate_red_at_base_blocks_the_batch` |
+| C8 | Found while fixing C7, not by Codex: `must_pass` and expected reds were judged per gate, so any step with two gates failed on ids the other gate runs | Both are step-level (`gates.unmet_obligations`): each id must be met by one of the step's gates | `test_step_obligations_span_gates`, `test_shell_gate_runs_green_at_base` |
+
+Judgment calls in these fixes:
+- **C2:** a timed-out worker whose partial work passes the gates is still not accepted; the next attempt resumes with that evidence. Wrong if P3's `ilk2 report` shows timeout reds followed by an immediate accept with no further change.
+- **C2:** no opt-out for steps that change nothing. Wrong if P3 needs verify-only steps; then add a step flag (a schema migration).
+- **C3:** a `lease` stop (the root not held by the driver) counts as a restart, so it ends in `crash-loop` after three instead of looping. Wrong once R4's lease waiting lands; that wait should be a refusal row instead.
+- **C1:** `cancelled` is a new terminal state for plans and steps, not a reuse of `blocked`. No column changes, so no migration.
+- **C7:** a shell gate red at the base uses the existing `base-unmeasured` reason, with the detail "red at the base".
+
+The S1-S27 strength table asked of Codex was not in its reply; to request again.
+
 ## P5 addendum: resolver integration (from gh-resolve's re-review at 5e0e3ca)
 
 These items only matter once gh-resolve's resolver runs on ilk2. They stay open until a P5 design addendum, reviewed with gh-resolve before P5 starts.

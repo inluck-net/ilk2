@@ -11,7 +11,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import clock, gitops, lease, paths, plans
+from . import clock, gitops, lease, paths, plans, procs
 from .store import Conflict, Store, dumps, new_id
 
 DEFAULT_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
@@ -135,6 +135,9 @@ def resume(s: Store, batch_id: str, actor: str = "human") -> dict:
     row = lease.get(s, root)
     if row["holder"] in ("consumer", "consumer-expired"):
         raise SubmitRejected([f"root lease is held by {row['holder']} {row['owner']}"])
+    found = procs.strays(Path(root))
+    if found:  # the later process check that lifts an `unkillable` fence (Codex M1 review #5)
+        raise SubmitRejected([f"processes are still inside {root}: {found}"])
     head = gitops.branch_head(Path(root), b["branch"])
     out = {"consumer_commits": False}
     with s.tx():
@@ -173,13 +176,9 @@ def cancel(s: Store, batch_id: str, reason: str, superseded_by: str | None = Non
                  fields={"terminal_reason": f"cancelled ({reason})",
                          "blocked_reason": f"superseded by {superseded_by}" if superseded_by else None})
     live = s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', 'running')", batch_id)
-    if not live:  # nothing running: release now; otherwise the supervisor stops the run first
-        b = s.get("batches", batch_id)
-        row = lease.get(s, b["execution_root"])
-        if row and row["holder"] == "driver":
-            lease.driver_release(s, b["execution_root"],
-                                 gitops.branch_head(Path(b["execution_root"]), b["branch"]))
-        s.clear_needs_human(batch_id)
+    if not live:  # nothing running: finish now; otherwise the supervisor stops the run first
+        from .driver import finish_cancel
+        finish_cancel(s, batch_id)
     s.event("cancelled", {"reason": reason, "superseded_by": superseded_by}, batch_id=batch_id)
 
 

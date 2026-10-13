@@ -70,6 +70,19 @@ def processes_in(root: Path) -> list[tuple[int, str]]:
     return rows
 
 
+def strays(root: Path) -> list[tuple[int, str]]:
+    """Processes inside root other than this one and its ancestors (a human running
+    `ilk2 cancel` from a shell in the worktree is not a stray). A non-empty list fences the
+    root: no reset, no requeue and no lease release (Codex M1 review #5)."""
+    mine = {os.getpid()}
+    parents = {p: pp for p, pp, _, _ in process_table()}
+    p = os.getppid()
+    while p and p not in mine:
+        mine.add(p)
+        p = parents.get(p, 0)
+    return [r for r in processes_in(root) if r[0] not in mine]
+
+
 def sweep(root: Path) -> list[tuple[int, str]]:
     found = [r for r in processes_in(root) if r[0] != os.getpid()]
     for pid, _ in found:

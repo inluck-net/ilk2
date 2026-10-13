@@ -45,6 +45,7 @@ class GateRun:
     transient: bool = False
     failures: dict[str, Failure] = field(default_factory=dict)
     passed: list[str] = field(default_factory=list)   # ids that ran and passed (for must_pass)
+    not_run: list[str] = field(default_factory=list)  # collected but skipped or xfailed
     collected: int = 0
     exitstatus: int | None = None
     duration_s: float = 0.0
@@ -187,6 +188,7 @@ def _classify(run: GateRun, report: Path, rc: int | None, out: str, gate: Gate, 
     tests = data["tests"]
     run.collected = max(data.get("collected", 0), len(tests))
     run.passed = sorted(t["nodeid"] for t in tests if t["outcome"] in ("passed", "xpassed"))
+    run.not_run = sorted(t["nodeid"] for t in tests if t["outcome"] in ("skipped", "xfailed"))
     rootp = str(root)
     for t in tests:
         if t["outcome"] in ("failed", "error"):
@@ -273,12 +275,37 @@ def rerun_alone(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir:
     return run_pytest(g, root, env, spec, workdir).outcome == "pass"
 
 
+def run_shell(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path) -> GateRun:
+    """A check with plain exit-code meaning (lint, type check, build; §2.5.1). It reports one
+    pseudo-test, `<gate>::<exit>`, so a red result is a failure the judge can see. It must be
+    green at the base: the driver blocks the batch if it is not."""
+    run = GateRun(gate=gate.name, spec_version=spec, outcome="pass")
+    workdir.mkdir(parents=True, exist_ok=True)
+    env = dict(env)
+    env["PYTHONPYCACHEPREFIX"] = str(workdir / f"pycache-{time.monotonic_ns()}")  # B3
+    rc, out, capped, secs = _run(gate.command, root / gate.cwd, env, gate.cap_s)
+    run.duration_s, run.exitstatus, run.tail = round(secs, 2), rc, out[-4000:]
+    if capped:
+        run.outcome, run.reason, run.transient = "unmeasured", f"gate cap {gate.cap_s}s hit", True
+    elif rc in (126, 127):
+        run.outcome, run.reason = "unmeasured", "runner-not-found"
+    elif rc is not None and rc < 0:
+        run.outcome, run.reason, run.transient = "unmeasured", f"killed by signal {-rc}", True
+    elif rc != 0:
+        tid = f"{gate.name}::<exit>"
+        last = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
+        run.outcome, run.reason = "fail", f"exit {rc}"
+        run.failures[tid] = Failure(tid, fingerprint("exit", f"exit {rc}: {last}", [], str(root)),
+                                    "exit", normalize_message(last)[:500])
+    return run
+
+
 def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
             spec: str | None = None) -> GateRun:
     """Run a gate with the §2.5.5 rules: a transient unmeasured is re-run once on the same
     tree, and each timeout-class failure is re-run alone once and dropped if it passes."""
     spec = spec or spec_version(gate, root, env)
-    runner = {"pytest": run_pytest, "vitest": run_vitest}.get(gate.adapter)
+    runner = {"pytest": run_pytest, "vitest": run_vitest, "shell": run_shell}.get(gate.adapter)
     if runner is None:
         return GateRun(gate=gate.name, spec_version=spec, outcome="unmeasured",
                        reason=f"adapter {gate.adapter} cannot be a measured test gate")
@@ -309,26 +336,43 @@ class Verdict:
     reason: str = ""
 
 
+def unmet_obligations(runs: list[GateRun], expect_red: list[str] | None,
+                      must_pass: list[str] | None) -> tuple[list[str], list[str]]:
+    """The step's own obligations, over all of its gates together: (must_pass ids not met,
+    expected reds that did not fail). Each id needs one gate to meet it; a step whose gates
+    split the tests between them must not fail on a gate that never runs the id."""
+    passed = {p for r in runs for p in r.passed}
+    failed = {f for r in runs for f in r.failures}
+    not_run = {n for r in runs for n in r.not_run}
+    unmet = []
+    for t in must_pass or []:
+        if "::" not in t:
+            # A whole file: at least one test in it passed, and none failed, was skipped or is
+            # still xfailed (V1's "remove every xfail"; Codex M1 review #6).
+            ok = any(p.startswith(t + "::") for p in passed) and \
+                not any(f.startswith(t + "::") for f in failed | not_run)
+        else:
+            ok = t in passed and t not in failed
+        if not ok:
+            unmet.append(t)  # this step must make it pass: failing, absent or uncollected all fail
+    return unmet, [t for t in expect_red or [] if t not in failed]
+
+
 def judge(current: GateRun, base: dict[str, str] | None, expect_red: list[str] | None = None,
-          must_pass: list[str] | None = None) -> Verdict:
+          must_pass: list[str] | None = None, obligations: bool = True) -> Verdict:
     """base: test id -> fingerprint failing at the base, or None when there is no comparable
-    base (the spec changed): then every failure is new (§2.5.4)."""
+    base (the spec changed): then every failure is new (§2.5.4). With obligations=False the
+    expected reds only exclude, and must_pass is left to unmet_obligations over all gates."""
     if current.outcome == "unmeasured":
         return Verdict("unmeasured", [], current.reason)
     expect = set(expect_red or [])
     base = base if base is not None else {}
     new = [tid for tid, f in current.failures.items()
            if tid not in expect and (tid not in base or base[tid] != f.fingerprint)]
-    missing_reds = [t for t in expect if t not in current.failures]
-    passed = set(current.passed)
-    for t in must_pass or []:
-        if "::" not in t:  # a whole file: at least one test in it passed and none failed
-            ok = any(p.startswith(t + "::") for p in passed) and \
-                not any(f.startswith(t + "::") for f in current.failures)
-        else:
-            ok = t in passed
-        if not ok and t not in new:
-            new.append(t)  # this step must make it pass: failing, absent or uncollected all fail
+    missing_reds: list[str] = []
+    if obligations:
+        unmet, missing_reds = unmet_obligations([current], expect_red, must_pass)
+        new += [t for t in unmet if t not in new]
     if current.outcome == "fail" and current.reason == "no-tests":
         return Verdict("fail", [f"{current.gate}::<no-tests>"], "no-tests")
     if missing_reds:

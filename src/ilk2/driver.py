@@ -25,6 +25,16 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
              "uv.lock", "poetry.lock", "Pipfile.lock"}
 
 
+# Run endings that are not a failure of the run: they never consume a restart (§2.10).
+# Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
+# way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
+NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api"}
+
+
+def counts_as_restart(reason: str | None) -> bool:
+    return not (reason in NOT_A_RESTART or (reason or "").startswith("blocked"))
+
+
 class Stop(Exception):
     """End the run with a terminal reason."""
 
@@ -85,7 +95,9 @@ class Driver:
         except Stop as e:
             reason = e.reason
             self.event("run.stop", reason=e.reason, detail=e.detail)
-            if reason in ("parked", "cancelled"):  # §2.4.2: the driver releases at these states
+            if reason == "cancelled":
+                self.finish_cancel()
+            elif reason == "parked":  # §2.4.2: the driver releases at these states
                 row = lease.get(self.s, str(self.root))
                 if row and row["holder"] == "driver" and not self.s.one(
                         "SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'", self.batch_id):
@@ -154,6 +166,12 @@ class Driver:
             self.block_batch("base-unmeasured",
                              f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
                              f"fix the gate, then: ilk2 resume {self.batch_id}")
+        if gate.adapter == "shell" and r.outcome == "fail":
+            # §2.5.1: a shell check has no test ids to exclude, so red at the base could never
+            # turn green through base comparison; it must be green before the batch starts.
+            self.block_batch("base-unmeasured",
+                             f"shell gate {gate.name} is red at the base {commit[:12]} ({r.reason}): "
+                             f"{r.tail[-500:]}", f"fix the check, then: ilk2 resume {self.batch_id}")
         failures = r.failure_map()
         self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
                                             "spec_version": spec, "commit_sha": commit,
@@ -246,10 +264,12 @@ class Driver:
         lease.driver_release(self.s, str(self.root), head)
         self.event("batch.blocked", plans=blocked)
 
-    def block_batch(self, reason: str, detail: str, clear: str) -> None:
+    def block_batch(self, reason: str, detail: str, clear: str, release: bool = True) -> None:
         self.s.transition("batches", self.batch_id, "blocked", actor="driver", reason=reason,
                           fields={"blocked_reason": f"{reason}: {detail[:500]}"})
         self.s.open_needs_human(reason, detail[:2000], clear, batch_id=self.batch_id)
+        if not release:  # the root stays fenced: survivors may still be writing to it
+            raise Stop(f"blocked ({reason})", detail[:300])
         head = gitops.branch_head(self.root, self.branch)
         try:
             lease.driver_release(self.s, str(self.root), head)
@@ -306,15 +326,26 @@ class Driver:
                 self.api_backoff(outcome)
                 continue
             red = None
+            if gitops.worktree_tree(self.root) == gitops.commit_tree_of(self.root, parent):
+                red = ("The attempt made no change to any file. The step needs a change that makes its "
+                       "gates pass; nothing was committed.")
+            unfinished = None if outcome == "done" else (
+                f"The worker's session did not finish ({outcome}"
+                f"{', exit ' + str(summary.get('returncode')) if outcome == 'crashed' else ''}). "
+                "Its work so far is kept in the worktree; finish the step.")
             with self.phase("scope", step=step["id"]):
                 out_of_scope = self.out_of_scope(scope)
-                if out_of_scope:
+                if out_of_scope and red is None:
                     red = "Changes outside the step's declared scope: " + ", ".join(out_of_scope[:20])
             verdicts: dict = {}
             if red is None:
                 with self.phase("gates", step=step["id"]):
                     red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent,
                                                    must_pass)
+            if unfinished:
+                # Never accepted, even with green gates (Codex M1 review #2); the gate output
+                # is still the evidence for the next attempt.
+                red = unfinished + ("\n\n" + red if red else "")
             if red is None:
                 with self.phase("accept", step=step["id"]):
                     self.accept(step, aid, parent)
@@ -382,10 +413,10 @@ class Driver:
             outcome = d.wait(self.b.attempt_cap, self.b.term_grace, self.b.kill_grace)
         summary = d.summary()
         if d.terminated and d.terminated.get("survivors"):
-            self.s.open_needs_human("unkillable", f"worker group {d.pgid} survived SIGKILL: "
-                                    f"{d.terminated['survivors']}", "kill the listed pids, then: "
-                                    f"ilk2 resume {self.batch_id}", batch_id=self.batch_id)
-            raise Stop("blocked (unkillable)")
+            self.end_attempt(aid, "interrupted", "worker survived SIGKILL", summary)
+            self.block_batch("unkillable", f"worker group {d.pgid} survived SIGKILL: "
+                             f"{d.terminated['survivors']}", "kill the listed pids, then: "
+                             f"ilk2 resume {self.batch_id}", release=False)
         return outcome, summary, d.session_id or session
 
     def api_backoff(self, kind: str) -> None:
@@ -420,7 +451,7 @@ class Driver:
         changed = set(gitops.changed_paths(self.root))
         if self.cfg.setup and any(Path(p).name in LOCKFILES for p in changed):
             self.setup(self.root)
-        reds, verdicts = [], {}
+        reds, verdicts, runs = [], {}, []
         for gate in gate_list:
             env = self.env()
             spec = gates.spec_version(gate, self.root, env)
@@ -428,7 +459,8 @@ class Driver:
             for _ in range(r.timeouts):
                 self.event("gate.timeout", gate=gate.name)
             base = self.base_for(gate, spec)
-            v = gates.judge(r, base, expect_red, list(must_pass))
+            runs.append(r)
+            v = gates.judge(r, base, expect_red, obligations=False)
             if r.missing_paths and gate.declares_tests and v.outcome != "unmeasured":
                 # At the base an absent path is 0 tests; after a step it is a missing test
                 # file the gate declares, never a silent pass (docs/06 B5).
@@ -462,6 +494,12 @@ class Driver:
                     lines.append(f"- {tid}{tag}: {f.message if f else ''}")
                 lines.append("\nOutput tail:\n" + r.tail[-2500:])
                 reds.append("\n".join(lines))
+        unmet, missing_reds = gates.unmet_obligations(runs, expect_red, list(must_pass))
+        if unmet or missing_reds:
+            verdicts["step"] = {"outcome": "fail", "must_pass": unmet, "expected_red": missing_reds}
+            reds.append("The step's own obligations are not met:\n" + "\n".join(
+                [f"- {t}: must pass after this step (failing, skipped, xfailed or absent)"
+                 for t in unmet] + [f"- {t}: expected red, did not fail" for t in missing_reds]))
         return ("\n\n".join(reds) if reds else None), verdicts
 
     def base_for(self, gate: Gate, spec_now: str) -> dict[str, str] | None:
@@ -535,6 +573,9 @@ class Driver:
                     self.event("recovery", step=step["id"], action="finalize", commit=sha)
                     continue
             elif sha is None and head == parent:
+                # Undo includes the files: the accepted-but-uncommitted tree must not outlive
+                # the step, e.g. into a root released by a cancel (Codex M1 review #4).
+                gitops.reset_hard(self.root, parent)
                 self.s.transition("steps", step["id"], "pending", actor="driver",
                                   reason="recovery: undo", expect_from={"accepting"},
                                   fields={"accepting": None})
@@ -548,6 +589,67 @@ class Driver:
                                     f"{parent[:12]}; found commit {sha} and head {head}",
                                     f"inspect {self.root}, then: ilk2 resume {self.batch_id}",
                                     batch_id=self.batch_id)
+
+    # -- cancel (§2.8) ------------------------------------------------------------------
+
+    def finish_cancel(self) -> bool:
+        """End a cancelled batch's whole hierarchy, then release its root (Codex M1 review #1).
+        Idempotent. While any process is still inside the root nothing is touched and the
+        root stays fenced behind an `unkillable` row; False then, and a later call retries."""
+        if fenced(self.s, self.batch_id, self.root):
+            return False
+        self.recover_accepting()
+        for a in self.s.all("SELECT a.id FROM attempts a JOIN steps st ON st.id = a.step_id "
+                            "WHERE st.batch_id = ? AND a.status = 'running'", self.batch_id):
+            self.s.transition("attempts", a["id"], "done", actor="driver", reason="cancelled",
+                              fields={"outcome": "cancelled", "reason": "batch cancelled",
+                                      "ended_at": clock.wall()})
+        with self.s.tx():
+            for st in self.s.all("SELECT id FROM steps WHERE batch_id = ? AND status IN "
+                                 "('pending', 'accepting', 'blocked')", self.batch_id):
+                self.s.transition("steps", st["id"], "cancelled", actor="driver", reason="batch cancelled")
+            for p in self.s.all("SELECT id FROM plans WHERE batch_id = ? AND status IN "
+                                "('pending', 'active', 'blocked')", self.batch_id):
+                self.s.transition("plans", p["id"], "cancelled", actor="driver", reason="batch cancelled")
+        row = lease.get(self.s, str(self.root))
+        if row and row["holder"] == "driver":
+            lease.driver_release(self.s, str(self.root), gitops.branch_head(self.root, self.branch))
+        self.s.clear_needs_human(self.batch_id)
+        return True
+
+
+def fenced(s: Store, batch_id: str, root: Path) -> bool:
+    """True, with an open `unkillable` row, while any process other than ours is in root."""
+    found = procs.strays(root)
+    if found:
+        s.open_needs_human("unkillable", f"processes still inside {root}: {found}",
+                           "kill the listed pids; the supervisor then carries on",
+                           batch_id=batch_id)
+    return bool(found)
+
+
+def has_unfinished_cancel(s: Store, batch_id: str) -> bool:
+    """A cancelled batch with anything left to end: a live child row or a held root."""
+    if s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status IN ('pending', 'accepting', "
+             "'blocked') UNION SELECT 1 FROM plans WHERE batch_id = ? AND status IN ('pending', "
+             "'active', 'blocked') UNION SELECT 1 FROM attempts a JOIN steps st ON "
+             "st.id = a.step_id WHERE st.batch_id = ? AND a.status = 'running'",
+             batch_id, batch_id, batch_id):
+        return True
+    b = s.get("batches", batch_id)
+    row = lease.get(s, b["execution_root"])
+    return bool(row and row["holder"] == "driver")
+
+
+def finish_cancel(s: Store, batch_id: str, b: bounds.Bounds | None = None) -> bool:
+    """Run the driver's cancel finalization outside a live run (supervisor, `ilk2 cancel`),
+    under a recorded run so every transition has a driver-side actor (I1)."""
+    if fenced(s, batch_id, Path(s.get("batches", batch_id)["execution_root"])):
+        return False  # checked first, so a fenced root does not add a run row every tick
+    rid = new_id("r")
+    s.insert("runs", {"id": rid, "batch_id": batch_id, "status": "ended",
+                      "terminal_reason": "cancel-recovery", "created_at": clock.wall()})
+    return Driver(s, rid, b).finish_cancel()
 
 
 def main(run_id: str) -> int:

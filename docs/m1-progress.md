@@ -31,6 +31,10 @@ Batch `b-26687da364b1` on the throwaway consumer `~/.ilk2/m1/consumer` (todo-lit
 
 The first M1 attempt (`b-1b3841db9323`) found a bug (docs/06 B5: the scope check read `odo.py`) and was cancelled by hand. That is the one human transition of the day, outside the batch that met the criterion.
 
+## After the M1 code review (Oct 13)
+
+Codex's code review found 7 defects (C1-C7) and fixing C7 exposed an eighth (C8). All are fixed with tests; the table is in [document 6](06-open-items.md) "M1 code review". Suite: 106 passed, 1 skipped (release build while `src/` was dirty). The new supervisor also finishes the stale rows in the live store: the cancelled `b-1b3841db9323` hierarchy and the running attempt `a-20739d425ee1` left by the M1 supervisor kill, from before lost runs closed their attempts.
+
 ## Known gaps
 
 - `store.migrate()` creates missing tables only. A column added to an existing table needs a real migration step from here on, because chad-mbp now has a live `~/.ilk2/data/state.db` (installed Oct 13).
