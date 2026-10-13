@@ -106,13 +106,19 @@ def take_over(root: str | Path, key: str | None) -> dict:
     """Make V1 skip this repo. Refuses while V1 has unshipped masters or a live runner for it
     (drain first, §4.3 step 1). Returns what it did."""
     root = _real(root)
+    left: list[str] = []
     if key:
-        busy = unshipped(key)
+        # Only what V1 could run blocks the handover: a queued or active master, or a live runner.
+        # Drafts, paused and blocked masters stay where they are; one released later (queued) is
+        # claimed by ilk2 (ilk-skills, Oct 13: 6 such masters, none runnable).
+        pending = unshipped(key)
+        runnable = [m for m in pending if m.endswith((": queued", ": active"))]
+        left = [m for m in pending if m not in runnable]
         pid = runner_alive(key)
-        if busy or pid:
-            raise RuntimeError(f"V1 still has work for {root}: masters {busy[:5]}, runner pid {pid}; "
+        if runnable or pid:
+            raise RuntimeError(f"V1 still has work for {root}: masters {runnable[:5]}, runner pid {pid}; "
                                "let it ship or park it (/ilk-park), then take over")
-    done: dict = {"root": root, "key": key}
+    done: dict = {"root": root, "key": key, "left_in_v1": left}
     reg = data_root() / "projects.json"
     if reg.exists():
         data = json.loads(reg.read_text(encoding="utf-8-sig"))

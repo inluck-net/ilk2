@@ -145,3 +145,22 @@ From gh-resolve's review (Oct 13). 28 of gh-resolve v0.106.0's 87 modules touch 
 | Pinned tag on rezmac | `--api-version N`; the CLI keeps every pinned version |
 | Q2, Q4, Q12 still open | Decide before P5 |
 | Host limit of 1 (H1) | Resolved: ilk2 host budget of 2 (§4.2) |
+
+## 4.9 Retiring V1: the checklist (P7)
+
+V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.scheduler`) is disabled there. That is safe only when nothing on that host still needs V1 to run work. Inventory of Oct 13, 16:30 CST (read-only, both hosts; `scratchpad` script in the build session):
+
+| What still needs V1 | Host | State | What retires it |
+|---|---|---|---|
+| gh-resolve's own development | chad-mbp | **moved to ilk2** (P4 handover; V1 resolves no repo for it) | done |
+| ilk-skills' own development | chad-mbp | V1-registered; 6 unshipped masters, none runnable (3 drafts never released, 2 paused, 1 blocked since Oct 7) | `ilk2 project add ilk-skills … --take-over`: refused only by a runnable master or a live runner; the 6 stay in V1's dir, and one released later is claimed by ilk2 |
+| gh-resolve's resolver, fleet b (kira masters in V1's kira dir) | chad-mbp | 2 drafts, 1 blocked; no live runner | gh-resolve's `engine: ilk2` live on chad-mbp (P5) |
+| gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6) |
+
+**The switch-off, per host, once its rows are retired:**
+1. `ilk2 report` shows the host's ilk2 projects meeting §4.5 (and no V1 runner alive: `running.pid` for every key).
+2. Disable, do not delete: `launchctl bootout gui/$UID/net.inluck.ilk.scheduler` and move its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. Reversible by moving it back and `launchctl bootstrap`.
+3. V1's data (`~/.ilk-data`) and releases (`~/.ilk`) stay as they are: history, baselines (`ilk2 report --v1-baseline`) and rollback.
+4. V1's planning skills (`/ilk-plan`, `ilk-spec`, inbox and lark tickets) keep working: they write masters into V1's plans dir, and ilk2 claims the queued ones of the projects it owns.
+
+**Order:** chad-mbp first (ilk-skills takeover now; fleet b at P5 live), then rezmac (P6).

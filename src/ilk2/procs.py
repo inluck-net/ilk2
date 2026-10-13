@@ -53,20 +53,55 @@ def descendants(root: int) -> list[tuple[int, int, str]]:
     return out
 
 
+_LIBPROC = None
+PROC_ALL_PIDS = 1
+PROC_PIDVNODEPATHINFO = 9
+_VNODE_INFO = 152          # sizeof(struct vnode_info) on macOS
+_MAXPATHLEN = 1024
+
+
+def _libproc():
+    global _LIBPROC
+    if _LIBPROC is None:
+        import ctypes
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        lib.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p,
+                                     ctypes.c_int]
+        lib.proc_name.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        _LIBPROC = lib
+    return _LIBPROC
+
+
+def _cwd_and_name(lib, pid: int) -> tuple[str, str] | None:
+    import ctypes
+    size = 2 * (_VNODE_INFO + _MAXPATHLEN)   # struct proc_vnodepathinfo: cdir, then rdir
+    buf = ctypes.create_string_buffer(size)
+    if lib.proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, buf, size) <= 0:
+        return None   # gone, or not ours
+    cwd = buf.raw[_VNODE_INFO:_VNODE_INFO + _MAXPATHLEN].split(b"\0", 1)[0].decode(errors="replace")
+    nbuf = ctypes.create_string_buffer(256)
+    lib.proc_name(pid, nbuf, 256)
+    return cwd, nbuf.value.decode(errors="replace")
+
+
 def processes_in(root: Path) -> list[tuple[int, str]]:
-    """Processes of this user whose cwd is inside root."""
+    """Processes of this user whose cwd is inside root. The kernel reports each cwd (libproc
+    proc_pidinfo); nothing is opened or stat'ed. `lsof -d cwd` did stat every process's cwd,
+    so macOS asked for OneDrive and other apps' data on ilk2's behalf (Oct 13)."""
+    import ctypes
     real = os.path.realpath(root)
-    out = subprocess.run(["lsof", "-a", "-d", "cwd", "-u", str(os.getuid()), "-F", "pcn"],
-                         capture_output=True, text=True).stdout
-    rows, pid, comm = [], None, ""
-    for line in out.splitlines():
-        tag, val = line[:1], line[1:]
-        if tag == "p":
-            pid, comm = int(val), ""
-        elif tag == "c":
-            comm = val
-        elif tag == "n" and pid is not None and (val == real or val.startswith(real + os.sep)):
-            rows.append((pid, comm))
+    lib = _libproc()
+    n = lib.proc_listpids(PROC_ALL_PIDS, 0, None, 0)
+    pids = (ctypes.c_int * (n // ctypes.sizeof(ctypes.c_int) + 64))()
+    n = lib.proc_listpids(PROC_ALL_PIDS, 0, pids, ctypes.sizeof(pids))
+    rows = []
+    for pid in pids[: n // ctypes.sizeof(ctypes.c_int)]:
+        if pid <= 0:
+            continue
+        info = _cwd_and_name(lib, pid)
+        if info and (info[0] == real or info[0].startswith(real + os.sep)):
+            rows.append((pid, info[1]))
     return rows
 
 

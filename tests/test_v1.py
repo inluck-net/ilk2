@@ -157,3 +157,25 @@ def test_shadow_root_is_never_leased_and_its_events_say_shadow(ilk, tmp_path):
     with pytest.raises(Conflict, match="shadow"):
         lease.consumer_acquire(ilk.s, root, g, head, "gh-resolve", head, 60)
     assert all(e["payload"].get("shadow") is True for e in ilk.s.events_since(0, bid))
+
+
+def test_take_over_lists_non_runnable_masters_and_refuses_only_runnable_ones(ilk, v1data):
+    # ilk-skills on Oct 13: 3 drafts never released, 2 paused, 1 blocked. V1 can run none of
+    # them; they must not block the handover. A queued or active master still does.
+    d, key = v1data
+    plans_dir = d / "projects" / key / "plans"
+    for name, st in (("MASTER-d.md", "draft"), ("MASTER-p.md", "paused"), ("MASTER-b.md", "blocked")):
+        (plans_dir / name).write_text(master(st))
+    done = v1.take_over(ilk.repo, key)
+    assert sorted(done["left_in_v1"]) == ["MASTER-b.md: blocked", "MASTER-d.md: draft", "MASTER-p.md: paused"]
+    assert (plans_dir / "MASTER-d.md").exists()  # untouched
+    # a draft released later (status queued) is claimed by ilk2
+    (plans_dir / "MASTER-d.md").write_text(master("queued"))
+    assert [p.name for p in v1.claim(key)] == ["MASTER-d.md" + v1.CLAIMED]
+
+
+def test_take_over_refuses_a_runnable_master(ilk, v1data):
+    d, key = v1data
+    (d / "projects" / key / "plans" / "MASTER-q.md").write_text(master("queued"))
+    with pytest.raises(RuntimeError, match="V1 still has work"):
+        v1.take_over(ilk.repo, key)

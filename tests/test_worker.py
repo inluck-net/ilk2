@@ -216,3 +216,28 @@ def test_auto_compact_is_pinned_on_whatever_the_host_or_repo_says(env, monkeypat
     c = calls(files)[0]
     assert json.loads(c["settings"]) == {"autoCompactEnabled": True}
     assert c["disable_auto_compact"] is None
+
+
+def test_processes_in_reads_cwds_from_the_kernel_not_lsof(tmp_path, monkeypatch):
+    # Oct 13: `lsof -d cwd -u <uid>` resolved every process's cwd, OneDrive's and other apps'
+    # included, and macOS showed "python3.12 wants to access files managed by OneDrive" /
+    # "data from other apps blocked". The kernel's proc_pidinfo gives the same paths without
+    # touching the file system.
+    import subprocess as sp_
+    from ilk2 import procs
+    real_run = sp_.run
+
+    def no_lsof(cmd, *a, **kw):
+        assert "lsof" not in str(cmd[0]), "processes_in must not run lsof"
+        return real_run(cmd, *a, **kw)
+    monkeypatch.setattr(procs.subprocess, "run", no_lsof)
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    p = sp_.Popen(["sleep", "30"], cwd=root / "sub")
+    try:
+        found = procs.processes_in(root)
+        assert p.pid in [pid for pid, _ in found]
+        assert all(pid != p.pid for pid, _ in procs.processes_in(tmp_path / "elsewhere"))
+    finally:
+        p.kill()
+        p.wait()
