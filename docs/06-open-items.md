@@ -191,6 +191,37 @@ An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; 
 
 After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
 
+### Parallel plans inside a batch (design proposal, Oct 14, for Chad's review)
+
+**Evidence.** Today a batch's plans run one at a time on one root. Over 254 real V1 masters (gh-resolve and ilk-skills, median 12 steps), the plans' `depends_on` graphs allow more:
+- 74% of masters with 2+ work plans have at least 2 plans runnable at once;
+- with **2 lanes**, the critical path is a median **43%** shorter than running every step in sequence (mean 32%), and 69% of masters save at least 25%.
+
+This is an upper bound: it ignores merge cost and assumes the extra MiMo session is free.
+
+**Proposal: lanes.** The batch keeps one branch (consumers see no change). The driver gives each ready plan whose dependencies have all shipped a **lane**: its own worktree and lane branch, cut from the batch head when the lane starts. The lane runs the plan's steps exactly as today: carry-over, gates and attribution inside the lane. When the plan ships, the driver merges the lane into the batch branch, under the root lease, and runs the plan's gates once more on the merged head.
+
+```mermaid
+flowchart LR
+  H0[batch head] --> LA[lane A: plan P1<br/>own worktree + branch]
+  H0 --> LB[lane B: plan P2<br/>own worktree + branch]
+  LA -->|P1 ships| M1{merge into batch branch<br/>+ re-gate on merged head}
+  M1 -->|clean, green| H1[batch head']
+  LB -->|P2 ships| M2{merge into batch branch<br/>+ re-gate}
+  H1 --> M2
+  M2 -->|clean, green| H2[batch head'']
+  M1 -->|conflict or red| R[repair step on the batch branch<br/>with the conflict or failure as its brief]
+  M2 -->|conflict or red| R
+  H2 --> V[verification plan: full suite]
+```
+
+**Decisions for Chad:**
+1. **Lanes per batch** (proposed: `max_lanes` per project, default 1, so nothing changes until a project opts in; 2 for gh-resolve and ilk-skills). Each lane is one MiMo session and counts against the host budget like a run.
+2. **On a merge conflict, or a red re-gate** (proposed: add a one-step repair plan on the batch branch, with the conflict hunks or the new failures as its brief; the same mechanism as attribution repairs).
+3. **Attribution across lanes:** a failure that first appears at a merge commit is attributed to the merge (that repair step), not walked back into either lane.
+
+**Cost:** about 400-600 lines in the driver: lane scheduling, a worktree per lane, merge plus re-gate, and repair on conflict. It needs a stall-suite extension (lane crash, merge conflict, a lane blocked while the other ships). Not started; built only after Chad's review.
+
 ### Upgrades block admission (found Oct 14, for P6)
 
 `ilk2 release upgrade` sets `draining`; the supervisor then admits nothing until every live run reaches an attempt boundary, and exits so launchd restarts it from the new release (§2.7). With 3 batches live and releases every 20-30 min (Oct 14, 00:40-02:00), draining was nearly continuous: a queued gh-triage batch waited behind it for 20+ min with budget free.
