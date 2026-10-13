@@ -185,3 +185,51 @@ def test_take_over_refuses_a_runnable_master(ilk, v1data):
     (d / "projects" / key / "plans" / "MASTER-q.md").write_text(master("queued"))
     with pytest.raises(RuntimeError, match="V1 still has work"):
         v1.take_over(ilk.repo, key)
+
+
+# -- the per-host switch-off (docs/04 §4.9, P7) ------------------------------------------------
+
+@pytest.fixture
+def agents(tmp_path, monkeypatch):
+    a = tmp_path / "LaunchAgents"
+    a.mkdir()
+    (a / f"{v1.SCHEDULER}.plist").write_text("<plist/>")
+    log = tmp_path / "launchctl.log"
+    fake = tmp_path / "launchctl"
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ILK2_LAUNCH_AGENTS", str(a))
+    monkeypatch.setenv("ILK2_LAUNCHCTL", str(fake))
+    return a, log
+
+
+def test_switch_off_is_refused_while_anything_still_needs_v1(ilk, v1data, agents):
+    a, log = agents
+    d, key = v1data
+    (d / "projects" / key / "plans" / "MASTER-q.md").write_text(master("queued"))
+    out = v1.switch_off(set(), apply=True)
+    assert not out["applied"] and out["plist"] and not log.exists()
+    assert any("not owned by ilk2" in b for b in out["blockers"])
+    assert any("runnable master" in b for b in out["blockers"])
+
+
+def test_switch_off_disables_and_switch_on_restores(ilk, v1data, agents):
+    a, log = agents
+    d, key = v1data
+    (d / "projects.json").write_text(json.dumps({"projects": []}))  # everything moved to ilk2
+    dry = v1.switch_off(set(), apply=False)
+    assert dry["blockers"] == [] and not dry["applied"] and dry["plist"]
+    out = v1.switch_off(set(), apply=True)
+    assert out["applied"] and not out["plist"] and out["disabled_plist"]  # moved, never deleted
+    assert "bootout" in log.read_text()
+    back = v1.switch_on(apply=True)
+    assert back["applied"] and back["plist"] and not back["disabled_plist"]
+    assert "bootstrap" in log.read_text()
+
+
+def test_v1_status_cli_lists_what_still_needs_v1(ilk, v1data, agents, capsys):
+    from ilk2 import cli
+    assert cli.main(["v1", "status"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert any("not owned by ilk2" in b for b in out["needs_v1"]) and out["plist"]
+    assert cli.main(["v1", "off", "--apply"]) == 2  # refused: the registry still lists repos

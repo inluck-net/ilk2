@@ -150,6 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--take-over", action="store_true",
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
+    v1p = sub.add_parser("v1", help="V1's scheduler on this host (docs/04 §4.9, P7)")
+    v1p.add_argument("op", choices=["status", "off", "on"])
+    v1p.add_argument("--apply", action="store_true", help="act; without it, report only")
 
     sm = sub.add_parser("submit")
     sm.add_argument("file")
@@ -345,6 +348,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 g = lease.recover(s, a.root, a.generation, a.new_head or head)
             _out({"generation": g}, True)
+        elif a.cmd == "v1":
+            from . import v1
+            owned = {os.path.realpath(r["repo_root"]) for r in s.all("SELECT repo_root FROM projects")}
+            if a.op == "status":
+                out = {"needs_v1": v1.needs_v1(owned), **v1.scheduler_state()}
+            elif a.op == "off":
+                out = v1.switch_off(owned, a.apply)
+            else:
+                out = v1.switch_on(a.apply)
+            _out(out, True)
+            return 2 if a.op == "off" and a.apply and not out.get("applied") else 0
         elif a.cmd == "report":
             from . import report as report_mod
             out = report_mod.build(s, project=a.project)

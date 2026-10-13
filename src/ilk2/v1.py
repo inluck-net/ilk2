@@ -208,3 +208,69 @@ def baseline(key: str) -> dict:
             "iteration_minutes": round(secs / 60), "steps_advanced": steps,
             "iterations_without_a_step": zero,
             "minutes_per_accepted_step": round(secs / 60 / steps, 1) if steps else None}
+
+
+# -- the per-host switch-off (docs/04 §4.9, P7) ------------------------------------------------
+
+SCHEDULER = "net.inluck.ilk.scheduler"
+DISABLED_DIR = "disabled-by-ilk2"
+
+
+def launch_agents() -> Path:
+    return Path(os.environ.get("ILK2_LAUNCH_AGENTS") or (Path.home() / "Library" / "LaunchAgents"))
+
+
+def launchctl() -> str:
+    return os.environ.get("ILK2_LAUNCHCTL") or "/bin/launchctl"
+
+
+def needs_v1(owned_roots: set[str]) -> list[str]:
+    """What on this host still needs V1's scheduler (§4.9): a registered repo ilk2 does not own,
+    a queued or active master, or a live V1 runner, for any key."""
+    out = [f"registered in V1, not owned by ilk2: {r}" for r in sorted(registry_roots() - owned_roots)]
+    projects = data_root() / "projects"
+    for d in sorted(projects.iterdir()) if projects.is_dir() else []:
+        runnable = [m for m in unshipped(d.name) if m.endswith((": queued", ": active"))]
+        out += [f"{d.name}: runnable master {m}" for m in runnable]
+        pid = runner_alive(d.name)
+        if pid:
+            out.append(f"{d.name}: V1 runner alive, pid {pid}")
+    return out
+
+
+def scheduler_state() -> dict:
+    agents = launch_agents()
+    return {"plist": (agents / f"{SCHEDULER}.plist").exists(),
+            "disabled_plist": (agents / DISABLED_DIR / f"{SCHEDULER}.plist").exists()}
+
+
+def switch_off(owned_roots: set[str], apply: bool) -> dict:
+    """Disable, never delete: boot the scheduler out and move its plist aside. Refused while
+    anything still needs V1. Without apply, reports what it would do."""
+    import subprocess
+    blockers = needs_v1(owned_roots)
+    agents = launch_agents()
+    plist = agents / f"{SCHEDULER}.plist"
+    out = {"blockers": blockers, **scheduler_state(), "applied": False}
+    if blockers or not plist.exists() or not apply:
+        return out
+    subprocess.run([launchctl(), "bootout", f"gui/{os.getuid()}/{SCHEDULER}"], capture_output=True)
+    (agents / DISABLED_DIR).mkdir(exist_ok=True)
+    os.replace(plist, agents / DISABLED_DIR / plist.name)
+    out.update(scheduler_state(), applied=True)
+    return out
+
+
+def switch_on(apply: bool) -> dict:
+    """The rollback: move the plist back and bootstrap the scheduler."""
+    import subprocess
+    agents = launch_agents()
+    moved = agents / DISABLED_DIR / f"{SCHEDULER}.plist"
+    out = {**scheduler_state(), "applied": False}
+    if not moved.exists() or not apply:
+        return out
+    plist = agents / moved.name
+    os.replace(moved, plist)
+    subprocess.run([launchctl(), "bootstrap", f"gui/{os.getuid()}", str(plist)], capture_output=True)
+    out.update(scheduler_state(), applied=True)
+    return out

@@ -158,8 +158,8 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 | gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6) |
 
 **The switch-off, per host, once its rows are retired:**
-1. `ilk2 report` shows the host's ilk2 projects meeting §4.5 (and no V1 runner alive: `running.pid` for every key).
-2. Disable, do not delete: `launchctl bootout gui/$UID/net.inluck.ilk.scheduler` and move its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. Reversible by moving it back and `launchctl bootstrap`.
+1. `ilk2 report` shows the host's ilk2 projects meeting §4.5, and `ilk2 v1 status` lists nothing that still needs V1 (a registered repo ilk2 does not own, a queued or active master, a live runner).
+2. Disable, do not delete: `ilk2 v1 off --apply` (refused while `status` lists anything) boots out `net.inluck.ilk.scheduler` and moves its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. `ilk2 v1 on --apply` moves it back and bootstraps it.
 3. V1's data (`~/.ilk-data`) and releases (`~/.ilk`) stay as they are: history, baselines (`ilk2 report --v1-baseline`) and rollback.
 4. V1's planning skills (`/ilk-plan`, `ilk-spec`, inbox and lark tickets) keep working: they write masters into V1's plans dir, and ilk2 claims the queued ones of the projects it owns.
 
