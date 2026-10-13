@@ -87,6 +87,7 @@ class Supervisor:
         self.last_wall, self.last_mono = now_w, now_m
         with self.s.tx() as c:
             c.execute("UPDATE supervisor SET tick_wall = ?, tick_mono = ? WHERE id = 1", (now_w, now_m))
+        self.reload_host_config()
         self.reap()
         self.claim_v1()
         self.close_orphan_attempts()
@@ -455,6 +456,17 @@ class Supervisor:
                 self.s.clear_refusal(b["id"], reason)
             self.spawn(b)
             live.add(b["id"])
+
+    def reload_host_config(self) -> None:
+        """host.json is re-read every tick: a budget change needs no supervisor restart, which
+        would interrupt every live attempt (Chad, Oct 14: 3+ kira batches at once)."""
+        try:
+            hc = host_config()
+        except (OSError, ValueError):
+            return  # a half-written file: keep the current settings
+        if "host_budget" in hc and int(hc["host_budget"]) != self.host_budget:
+            self.s.event("host.config", {"host_budget": int(hc["host_budget"]), "was": self.host_budget})
+            self.host_budget = int(hc["host_budget"])
 
     def reserved_for_others(self, project_id: str) -> int:
         """Runs other projects reserve and are not using now (R5)."""

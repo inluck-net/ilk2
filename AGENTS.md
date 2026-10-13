@@ -17,7 +17,7 @@ ilk2 is the second version of the ilk loop engine (V1 is `inluck-net/ilk-skills`
 - **Spike vs core.** P1 code goes in `spikes/p1/`. It is evidence, not the core. Code that graduates to `src/ilk2/` is rewritten there with tests.
 - **Every change to code logic** states its acceptance criterion before editing. It is verified by a test that fails without it, or by a live run whose output is reported.
 - **Commits and pushes** to this repo are made when Chad asks, or when a phase step's stated exit criterion requires CI.
-- **V1 is live.** V1 loops run on both hosts from `~/.ilk/current`. Do not touch `~/.ilk`, `~/.ilk-data` (beyond the handover's reversible renames) or V1's launchd jobs (`ilk2 v1 off` only on Chad's go). ilk2 shares the hosts with V1, so keep at most 1-2 MiMo sessions at once.
+- **V1 is live.** V1 loops run on both hosts from `~/.ilk/current`. Do not touch `~/.ilk`, `~/.ilk-data` (beyond the handover's reversible renames) or V1's launchd jobs (`ilk2 v1 off` only on Chad's go). Concurrency (Chad, Oct 14): at least 3 kira-cloudflare batches at once on each host. `~/.ilk2/host.json` sets `host_budget` (chad-mbp 4, rezmac 3; re-read every tick), and `kira-shadow` has `concurrency_limit` 3; the load check still holds new runs back on a busy host.
 - **ilk-skills' own development runs on ilk2** (Chad, Oct 14: "go ahead with the ilk-skills takeover"). ilk2 batches edit the clone at `/Users/chad/Projects/github/inluck-net/ilk-skills` through their own worktrees and `ilk2/b-*` branches; live V1 keeps running from its release in `~/.ilk/current`, not from the clone. A build session still does not edit the clone by hand.
 
 ## Where things are

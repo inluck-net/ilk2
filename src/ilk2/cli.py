@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health")
 
     psub = sub.add_parser("project").add_subparsers(dest="pcmd")
+    ps = psub.add_parser("set", help="change project settings: key=JSON value (journalled)")
+    ps.add_argument("project_id")
+    ps.add_argument("assignments", nargs="+", metavar="key=value")
     pa = psub.add_parser("add")
     pa.add_argument("project_id")
     pa.add_argument("repo")
@@ -280,6 +283,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if a.cmd == "project":
             from . import v1
+            if a.pcmd == "set":
+                cfg = batches.project_config(s, a.project_id)
+                known = set(batches.ProjectConfig.__dataclass_fields__)
+                changes = {}
+                for kv in a.assignments:
+                    k, sep, v = kv.partition("=")
+                    if not sep or k not in known:
+                        _out({"error": "rejected", "problems": [f"unknown setting {k!r}"]}, True)
+                        return 2
+                    try:
+                        changes[k] = json.loads(v)
+                    except ValueError:
+                        changes[k] = v  # a bare string
+                for k, v in changes.items():
+                    setattr(cfg, k, v)
+                s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))},
+                         actor="human", reason="project set " + " ".join(a.assignments))
+                _out({"project": a.project_id, "set": changes}, True)
+                return 0
             if a.pcmd == "take-over":
                 proj = s.get("projects", a.project_id)
                 key = v1.find_key(proj["repo_root"])

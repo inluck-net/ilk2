@@ -782,3 +782,40 @@ def test_status_by_consumer_ref_returns_the_batch_meta(ilk, capsys):
     assert json.loads(capsys.readouterr().out)["batches"][0]["meta"] is None
     with pytest.raises(batches.SubmitRejected):
         batches.submit(ilk.s, "proj", plans.from_dict(one_step()), meta=["not", "an", "object"])
+
+
+def test_project_set_and_host_budget_take_effect_without_a_restart(ilk, capsys):
+    # Chad, Oct 14: at least 3 kira batches at once on both hosts. A supervisor restart would
+    # interrupt every live attempt, so both settings apply live.
+    from ilk2 import batches, cli, paths, supervisor
+    ilk.make_repo()
+    ilk.project()
+    assert cli.main(["project", "set", "proj", "concurrency_limit=3", "enforce_scope=false"]) == 0
+    cfg = batches.project_config(ilk.s, "proj")
+    assert cfg.concurrency_limit == 3 and cfg.enforce_scope is False
+    assert cli.main(["project", "set", "proj", "no_such=1"]) == 2
+    sp = supervisor.Supervisor(ilk.s, host_budget=2, load_check=False)
+    (paths.home() / "host.json").write_text(json.dumps({"host_budget": 4, "load_check": False}))
+    sp.reload_host_config()
+    assert sp.host_budget == 4
+
+
+def test_three_batches_of_one_project_run_at_once(ilk):
+    from ilk2 import batches, cli, plans, supervisor
+    ilk.make_repo()
+    ilk.project()
+    assert cli.main(["project", "set", "proj", "concurrency_limit=3"]) == 0
+    bids = [batches.submit(ilk.s, "proj", plans.from_dict(one_step())) for _ in range(4)]
+    sp = supervisor.Supervisor(ilk.s, host_budget=4, load_check=False)
+    sp.drive_cmd = ["/bin/sh", "-c", "sleep 5", "stub"]
+    try:
+        sp.admit()
+        live = {r["batch_id"] for r in ilk.s.all("SELECT batch_id FROM runs WHERE status IN "
+                                                  "('starting', 'running')")}
+        assert live == set(bids[:3])                                   # 3 at once, each its own root
+        assert ilk.s.one("SELECT reason FROM refusals WHERE batch_id = ? AND cleared_at IS NULL",
+                         bids[3])["reason"] == "project-limit"
+    finally:
+        for p in sp.children.values():
+            p.kill()
+            p.wait()
