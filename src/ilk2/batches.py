@@ -234,6 +234,29 @@ def amend(s: Store, batch_id: str, ops: list[dict], *, expect_version: int, acto
                                    "gates": dumps([asdict(g) for g in stp.gates]),
                                    "expected_reds": dumps(stp.expect_red), "scope": dumps(stp.scope),
                                    "must_pass": dumps(stp.must_pass), "status": "pending"})
+            elif op.get("op") == "add_plan":
+                # A whole new plan, e.g. a driver repair plan (§2.5.7); it may name the step it
+                # repairs and sorts before every submitted plan.
+                spec = plans.from_dict({"plans": [{"slug": op["slug"], "steps": op["steps"]}]})
+                probs = plans.check(spec)
+                if c.execute("SELECT 1 FROM plans WHERE batch_id = ? AND slug = ?",
+                             (batch_id, op["slug"])).fetchone():
+                    probs.append(f"plan {op['slug']} exists")
+                if probs:
+                    problems += probs
+                    continue
+                ord_ = c.execute("SELECT COALESCE(MIN(ord), 0) - 1 FROM plans WHERE batch_id = ?",
+                                 (batch_id,)).fetchone()[0]
+                pid = f"{batch_id}.{op['slug']}"
+                s.insert("plans", {"id": pid, "batch_id": batch_id, "slug": op["slug"], "ord": ord_,
+                                   "depends_on": "[]", "status": "pending",
+                                   "repair_of_step_id": op.get("repair_of_step_id")})
+                for idx, stp in enumerate(spec.plans[0].steps):
+                    s.insert("steps", {"id": f"{pid}.{idx}", "plan_id": pid, "batch_id": batch_id,
+                                       "idx": idx, "title": stp.title, "instructions": stp.instructions,
+                                       "gates": dumps([asdict(g) for g in stp.gates]),
+                                       "expected_reds": dumps(stp.expect_red), "scope": dumps(stp.scope),
+                                       "must_pass": dumps(stp.must_pass), "status": "pending"})
             else:
                 problems.append(f"unknown op {op.get('op')!r}")
         if problems:

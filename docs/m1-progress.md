@@ -35,6 +35,10 @@ The first M1 attempt (`b-1b3841db9323`) found a bug (docs/06 B5: the scope check
 
 Codex's code review found 7 defects (C1-C7) and fixing C7 exposed an eighth (C8). All are fixed with tests; the table is in [document 6](06-open-items.md) "M1 code review". Suite: 106 passed, 1 skipped (release build while `src/` was dirty). The new supervisor also finishes the stale rows in the live store: the cancelled `b-1b3841db9323` hierarchy and the running attempt `a-20739d425ee1` left by the M1 supervisor kill, from before lost runs closed their attempts.
 
+## Attribution (before P4), Oct 13
+
+Built and tested (A1-A10, plus a blocked-repair barrier case); see [document 6](06-open-items.md) "Before P4" item A. Repair plans are added through `amend` (`add_plan`, actor `driver`, reason `regression-attributed`) and recorded in the `repairs` table; probe results persist in `probe_cache`, so a requeued run reuses them. Both are new tables, which `store.migrate()` creates on the live store; no existing table changed.
+
 ## Known gaps
 
 - `store.migrate()` creates missing tables only. A column added to an existing table needs a real migration step from here on, because chad-mbp now has a live `~/.ilk2/data/state.db` (installed Oct 13).

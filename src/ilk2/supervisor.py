@@ -150,6 +150,8 @@ class Supervisor:
             return self.b.attempt_cap + self.b.dispatch_grace
         if ph in ("gates", "base", "setup"):
             return self.gate_bound(run["batch_id"]) + self.b.gate_grace
+        if ph == "attribute":  # its own wall budget, plus one probe that started just inside it
+            return self.b.attribution_wall + self.gate_bound(run["batch_id"]) + self.b.gate_grace
         return self.b.phase
 
     def gate_bound(self, batch_id: str) -> float:

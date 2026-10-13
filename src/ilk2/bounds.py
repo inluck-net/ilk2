@@ -40,12 +40,14 @@ class Bounds:
     setup_cap: float = 15 * 60
     host_slept_gap: float = 60
     load_timeout_window: float = 30 * 60
+    attribution_wall: float = 20 * 60     # the whole attribute phase (§2.5.7)
 
 
 ATTEMPTS_PER_STEP = 3        # Q6
 RESTARTS_PER_STEP = 3
 KICKSTARTS_PER_HOUR = 3
 LOAD_TIMEOUTS = 3            # gate timeouts in the window that refuse new runs
+PROBES_PER_FAILURE = 12      # §2.5.7: confirmation probes included, cached probes not
 
 
 def load() -> Bounds:

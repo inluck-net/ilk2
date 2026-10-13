@@ -121,11 +121,12 @@ class Driver:
         done = self.s.one("SELECT 1 FROM base_measurements WHERE batch_id = ? LIMIT 1", self.batch_id)
         if done:
             return
-        diag = self.diag_worktree(self.base)
         if self.cfg.setup:
             with self.phase("setup"):
-                self.setup(diag)
+                diag = self.diag_worktree(self.base)  # runs setup in it from the base's lockfile
                 self.setup(self.root)
+        else:
+            diag = self.diag_worktree(self.base)
         with self.phase("base"):
             for gate in self.all_gates():
                 self.measure_base(gate, diag, self.base)
@@ -183,6 +184,10 @@ class Driver:
         p = paths.diag(self.batch_id) / commit[:12]
         if not (p / ".git").exists():
             gitops.add_worktree(self.repo, p, commit)
+            if self.cfg.setup:
+                # §2.5.7, A5: each diagnostic worktree installs from its own commit's lockfile,
+                # so old source is never tested against later dependencies.
+                self.setup(p)
         return p
 
     def env(self) -> dict[str, str]:
@@ -217,6 +222,20 @@ class Driver:
     def next_step(self):
         plans = self.s.all("SELECT * FROM plans WHERE batch_id = ? ORDER BY ord", self.batch_id)
         status = {p["slug"]: p["status"] for p in plans}
+        repairs = [p for p in plans if p["repair_of_step_id"] and p["status"] != "shipped"]
+        if repairs:
+            # §2.5.7: a repair plan is a batch barrier. No other plan starts a new step until
+            # every repair has shipped; a blocked repair blocks the batch.
+            for p in repairs:
+                step = self.s.one("SELECT * FROM steps WHERE plan_id = ? AND status != 'accepted' "
+                                  "ORDER BY idx LIMIT 1", p["id"])
+                if step is None:
+                    self.s.transition("plans", p["id"], "shipped", actor="driver",
+                                      reason="all steps accepted")
+                    return self.next_step()
+                if step["status"] != "blocked" and p["status"] != "blocked":
+                    return step
+            return "blocked"
         for p in plans:
             if p["status"] in ("shipped", "blocked"):
                 continue
@@ -469,12 +488,23 @@ class Driver:
             inherited = []
             if v.outcome == "fail" and parent != self.base and v.new_failures:
                 inherited = self.parent_probe(gate, parent, v.new_failures)
+            attributions = []
+            if inherited and gate.adapter in ("pytest", "vitest") and base is not None:
+                attributions = self.attribute(step, gate, spec, r, inherited, parent)
+                done = {a.test_id for a in attributions if a.result == "attributed"}
+                v.new_failures = [t for t in v.new_failures if t not in done]
+                if done and not v.new_failures:
+                    v.outcome = "pass-with-attributed"
+                    self.event("gate.pass-with-attributed", gate=gate.name, step=step["id"],
+                               attributed=sorted(done))
             self.s.insert("gate_results", {"attempt_id": aid, "gate": gate.name,
                                            "spec_version": spec, "outcome": v.outcome,
                                            "new_failures": dumps(v.new_failures),
                                            "details": dumps({"reason": v.reason or r.reason,
                                                              "comparable_base": base is not None,
                                                              "possibly_inherited": inherited,
+                                                             "attribution": {a.test_id: a.to_dict()
+                                                                             for a in attributions},
                                                              "duration_s": r.duration_s}),
                                            "at": clock.wall()})
             verdicts[gate.name] = {"outcome": v.outcome, "new": v.new_failures[:50],
@@ -502,6 +532,49 @@ class Driver:
                  for t in unmet] + [f"- {t}: expected red, did not fail" for t in missing_reds]))
         return ("\n\n".join(reds) if reds else None), verdicts
 
+    def attribute(self, step, gate: Gate, spec: str, r, inherited: list[str],
+                  parent: str) -> list:
+        """The attribute phase (§2.5.7) for one gate's inherited failures. Attributed ones get
+        a repair plan (deduplicated); the rest stay judged against the current step."""
+        from .attribution import Attributor, repair_brief
+        out = []
+        with self.phase("attribute", step=step["id"], gate=gate.name):
+            at = Attributor(self)
+            for tid in inherited:
+                f = r.failures[tid]
+                a = at.attribute(gate, spec, tid, f.fingerprint, parent)
+                out.append(a)
+                self.event("attribution", test=tid, **a.to_dict())
+                if a.result == "attributed":
+                    self.add_repair(a, gate, repair_brief(self.s, self.root, a, gate, f.message))
+        self.s.update("runs", self.run_id, {"phase": "gates", "phase_started_mono": clock.mono()},
+                      actor="driver", reason="phase gates")
+        return out
+
+    def add_repair(self, a, gate: Gate, brief: str) -> None:
+        clean, failing = a.edge
+        row = self.s.one("SELECT plan_id FROM repairs WHERE batch_id = ? AND test_id = ? AND "
+                         "fingerprint = ? AND edge_clean = ? AND edge_failing = ?", self.batch_id,
+                         a.test_id, a.fingerprint, clean, failing)
+        if row:  # A10: the same failure on the same edge joins the existing repair
+            self.event("repair.joined", plan=row["plan_id"], test=a.test_id)
+            return
+        n = self.s.one("SELECT COUNT(*) n FROM plans WHERE batch_id = ? AND repair_of_step_id "
+                       "IS NOT NULL", self.batch_id)["n"] + 1
+        slug = f"repair-{n}"
+        b = self.s.get("batches", self.batch_id)
+        batches.amend(self.s, self.batch_id, [{
+            "op": "add_plan", "slug": slug, "repair_of_step_id": a.step_id,
+            "steps": [{"title": f"Repair {a.test_id}", "instructions": brief,
+                       "gates": [asdict(gate)], "must_pass": [a.test_id]}]}],
+            expect_version=b["version"], actor="driver", reason="regression-attributed")
+        with self.s.tx() as c:
+            c.execute("INSERT INTO repairs(batch_id, test_id, fingerprint, edge_clean, edge_failing, "
+                      "plan_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (self.batch_id, a.test_id, a.fingerprint, clean, failing,
+                       f"{self.batch_id}.{slug}", clock.wall()))
+        self.event("repair.added", plan=slug, test=a.test_id, repair_of=a.step_id)
+
     def base_for(self, gate: Gate, spec_now: str) -> dict[str, str] | None:
         row = self.s.one("SELECT failures FROM base_measurements WHERE batch_id = ? AND gate = ? "
                          "AND spec_version = ? AND commit_sha = ?", self.batch_id, gate.name,
@@ -518,8 +591,9 @@ class Driver:
         if not ids:
             return []
         diag = self.diag_worktree(parent)
-        probe = Gate(name=gate.name + "-parent-probe", adapter=gate.adapter,
-                     command=gates.with_test_ids(gate.command, ids, drop=("--deselect", "-k")),
+        cmd = gates.vitest.with_test_ids(gate.command, ids) if gate.adapter == "vitest" else \
+            gates.with_test_ids(gate.command, ids, drop=("--deselect", "-k"))
+        probe = Gate(name=gate.name + "-parent-probe", adapter=gate.adapter, command=cmd,
                      cwd=gate.cwd, cap_s=gate.cap_s)
         r = gates.measure(probe, diag, self.env(), self.dir / "gates")
         return sorted(t for t in ids if t in r.failures)

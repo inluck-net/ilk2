@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS amendments (
   id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL REFERENCES batches(id),
   actor TEXT NOT NULL, reason TEXT NOT NULL, ops TEXT NOT NULL,
   batch_version_before INTEGER NOT NULL, batch_version_after INTEGER NOT NULL, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS probe_cache (
+  batch_id TEXT NOT NULL, commit_sha TEXT NOT NULL, spec_version TEXT NOT NULL,
+  test_id TEXT NOT NULL, failing INTEGER NOT NULL, fingerprint TEXT, at REAL NOT NULL,
+  PRIMARY KEY (batch_id, commit_sha, spec_version, test_id));
+CREATE TABLE IF NOT EXISTS repairs (
+  batch_id TEXT NOT NULL, test_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  edge_clean TEXT NOT NULL, edge_failing TEXT NOT NULL, plan_id TEXT NOT NULL, at REAL NOT NULL,
+  PRIMARY KEY (batch_id, test_id, fingerprint, edge_clean, edge_failing));
 CREATE TABLE IF NOT EXISTS supervisor (
   id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER, proc_start TEXT, boot_time INTEGER,
   release TEXT, tick_wall REAL, tick_mono REAL, started_wall REAL, kickstarts TEXT);

@@ -127,12 +127,13 @@ These items only matter once gh-resolve's resolver runs on ilk2. They stay open 
 | R5 | How chad-mbp's 2 ilk2 runs are split between gh-resolve dev batches and the resolver | Proposed: per-project limits plus priority, with 1 run always reserved for the resolver (judgment call). Chad to confirm at P5 |
 | R6 | [Document 4](04-v1-relation-and-migration.md) §4.8 should list "gh-resolve adopts the lease in reap, land and refresh" as a blocker | Add with the addendum |
 | R7 | gh-resolve's pre-push hook time is outside ilk2's timings | ilk2 counts its own setup time; the hook time comes from gh-resolve's own records in the P5 comparison |
+| R8 | Found Oct 13 (kira-cloudflare #8463): gh-resolve refuses issues whose write target is on its denylist (`convex/migrations/` here). ilk2 has no denylist, so a batch submitted to ilk2 would bypass that control | gh-resolve keeps enforcing its denylist before it submits; ilk2 adds a per-project `deny_paths` to the scope check (an out-of-scope red, never a pass), so the control holds whoever submits. Before P5 |
 
 ## Before P4
 
 | # | Item |
 |---|---|
-| A | Attribution (§2.5.7) and suite A1-A10 |
+| A | Attribution (§2.5.7) and suite A1-A10: **built Oct 13** (`src/ilk2/attribution.py`, `tests/test_attribution.py`, 10 tests, each property mutation-checked). Additions to §2.5.7, all judgment calls: a result `current` when the parent fails with a different fingerprint (the current step changed the failure, so it is judged there), and `foreign` when the failing side is not an ilk2 step (a consumer commit); a probe that cannot measure counts as `flaky`; each failure is probed alone (one test id per run), simpler and more expensive than batching ids. Fixed on the way: parent probes on vitest gates used pytest-style ids, and parent-probe diagnostic worktrees skipped the setup hook (A5 requires it in every diagnostic worktree). Wrong if P4's probes are too slow one id at a time; then batch the ids per commit |
 | B | P4 is pytest-only, so the vitest/bun gate path must also be proven before P5 ([document 4](04-v1-relation-and-migration.md) §4.4) |
 
 ## Decided during review, recorded for traceability
