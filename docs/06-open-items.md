@@ -180,6 +180,8 @@ An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; 
 | A new run (resume, upgrade drain) reset the worktree; a 554-line diff red only on those inherited failures was lost | A new run keeps the step's own leftover work (`worktree.kept`) |
 | Preload: 150k characters of identifier windows from 3 files, truncated before the gate's test files; the sub-plan's 8 `file:line` ranges absent | Named ranges first; windows capped at 25k per file (judgment call) |
 | Imported before the ceremony merge: 18 steps | `amend` op `merge_ceremony`: 13 |
+| The Neighbour gate step went red on two more base failures: commit SHAs and short hex ids in their messages differ per run | Hex tokens of 7+ characters mixing digits and letters are volatile (fingerprint v3) |
+| After the merge, 3 plans write pins in their first step and name them in `must_pass` in a later one, where the red-first check (files changed in this step) never looked | Such pins run against the plan's starting commit |
 
 After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
 
