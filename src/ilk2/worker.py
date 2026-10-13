@@ -67,13 +67,31 @@ def tool_dirs(worktree: Path) -> list[str]:
     return [f"{base}/{k}" for k in sorted(keys)]
 
 
-def sandbox_profile(worktree: Path, files: AttemptFiles, extra: list[str] = ()) -> str:
+def private_dirs() -> list[str]:
+    """What a worker never reads: the engine's store and run dirs (project configs, other
+    attempts' transcripts), the worker template, and V1's data and worker homes. gh-resolve P5
+    batch, Oct 13: a worker spent 21 of 25 minutes querying state.db and reading ilk2's source to
+    work out why earlier attempts were refused, instead of doing the step."""
+    home = Path.home()
+    dirs = [paths.data(), paths.home() / "worker-template", home / ".ilk-data", home / ".ilk"]
+    dirs += sorted(home.glob(".claude-worker*")) + [home / ".claude-manager"]
+    return [os.path.realpath(p) for p in dirs]
+
+
+def sandbox_profile(worktree: Path, files: AttemptFiles, extra: list[str] = (),
+                    private: list[str] | None = None) -> str:
     allowed = [os.path.realpath(p) for p in (worktree, files.tmp, files.config, files.logs, *extra)]
     allowed += tool_dirs(worktree)
     subpaths = " ".join(f'(subpath "{p}")' for p in allowed)
+    private = private_dirs() if private is None else private
+    # Contents only (file-read-data): path lookups and stat through these dirs keep working, so
+    # git and realpath on the worktree under data/worktrees are unaffected. Later rules win.
+    hidden = " ".join(f'(subpath "{p}")' for p in private)
+    reads = (f"(deny file-read-data {hidden})\n(allow file-read-data {subpaths})\n"
+             if private else "")
     return ("(version 1)\n(allow default)\n(deny file-write*)\n"
             f'(allow file-write* {subpaths} (subpath "/dev")\n'
-            '  (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))\n')
+            '  (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))\n' + reads)
 
 
 def prepare(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, gate_commands: list[list[str]],
@@ -287,6 +305,8 @@ Rules:
 - You can write only inside this worktree. Setuid programs such as `ps` cannot run here; a
   test that needs one may fail for you but pass in the driver's gate.
 - Do not weaken tests to make them pass.
+- The loop engine is not part of your task: its store, logs and other attempts are not
+  readable from here. Everything you need about earlier attempts is in this brief.
 
 Declared gates (the driver runs these after you finish):
 {gates}
@@ -304,10 +324,25 @@ EVIDENCE = """
 """
 
 
+SCOPE_HARD = """
+Files this step may change (anything else is refused, whatever the gate needs):
+{paths}
+"""
+
+SCOPE_ADVICE = """
+Files this step is expected to change: {paths}. This list is advice: change other files
+when the step or its gates need it (an earlier rejection for changes outside a declared scope
+no longer applies). Paths the project denies are still refused.
+"""
+
+
 def brief(title: str, instructions: str, gate_lines: list[str], evidence: str | None = None,
-          preload: str | None = None) -> str:
+          preload: str | None = None, scope: list[str] = (), scope_enforced: bool = True) -> str:
     b = BRIEF.format(title=title, instructions=instructions,
                      gates="\n".join(f"- `{g}`" for g in gate_lines) or "- (none)")
+    if scope:
+        b += (SCOPE_HARD.format(paths="\n".join(f"- `{p}`" for p in scope)) if scope_enforced
+              else SCOPE_ADVICE.format(paths=", ".join(f"`{p}`" for p in scope)))
     if preload:
         b += "\n\n" + preload
     if evidence:

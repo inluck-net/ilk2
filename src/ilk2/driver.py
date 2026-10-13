@@ -487,7 +487,8 @@ class Driver:
                       "session with the next step, same rules as before; you already have the "
                       "context you read.\n\n" + worker.brief(
                           step["title"], step["instructions"],
-                          [" ".join(g.command) for g in gate_list], evidence, preload=None))
+                          [" ".join(g.command) for g in gate_list], evidence, preload=None,
+                          scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope))
         elif resume:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
@@ -498,7 +499,9 @@ class Driver:
                 pre = worker.preload(self.root, json.loads(step["scope"]), step["instructions"],
                                      [g.command for g in gate_list], diff)
             prompt = worker.brief(step["title"], step["instructions"],
-                                  [" ".join(g.command) for g in gate_list], evidence, preload=pre)
+                                  [" ".join(g.command) for g in gate_list], evidence, preload=pre,
+                                  scope=json.loads(step["scope"]),
+                                  scope_enforced=self.cfg.enforce_scope)
         with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume),
                         carried=carried):
             d = worker.dispatch(cfg, files, self.root, prompt, resume=resume)

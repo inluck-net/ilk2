@@ -241,3 +241,31 @@ def test_processes_in_reads_cwds_from_the_kernel_not_lsof(tmp_path, monkeypatch)
     finally:
         p.kill()
         p.wait()
+
+
+def test_sandbox_hides_engine_data_but_not_the_worktree(env, tmp_path):
+    # gh-resolve P5 batch, Oct 13: a worker read state.db and ilk2's run dirs for 21 minutes.
+    cfg, files, wt = env
+    data = tmp_path / "data"
+    (data / "worktrees").mkdir(parents=True)
+    (data / "state.db").write_text("project configs")
+    inner = data / "worktrees" / "b-1"
+    subprocess.run(["git", "init", "-q", str(inner)], check=True)
+    (inner / "f.txt").write_text("ok")
+    sb = tmp_path / "p.sb"
+    sb.write_text(worker.sandbox_profile(inner, files, private=[os.path.realpath(data)]))
+
+    def run(*argv):
+        return subprocess.run(["/usr/bin/sandbox-exec", "-f", str(sb), *argv], capture_output=True,
+                              text=True, cwd=inner)
+    assert run("cat", str(data / "state.db")).returncode != 0
+    assert run("cat", "f.txt").stdout == "ok"
+    assert run("git", "status", "--short").returncode == 0  # lookups through data/ still work
+
+
+def test_brief_states_scope_as_limit_or_advice():
+    hard = worker.brief("t", "i", ["g"], scope=["a.py"], scope_enforced=True)
+    soft = worker.brief("t", "i", ["g"], scope=["a.py"], scope_enforced=False)
+    assert "may change" in hard and "advice" not in hard
+    assert "advice" in soft and "no longer applies" in soft
+    assert "may change" not in worker.brief("t", "i", ["g"])
