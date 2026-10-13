@@ -153,7 +153,7 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 | What still needs V1 | Host | State | What retires it |
 |---|---|---|---|
 | gh-resolve's own development | chad-mbp | **moved to ilk2** (P4 handover; V1 resolves no repo for it) | done |
-| ilk-skills' own development | chad-mbp | V1-registered; 6 unshipped masters, none runnable (3 drafts never released, 2 paused, 1 blocked since Oct 7) | `ilk2 project add ilk-skills … --take-over`: refused only by a runnable master or a live runner; the 6 stay in V1's dir, and one released later is claimed by ilk2 |
+| ilk-skills' own development | chad-mbp | **moved to ilk2** (Oct 14, Chad's go): registry entry removed (backup `projects.json.bak-ilk2-1791908405`), `last-launch.json` renamed aside; 5 unshipped masters, none runnable, stay in V1's dir and are claimed if released | done |
 | gh-resolve's resolver, fleet b (kira masters in V1's kira dir) | chad-mbp | 2 drafts, 1 blocked; no live runner | gh-resolve's `engine: ilk2` live on chad-mbp (P5) |
 | gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6) |
 
