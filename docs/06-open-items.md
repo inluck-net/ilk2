@@ -164,6 +164,7 @@ Also fixed with these: an attempt closed because its run had already ended now e
 |---|---|---|---|
 | V1, gh-resolve | 14 close records, Oct 12 10:06-23:07 (`logs/.ilk-loop.log`), 669 min, 9 steps advanced, 5 iterations advancing nothing | 74.4 | the resolver-speed batch 2026-10-10c and neighbours |
 | ilk2, gh-resolve | 1 batch, 2 steps (D-523, D-469), Oct 13 | 10.2 | test-only fixes: smaller steps than V1's sample |
+| ilk2, gh-resolve | 2 batches, 13 steps (P4 batch + the P5 adapter batch's 11 implementation steps), Oct 13-14 | 33.8 | includes the 7 ilk2 defects found on the way (§ batch speed); after the last fix, 8 steps averaged 22.3 min (6.2-32.8), 7 of 8 first-attempt, and 5 of the 8 carry the work of a folded V1 pins step. 18 human transitions in the P5 batch are the build session's own parks, resumes and amends while fixing ilk2 |
 
 **Not a verdict yet:** n=2 against n=14, and step sizes differ. §4.6's kill criterion asks for 2 weeks on the same project. gh-resolve's development now runs on ilk2 (P4 handover done Oct 13), so the evidence accumulates from real `/ilk-plan` batches, measured by this command.
 
