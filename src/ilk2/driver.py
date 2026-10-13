@@ -280,8 +280,7 @@ class Driver:
                           reason="nothing runnable", expect_from={"active"},
                           fields={"blocked_reason": "; ".join(blocked)})
         head = gitops.branch_head(self.root, self.branch)
-        lease.driver_release(self.s, str(self.root), head)
-        self.event("batch.blocked", plans=blocked)
+        lease.driver_release(self.s, str(self.root), head)  # batch.blocked: emitted by the store
 
     def block_batch(self, reason: str, detail: str, clear: str, release: bool = True) -> None:
         self.s.transition("batches", self.batch_id, "blocked", actor="driver", reason=reason,

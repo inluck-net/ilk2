@@ -252,6 +252,11 @@ class Store:
             c.execute("INSERT INTO transitions(entity, entity_id, from_state, to_state, actor, "
                       "reason, prev_version, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                       (table, id_, row["status"], to, actor, reason, row["version"], clock.wall()))
+            if table == "batches" and to == "blocked" and row["status"] != "blocked":
+                # One event per block, whichever path blocked it (docs/06 "Self-resolution").
+                self.event("batch.blocked", {"reason": reason, "actor": actor,
+                                             "blocked_reason": (fields or {}).get("blocked_reason")},
+                           batch_id=id_)
             return row["version"] + 1
 
     def update(self, table: str, id_: str, fields: dict, *, actor: str, reason: str) -> None:

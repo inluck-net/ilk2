@@ -160,7 +160,15 @@ def test_s11_supervisor_killed_mid_batch(stall):
 
 # -- S12: unacknowledged human row ------------------------------------------------------------
 
+def opt_in(ilk, policy):
+    from dataclasses import asdict
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.notify_policy = policy
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+
+
 def test_s12_one_row_renotified_no_retries(stall):
+    opt_in(stall, "owner")  # pages are opt-in (Q12, Chad Oct 13)
     stall.script([BAD], [BAD], [BAD])
     bid = stall.submit(one_step())
     sp = sup(stall)
@@ -571,3 +579,20 @@ def test_attempt_left_running_by_an_ended_run_is_closed(stall):
     sp.tick()
     a = stall.s.get("attempts", "a-orphan")
     assert a["status"] == "done" and a["outcome"] == "interrupted"
+
+
+def test_notifications_are_opt_in(stall):
+    # Q12 (Chad, Oct 13): a project that configured no channel gets the durable row and its
+    # events, and no page of any kind.
+    stall.script([BAD], [BAD], [BAD])
+    bid = stall.submit(one_step())
+    sp = sup(stall)
+    assert until(sp, lambda: status(stall, bid) == "blocked")
+    assert len(stall.s.open_human_rows(bid)) == 1
+    assert [e["kind"] for e in stall.s.events_since(0, bid)].count("batch.blocked") == 1
+    b = bounds.load()
+    with stall.s.tx() as c:
+        c.execute("UPDATE needs_human SET created_at = created_at - ?", (b.consumer_offhost + 1,))
+    assert notify.due(stall.s, b) == 0
+    from ilk2 import paths
+    assert not (paths.logs() / "notify.log").exists()

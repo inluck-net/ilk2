@@ -26,7 +26,9 @@ class ProjectConfig:
     home_files: list[str] = field(default_factory=list)
     setup: dict | None = None                 # {"command": [...], "cap_s": 900}
     concurrency_limit: int = 1
-    notify_policy: str = "owner"              # owner | consumer
+    # record | owner | consumer. Pages are opt-in (Q12, Chad Oct 13): `record` keeps the durable
+    # needs_human row and its events, and pages nobody.
+    notify_policy: str = "record"
     claude_bin: str = "claude"
     max_turns: int = 400
     sandbox: bool = True
@@ -77,6 +79,44 @@ def resolve_scripts(spec: plans.BatchSpec, repo: Path, commit: str) -> None:
                         g.env = {**r.get("env", {}), **g.env}
 
 
+def preflight(spec: plans.BatchSpec, repo: Path, base_sha: str, cfg: "ProjectConfig") -> list[str]:
+    """Collect-only run of every distinct pytest gate at the base, in the pinned environment,
+    so a gate that cannot run is a synchronous rejection, not a later base-unmeasured block
+    (docs/06 "Self-resolution"). Projects with a setup hook are skipped: their gates may need
+    the install first (judgment call)."""
+    import tempfile
+    from . import gates
+    from .gates.env import pinned_env
+    seen, todo = set(), []
+    for p in spec.plans:
+        for st in p.steps:
+            for g in st.gates:
+                key = json.dumps(asdict(g), sort_keys=True)
+                if g.adapter == "pytest" and key not in seen:
+                    seen.add(key)
+                    todo.append(g)
+    if not todo:
+        return []
+    problems = []
+    paths.data().mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=paths.data(), prefix="preflight-") as d:
+        wt = Path(d) / "wt"
+        gitops.add_worktree(repo, wt, base_sha)
+        try:
+            for i, g in enumerate(todo):
+                env = pinned_env(home=Path(d) / f"home{i}", tmp=Path(d) / "tmp",
+                                 path_prelude=cfg.path_prelude, allow=cfg.env_allow,
+                                 set_vars=cfg.env_set, home_files=cfg.home_files)
+                probe = plans.Gate(**{**asdict(g), "command": g.command + ["--collect-only", "-q"]})
+                r = gates.measure(probe, wt, env, Path(d) / "work")
+                if r.outcome == "unmeasured":
+                    problems.append(f"gate {g.name} cannot run at the base {base_sha[:12]}: "
+                                    f"{r.reason}: {r.tail[-300:].strip()}")
+        finally:
+            gitops.remove_worktree(repo, wt)
+    return problems
+
+
 class SubmitRejected(ValueError):
     def __init__(self, problems: list[str]):
         super().__init__("; ".join(problems))
@@ -101,6 +141,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
             if bad:
                 problems.append(f"plan {p.slug} step {i}: scope names denied paths {bad} "
                                 f"(project deny_paths {cfg.deny_paths})")
+    if not problems and not cfg.setup:
+        problems += preflight(spec, repo, base_sha, cfg)
     if problems:
         raise SubmitRejected(problems)
     bid = new_id("b")

@@ -158,3 +158,34 @@ def test_preload_includes_scope_tests_and_earlier_diff(tmp_path):
     assert "## calc.py (2 lines)" in out and "## tests/test_calc.py" in out
     assert "1001: def target_fn():" in out and "line 5\n" not in out  # windowed, not whole
     assert "Changes from this batch's earlier steps" in out
+
+
+def test_full_suite_covers_collection_roots_and_scripts(tmp_path):
+    # docs/06 F3 (ilk2-bd, confirmed at bfc7976): a gate that names no paths has a collection
+    # root (pytest testpaths, the vitest config's include roots); naming that root, or a
+    # package script that runs the runner under another name, is the whole suite.
+    root = tmp_path
+    (root / "pytest.ini").write_text("[pytest]\npythonpath = tools\ntestpaths = tests\n")
+    cfg = "tests/convex-tests/vitest.config.ts"
+    (root / "tests/convex-tests").mkdir(parents=True)
+    (root / cfg).write_text('export default { test: { include: ["convex/__tests__/**/*.test.ts", '
+                            '"tests/convex-tests/**/*.test.ts"] } }\n')
+    (root / "package.json").write_text('{"scripts": {"check": "TZ=UTC vitest run -c ' + cfg + '", '
+                                       '"lint": "eslint ."}}')
+    vgate = [["vitest", "run", "-c", cfg]]
+    pgate = [["python3", "-m", "pytest", "-q"]]
+    r = str(root)
+    assert full_suite(f"bunx vitest run -c {cfg} convex/__tests__", vgate, r)
+    assert full_suite(f"bunx vitest run -c {cfg} convex/__tests__/", vgate, r)
+    assert full_suite("python3 -m pytest tests/", pgate, r)
+    assert full_suite("python3 -m pytest .", pgate, r)
+    assert full_suite("bun run check", vgate, r)
+    assert full_suite("cd sub && bun run check -- convex/__tests__", vgate, r)
+    # targeted runs stay allowed
+    assert not full_suite(f"bunx vitest run -c {cfg} convex/__tests__/foo.test.ts", vgate, r)
+    assert not full_suite("python3 -m pytest tests/test_a.py", pgate, r)
+    assert not full_suite("bun run lint", vgate, r)
+    # a gate with explicit files: a directory that holds all of them is the whole suite
+    egate = [["python3", "-m", "pytest", "tests/test_a.py", "tests/test_b.py"]]
+    assert full_suite("python3 -m pytest tests", egate, r)
+    assert not full_suite("python3 -m pytest tests/test_a.py", egate, r)

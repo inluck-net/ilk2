@@ -48,12 +48,14 @@ def _offhost(text: str) -> None:
 
 
 def policy_of(s: Store, row) -> str:
+    """A row's project policy. Rows with no project (health, an expired consumer lease) page
+    only if this host opted in with ~/.ilk2/notify.json."""
     if not row["project_id"]:
-        return "owner"
+        return "owner" if (paths.home() / "notify.json").exists() else "record"
     try:
         return batches.project_config(s, row["project_id"]).notify_policy
-    except Exception:  # noqa: BLE001 - a missing project falls back to the safe default
-        return "owner"
+    except Exception:  # noqa: BLE001 - a missing project records only
+        return "record"
 
 
 def due(s: Store, b: bounds.Bounds | None = None) -> int:

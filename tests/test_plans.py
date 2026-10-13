@@ -93,3 +93,22 @@ def test_s9_rejected_at_submit_and_nothing_runs(ilk):
             ilk.submit(spec)
     assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
     assert ilk.s.one("SELECT COUNT(*) n FROM runs")["n"] == 0
+
+
+def test_submit_preflight_rejects_a_gate_that_cannot_run(ilk, tmp_path):
+    # docs/06 "Self-resolution": the P3 block of Oct 13 (pytest hidden by the pinned HOME)
+    # must be a synchronous rejection at submit, not a needs_human row found later.
+    import json as _json
+    import pytest as _pytest
+    from ilk2 import batches
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "python").write_text("#!/bin/sh\necho 'No module named pytest' >&2\nexit 1\n")
+    (fake / "python").chmod(0o755)
+    ilk.make_repo()
+    ilk.project(path_prelude=[str(fake), "/usr/bin", "/bin"])
+    with _pytest.raises(batches.SubmitRejected, match="runner-not-found"):
+        ilk.submit({"plans": [{"slug": "p", "steps": [{"title": "t", "instructions": "x",
+                    "gates": [{"name": "unit", "adapter": "pytest",
+                               "command": ["python", "-m", "pytest", "-q", "tests"]}]}]}]})
+    assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0

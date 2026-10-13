@@ -89,9 +89,21 @@ def test_s8_expected_red_then_green(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
 
 
-def test_s10_base_unmeasured_blocks_before_dispatch(ilk):
+def test_s10_base_unmeasured_rejected_at_submit(ilk):
+    # Self-resolution: without a setup hook the submit preflight catches it synchronously.
+    import pytest
+    from ilk2 import batches
     ilk.make_repo()
     ilk.project()
+    with pytest.raises(batches.SubmitRejected, match="usage-error"):
+        ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "--no-such-option-xyz")]))
+    assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
+
+
+def test_s10_base_unmeasured_blocks_before_dispatch(ilk):
+    # With a setup hook the preflight is skipped, so activation still catches it (§2.11.4 S10).
+    ilk.make_repo()
+    ilk.project(setup={"command": ["python", "-c", "pass"]})
     ilk.script([GOOD])
     bad_gate = gate("tests/test_calc.py", "--no-such-option-xyz")
     bid = ilk.submit(one_step(gates_=[bad_gate]))

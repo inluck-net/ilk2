@@ -115,3 +115,14 @@ def test_concurrent_cas_exactly_one_wins(tmp_path):
     for t in ts:
         t.join()
     assert len(wins) == 1
+
+
+def test_every_block_of_a_batch_emits_batch_blocked(s):
+    # Self-resolution (docs/06): consumers and watchers see one event per block, whichever
+    # path blocked it (driver block_batch, supervisor crash-loop/quota/fence, finish_blocked).
+    s.transition("batches", "b", "active", actor="supervisor", reason="admitted")
+    s.transition("batches", "b", "blocked", actor="driver", reason="base-unmeasured",
+                 fields={"blocked_reason": "base-unmeasured: runner-not-found"})
+    ev = [e for e in s.events_since(0) if e["kind"] == "batch.blocked"]
+    assert len(ev) == 1 and ev[0]["batch_id"] == "b"
+    assert ev[0]["payload"]["reason"] == "base-unmeasured" and ev[0]["consumer_ref"] == "issue-7"
