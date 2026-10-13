@@ -677,3 +677,26 @@ def test_amend_merges_the_ceremony_of_a_plan_not_started(ilk):
     ilk.s.update("steps", sid, {"attempt_count": 0}, actor="test", reason="reset")
     ilk.script([GOOD])
     assert ilk.drive_inprocess(bid) == "shipped"
+
+
+def test_red_first_checks_pins_from_an_earlier_step_against_the_plan_start(ilk):
+    # V1 merged plans: pins land in the plan's first step and "remove every xfail" (must_pass)
+    # is a later step, so the pin file is not changed in the step that names it. Here the pin
+    # passes on the plan's starting code, so it cannot detect anything: the later step is red.
+    ilk.make_repo()
+    ilk.project()
+    weak = {"write": "tests/test_pins.py", "text": "def test_pin():\n    assert True\n"}
+    note = {"write": "notes.txt", "text": "x"}
+    ilk.script([GOOD, weak], [note], [note], [note], [note], [note])
+    spec = {"plans": [{"slug": "p", "steps": [
+        {"title": "implement and pin", "instructions": "x",
+         "gates": [gate("tests/test_calc.py", "tests/test_pins.py")]},
+        {"title": "remove every xfail", "instructions": "y",
+         "gates": [gate("tests/test_calc.py", "tests/test_pins.py")],
+         "must_pass": ["tests/test_pins.py::test_pin"]}]}]}
+    bid = ilk.submit(spec)
+    ilk.drive_inprocess(bid)
+    second = ilk.s.all("SELECT a.outcome, a.evidence FROM attempts a JOIN steps st ON st.id = "
+                       "a.step_id WHERE st.idx = 1 ORDER BY a.n")
+    assert second and second[0]["outcome"] == "red"
+    assert "without your change" in second[0]["evidence"]

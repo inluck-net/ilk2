@@ -13,7 +13,7 @@ import re
 
 # Part of every gate's spec_version: a change here makes recorded base measurements and probe
 # results incomparable, so they are measured again rather than compared across rules.
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 
 _VOLATILE = [
     # ilk2's own dirs (a gate's pinned TMPDIR is ~/.ilk2/data/runs/<run>/tmp, diag worktrees and
@@ -33,6 +33,10 @@ _VOLATILE = [
     # pytest truncates long reprs ("6be3a945-39d...-43ca1a592438"): UUID fragments.
     (re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{1,4}(?:-[0-9a-f]{0,4})*(?=\.\.\.)"), "<uuid>"),
     (re.compile(r"(?<=\.\.\.)-?(?:[0-9a-f]{0,4}-)*[0-9a-f]{12}\b"), "<uuid>"),
+    # Commit SHAs and short hex ids (7+ characters mixing digits and a-f) differ per commit and
+    # per run. gh-resolve P5 batch, Oct 13: "superseded/82e1cd91-failed/" vs "f5dff12…" made two
+    # base failures read as new. Pure numbers stay: assertion operands are kept (A8).
+    (re.compile(r"\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b"), "<hex>"),
     (re.compile(r"\b(?:pid|PID)[ =:]+\d+"), "pid <pid>"),
     (re.compile(r"(?:port|localhost:|127\.0\.0\.1:)\s*\d{2,5}\b"), "port <port>"),
 ]

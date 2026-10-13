@@ -275,3 +275,15 @@ def test_fingerprint_ignores_ilk2_run_dirs_and_the_measurement_root():
                        "/Users/u/.ilk2/data/worktrees/b-1")
     assert base == step
     assert fingerprint("E", "expected 1, got 2", []) != fingerprint("E", "expected 3, got 4", [])
+
+
+def test_fingerprint_ignores_commit_shas_and_short_hex_ids():
+    # gh-resolve P5 batch, Oct 13: per-run hex ids made two base failures read as new.
+    from ilk2.gates.fingerprint import fingerprint
+    a = fingerprint("E", "plans archived after failure: 3 file(s) -> superseded/82e1cd91-failed/ "
+                         "at base da6824dae67bf7aab4268288879", [])
+    b = fingerprint("E", "plans archived after failure: 3 file(s) -> superseded/f5dff120-failed/ "
+                         "at base 9935aab0da57a8c591d7", [])
+    assert a == b
+    assert fingerprint("E", "expected 1234567, got 7654321", []) != \
+        fingerprint("E", "expected 1234567, got 1234568", [])  # numbers are operands, kept

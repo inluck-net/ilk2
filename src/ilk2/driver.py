@@ -646,7 +646,7 @@ class Driver:
                 reds.append("\n".join(lines))
         unmet, missing_reds = gates.unmet_obligations(runs, expect_red, list(must_pass))
         if not reds and not unmet and not missing_reds and must_pass:
-            weak = self.red_first(gate_list, list(must_pass), parent, aid)
+            weak = self.red_first(gate_list, list(must_pass), parent, aid, step)
             if weak:
                 verdicts["red-first"] = {"outcome": "fail", "pass_without_change": weak}
                 reds.append("These must_pass tests pass without your change, so they cannot detect "
@@ -704,14 +704,25 @@ class Driver:
         self.event("repair.added", plan=slug, test=a.test_id, repair_of=a.step_id)
 
     def red_first(self, gate_list: list[Gate], must_pass: list[str], parent: str,
-                  aid: str) -> list[str]:
+                  aid: str, step=None) -> list[str]:
         """V1's red-first guarantee, kept inside one step (gh-resolve-e1, Oct 13): must_pass tests
         in files this step added or changed must fail on the step's parent code. They run in a
         throwaway worktree at the parent with only the new test files overlaid. An id must fail
         there; a whole file needs at least one failing test (a sensitivity control may pass).
-        Returns the must_pass entries that pass without the change."""
+        Returns the must_pass entries that pass without the change.
+
+        A pin written in an earlier step of the same plan (V1 merged plans: the pins land in the
+        plan's first step, "remove every xfail" comes later) is checked against the plan's
+        starting commit, since that is the code it must fail on."""
         import shutil
         changed = set(gitops.changed_paths(self.root))
+        start = self.plan_start(step) if step is not None else None
+        if start and start != parent:
+            earlier = gitops.git(self.root, "diff", "--name-only", f"{start}..{parent}",
+                                 check=False).split()
+            if any(t.split("::")[0] in earlier for t in must_pass):
+                changed |= set(earlier)
+                parent = start
         mine = [t for t in must_pass if t.split("::")[0] in changed]
         if not mine:
             return []
@@ -747,6 +758,13 @@ class Driver:
             return weak
         finally:
             gitops.remove_worktree(self.repo, where)
+
+    def plan_start(self, step) -> str | None:
+        """The commit the plan's first attempt started from."""
+        row = self.s.one("SELECT a.parent_commit FROM attempts a JOIN steps st ON st.id = a.step_id "
+                         "WHERE st.plan_id = ? AND a.parent_commit IS NOT NULL ORDER BY a.created_at "
+                         "LIMIT 1", step["plan_id"])
+        return row["parent_commit"] if row else None
 
     def base_for(self, gate: Gate, spec_now: str) -> dict[str, str] | None:
         row = self.s.one("SELECT failures FROM base_measurements WHERE batch_id = ? AND gate = ? "
