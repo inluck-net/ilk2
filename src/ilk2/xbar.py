@@ -108,7 +108,12 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
         cur = _current_step(b)
         parts = []
         if cur:
-            parts += [f"step {steps.index(cur) + 1}/{len(steps)}", f"attempt {max(cur.get('attempts') or 1, 1)}"]
+            # Done of total, not the current step's position: repair plans sort first, so a
+            # position read "step 2/15" with 12 of 15 accepted (Chad, Oct 14).
+            done = sum(1 for x in steps if x.get("status") == "accepted")
+            plan = next((p.get("slug") for p in b.get("plans", []) if cur in p.get("steps", [])), None)
+            parts += [f"{done}/{len(steps)} done"] + ([plan] if plan else []) + \
+                [f"attempt {max(cur.get('attempts') or 1, 1)}"]
         live = b.get("live")
         if live:
             parts.append(f"{live['phase']} {_mins(live.get('phase_age_s'))}")

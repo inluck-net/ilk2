@@ -104,3 +104,30 @@ def test_relocate_venv_rewrites_scripts_that_name_the_build_dir(tmp_path):
     assert (new / "venv" / "bin" / "ilk2").read_text().startswith(f"#!{new}/venv/bin/python")
     assert str(old) not in (new / "venv" / "bin" / "activate").read_text()
     assert (new / "venv" / "bin" / "python").is_symlink()  # symlinks are left alone
+
+
+def test_upgrade_drains_only_when_the_supervisors_code_changed(tmp_path):
+    # Oct 14: a drain admits nothing until every live run ends an attempt; driver-only releases
+    # paid that for nothing. Drivers spawn from `current` and take new code at their next run.
+    import hashlib
+    from ilk2 import release
+    pkg = tmp_path / "ilk2"
+    pkg.mkdir()
+    (pkg / "supervisor.py").write_text("A = 1\n")
+    (pkg / "driver.py").write_text("B = 1\n")
+    rec = {"supervisor.py": hashlib.sha256(b"A = 1\n").hexdigest()}
+    assert release.needs_drain(None, pkg)                   # unknown: drain
+    assert not release.needs_drain(rec, pkg)
+    (pkg / "driver.py").write_text("B = 2\n")               # not loaded by the supervisor
+    assert not release.needs_drain(rec, pkg)
+    (pkg / "supervisor.py").write_text("A = 2\n")
+    assert release.needs_drain(rec, pkg)
+
+
+def test_supervisor_records_the_code_it_loaded(ilk):
+    import json
+    from ilk2 import supervisor
+    sp = supervisor.Supervisor(ilk.s, load_check=False)
+    sp.start()
+    code = json.loads(ilk.s.one("SELECT value FROM meta WHERE key = 'supervisor_code'")["value"])
+    assert "supervisor.py" in code and "store.py" in code

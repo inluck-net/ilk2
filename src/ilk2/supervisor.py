@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import batches, bounds, clock, faults, lease, paths, procs
+from . import batches, bounds, clock, faults, gitops, lease, paths, procs
 from .driver import (counts_as_restart, fenced, finish_cancel, has_unfinished_cancel,
                      root_in_use_by_other)
 from .store import Conflict, Store, new_id
@@ -64,6 +64,9 @@ class Supervisor:
                       (os.getpid(), procs.start_time(os.getpid()), clock.boot_time(), clock.wall(),
                        clock.wall(), clock.mono()))
         self.s.event("supervisor.start", {"pid": os.getpid()})
+        with self.s.tx() as c:  # what an upgrade compares to decide whether it must drain
+            c.execute("INSERT INTO meta(key, value) VALUES ('supervisor_code', ?) ON CONFLICT(key) "
+                      "DO UPDATE SET value = excluded.value", (json.dumps(loaded_code()),))
         self.reconcile()
 
     def reconcile(self) -> None:
@@ -105,6 +108,9 @@ class Supervisor:
             n = self.s.prune_events(self.b.events_keep)
             if n:
                 self.s.event("events.pruned", {"count": n})
+            gone = self.gc_worktrees()
+            if gone:
+                self.s.event("worktrees.gc", {"batches": gone})
         if self.drain():
             return
         self.admit()
@@ -457,6 +463,41 @@ class Supervisor:
             self.spawn(b)
             live.add(b["id"])
 
+    def gc_worktrees(self) -> list[str]:
+        """Remove what a finished batch left on disk once it has been finished for
+        worktrees_keep: its ilk2-made worktree (the branch stays), its diag worktrees, and its
+        runs' temp dirs (logs stay). A root another unfinished batch uses is left alone."""
+        import shutil
+        now, out = clock.wall(), []
+        for b in self.s.all(
+                "SELECT b.*, p.repo_root, (SELECT MAX(t.at) FROM transitions t WHERE t.entity = "
+                "'batches' AND t.entity_id = b.id AND t.to_state IN ('shipped', 'cancelled')) AS "
+                "ended FROM batches b JOIN projects p ON p.id = b.project_id WHERE b.status IN "
+                "('shipped', 'cancelled')"):
+            if not b["ended"] or now - b["ended"] < self.b.worktrees_keep:
+                continue
+            root = Path(b["execution_root"])
+            if self.s.one("SELECT 1 FROM batches WHERE execution_root = ? AND status NOT IN "
+                          "('shipped', 'cancelled')", b["execution_root"]):
+                continue
+            did = False
+            if root.parent == paths.worktrees() and root.exists():
+                gitops.remove_worktree(Path(b["repo_root"]), root)
+                did = True
+            diag = paths.diag(b["id"])
+            if diag.exists():
+                for w in diag.iterdir():
+                    gitops.remove_worktree(Path(b["repo_root"]), w)
+                shutil.rmtree(diag, ignore_errors=True)
+                did = True
+            for r in self.s.all("SELECT id FROM runs WHERE batch_id = ?", b["id"]):
+                for tmp in paths.run_dir(r["id"]).glob("a-*/tmp"):
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    did = True
+            if did:
+                out.append(b["id"])
+        return out
+
     def reload_host_config(self) -> None:
         """host.json is re-read every tick: a budget change needs no supervisor restart, which
         would interrupt every live attempt (Chad, Oct 14: 3+ kira batches at once)."""
@@ -516,6 +557,19 @@ class Supervisor:
             if run["status"] != "ended":
                 self.kill_run(run)
                 self.end_and_requeue(run, "lost (supervisor stopped)", count=False)
+
+
+def loaded_code() -> dict[str, str]:
+    """sha256 of every ilk2 module this process has loaded, by path inside the package."""
+    import hashlib
+    import ilk2
+    pkg = Path(ilk2.__file__).parent
+    out = {}
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and Path(f).is_relative_to(pkg) and f.endswith(".py"):
+            out[str(Path(f).relative_to(pkg))] = hashlib.sha256(Path(f).read_bytes()).hexdigest()
+    return out
 
 
 def host_config() -> dict:

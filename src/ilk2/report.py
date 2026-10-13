@@ -110,3 +110,49 @@ def build(s, project: str | None = None) -> dict:
         "refused_hours": {k: round(v, 2) for k, v in refused.items()},
         "minutes_to_first_edit_median": round(statistics.median(firsts) / 60, 2) if firsts else None,
     }
+
+
+def steps(s, batch_id: str) -> dict:
+    """Per-step numbers for one batch, the baseline table later batches compare against
+    (docs/evidence/2026-10-14-gh-resolve-p5-batch-baseline.md was this, by hand). Minutes are
+    worker time summed over every attempt of the step, interrupted ones included."""
+    rows = []
+    for st in s.all("SELECT st.*, p.slug, p.ord, p.repair_of_step_id, p.verification FROM steps st "
+                    "JOIN plans p ON p.id = st.plan_id WHERE st.batch_id = ? ORDER BY p.ord, st.idx",
+                    batch_id):
+        atts = s.all("SELECT * FROM attempts WHERE step_id = ? ORDER BY created_at", st["id"])
+        mins = sum(((a["ended_at"] or clock.wall()) - a["created_at"]) for a in atts) / 60
+        firsts = [json.loads(a["timings"] or "{}").get("timings", {}).get("first_edit_s") for a in atts]
+        firsts = [f for f in firsts if f is not None]
+        carried = s.one("SELECT 1 FROM events WHERE batch_id = ? AND kind = 'phase.start' AND "
+                        "payload LIKE ? AND payload LIKE '%\"carried\": true%'", batch_id,
+                        f'%"step": "{st["id"]}"%') is not None
+        rows.append({"plan": st["slug"], "idx": st["idx"], "title": st["title"],
+                     "kind": "repair" if st["repair_of_step_id"] else
+                             "verification" if st["verification"] else "work",
+                     "status": st["status"], "attempts": len(atts),
+                     "red": sum(a["outcome"] == "red" for a in atts),
+                     "interrupted": sum(a["outcome"] == "interrupted" for a in atts),
+                     "minutes": round(mins, 1),
+                     "first_edit_min": round(min(firsts) / 60, 1) if firsts else None,
+                     "carried": carried})
+    done = [r for r in rows if r["status"] == "accepted"]
+    first_try = [r for r in done if r["attempts"] - r["interrupted"] == 1 and r["red"] == 0]
+    return {"batch": batch_id, "steps": rows,
+            "accepted": len(done), "of": len(rows),
+            "minutes_per_accepted_step": round(sum(r["minutes"] for r in done) / len(done), 1) if done else None,
+            "first_attempt_share": round(len(first_try) / len(done), 2) if done else None}
+
+
+def steps_table(r: dict) -> str:
+    """The steps() result as a Markdown table, ready for docs/evidence."""
+    out = ["| # | Plan · step | Kind | Status | Attempts | Red | Interrupted | Minutes | First edit | Carried |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    for i, x in enumerate(r["steps"], 1):
+        out.append(f"| {i} | {x['plan']} · {x['idx']} {x['title'][:50]} | {x['kind']} | {x['status']} | "
+                   f"{x['attempts']} | {x['red']} | {x['interrupted']} | {x['minutes']} | "
+                   f"{x['first_edit_min'] if x['first_edit_min'] is not None else ''} | "
+                   f"{'yes' if x['carried'] else ''} |")
+    out.append(f"\n{r['accepted']} of {r['of']} steps accepted; {r['minutes_per_accepted_step']} min per "
+               f"accepted step; first-attempt share {r['first_attempt_share']}.")
+    return "\n".join(out)

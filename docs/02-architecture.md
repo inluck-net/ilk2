@@ -56,7 +56,35 @@ flowchart TB
 | **Driver** (`ilk2 drive <run_id>`) | Owns one run: prepares the worktree, freezes inputs, dispatches the worker, checks the diff's scope, runs gates, accepts the step (§2.4.1), retries with red evidence, and records the terminal reason | Choose which batch runs; edit another run's state |
 | **Worker** | A Claude Code session with MiMo, under a private config dir, reached through the dispatch adapter (§2.6). Edits files in the worktree to complete one step | Write the store, plans, or anything outside the worktree; run `git commit` or `push`; decide step progress |
 | **Store** | One SQLite file holding projects, batches, plans, steps, runs, attempts, gate results, transitions, events and `needs_human` rows | Hold secrets |
-| **CLI** | Submission, status (human and `--json`), amend, park, resume, cancel, ack, lease acquire/release, export, doctor, upgrade | Bypass the transition API |
+| **CLI** | Submission, status (human and `--json`), amend, park, resume, cancel, ack, lease acquire/release, project add/set/take-over, `v1 status/off/on`, report, export, doctor, upgrade | Bypass the transition API |
+
+### 2.2.1 Admission (as built, Oct 14)
+
+Every 30 s tick, the supervisor walks queued and active batches by priority, then submission order, and starts a driver for each one that passes every check. A batch that fails a check gets a refusal row with its reason and clearing condition (I10); the refusal clears itself when the batch is admitted.
+
+```mermaid
+flowchart TD
+  T[tick] --> D{draining?<br/>upgrade in progress}
+  D -- yes --> X[admit nothing]
+  D -- no --> B[next queued or active batch,<br/>by priority then age]
+  B --> L{already has a live run?}
+  L -- yes --> B
+  L -- no --> W{backoff over?<br/>crash, API, quota}
+  W -- no --> B
+  W -- yes --> P{"project runs &lt; concurrency_limit?<br/>(kira-shadow 3; default 1)"}
+  P -- no --> R1[refuse: project-limit] --> B
+  P -- yes --> RB{another batch live<br/>on the same root?}
+  RB -- yes --> R2[refuse: root-busy] --> B
+  RB -- no --> H{"live runs + reserved &lt; host_budget?<br/>(chad-mbp 4, rezmac 3)"}
+  H -- no --> R3[refuse: host-budget] --> B
+  H -- yes --> LD{"load: 5-min load ≤ cores,<br/>free memory ≥ 2 GB,<br/>&lt; 3 gate timeouts in 30 min"}
+  LD -- no --> R4[refuse: host-load] --> B
+  LD -- yes --> S[spawn driver] --> B
+```
+
+- `host_budget` lives in `~/.ilk2/host.json` and is re-read every tick: changing it needs no supervisor restart (a restart would interrupt every live attempt).
+- `concurrency_limit`, `reserve` and every other project setting change with `ilk2 project set <id> key=value` (journalled).
+- Each batch has its own execution root and branch, so several batches of one project run side by side; batches on one root never run together (R4).
 
 ## 2.3 State model
 
@@ -87,29 +115,46 @@ Concurrency control: every transition checks the row's version, so it is a compa
 
 ## 2.4 How a step runs
 
+As built (Oct 14). The driver runs one step at a time; within a run, the worktree carries from attempt to attempt.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Prepare
-  Prepare: Prepare worktree at step base, freeze inputs
-  Prepare --> Dispatch
-  Dispatch: Worker edits code (one session)
+  Prepare: Prepare at the branch head<br/>leftover changes of THIS step's last unaccepted attempt are kept,<br/>anything else is reset (diff saved)
+  Prepare --> GatesFirst: verification plan, fresh step
+  Prepare --> Dispatch: work or repair step
+  GatesFirst: Run the gates before any worker
+  GatesFirst --> Accept: green (no worker at all)
+  GatesFirst --> Dispatch: red (failures become the brief)
+  Dispatch: Worker session<br/>attempt 1 of step k>0 continues step k-1's session (carry-over)<br/>attempt 2 resumes · attempt 3 fresh · 4-5 escalation with all evidence
   Dispatch --> ScopeCheck
-  ScopeCheck: Diff only inside declared scope?
-  ScopeCheck --> Gates: yes
-  ScopeCheck --> Retry: no (evidence: out-of-scope paths)
-  Gates: Run declared gates on the worktree
-  Gates --> Accept: no new failures (from P4: or only attributed ones)
-  Gates --> Retry: new failure
+  ScopeCheck: Changed paths vs deny_paths (always hard)<br/>and step scope (hard, or advice for V1-planned projects)
+  ScopeCheck --> Gates: ok
+  ScopeCheck --> Red: denied path, or out of an enforced scope
+  Gates: Run each gate; compare with the batch base;<br/>red-first check on new must_pass pins
+  Gates --> Accept: no new failures, or only attributed ones
+  Gates --> Attribute: new failures also failing at the parent
+  Attribute: Walk back to the step that introduced it
+  Attribute --> AddRepair: attributed → repair plan (runs first, gate narrowed to the test)
+  Attribute --> Red: not attributable → judged here
+  AddRepair --> Accept: only attributed failures left
+  Gates --> Red: new failure
   Gates --> Blocked: unmeasured (permanent)
-  Retry: Resume same session with evidence
-  Retry --> Dispatch: attempts left
-  Retry --> Blocked: attempts exhausted
+  Red --> Dispatch: attempts left (evidence carried)
+  Red --> Blocked: 5 attempts red → needs_human
   Accept: Intent → commit → finalize (§2.4.1)
   Accept --> Prepare: more steps
   Accept --> PlanShipped: last step of plan
   PlanShipped --> [*]
   Blocked --> [*]
 ```
+
+Added since the design closed (each with a test; why in [document 6](06-open-items.md), "Batch speed"):
+- **Kept work.** A new run (resume, upgrade drain, crash recovery) keeps the step's own uncommitted work when the root is at the branch head and the step's last attempt ended red, interrupted, timed out or crashed. The brief says so. Anything else is reset, and its diff is saved as `leftover-<step>.diff`.
+- **Session carry-over.** The first attempt of step *k* > 0 continues step *k*-1's session when that step was accepted and stayed under `carry_max_context` (400k). It skips re-reading the repo: carried steps took 6-19 min, fresh ones 24-33 min.
+- **V1 ceremony merge.** At import, a V1 "Red-first pins" step folds into the next step, and a trailing "Neighbour gate" step into the one before. `amend merge_ceremony` does the same for a plan that has not started. Gates that look up the folded step's own commit are dropped, since that commit is the merged step itself.
+- **Red-first inside a step.** A `must_pass` test in a file the plan added must fail on the code it replaces: on the step's parent, or on the plan's starting commit when the pin was written in an earlier step of the plan. A control test that passes on the old code by design does not belong in `must_pass`. Repair and verification plans are not checked: a repair's `must_pass` is the failing test it must turn green, not a new pin.
+- **Verification plans run gates first.** If they are green, the step is accepted with no worker. If they are red, the worker is briefed that the gate already ran and that no V1 record exists.
 
 What this removes from V1:
 - **Plans ship themselves.** When the driver finalizes a plan's last step, the plan is shipped in that same store transaction. No separate worker ship, `gate_first` marker or ship script is needed, so the Oct 12 #8309 deadlock cannot occur.
@@ -166,7 +211,7 @@ consumer(gen n+2) --consumer release(gen n+2, new_head)--> released(gen n+3) --r
 Gates run outside the worker sandbox but in a pinned environment, defined so that a test cannot see the host's ilk state:
 - `HOME` is a private directory per run, created empty, with only the files the project declares copied in.
 - All `ILK_*` and `ILK2_*` variables are removed. The paths `~/.ilk-data`, `~/.ilk` and `~/.ilk2` are therefore not reachable through `HOME`.
-- `PATH` is the project's declared `PATH` prelude plus the release's bundled tools, and nothing else.
+- `PATH` is the project's declared `PATH` prelude, the release's bundled tools, and then `/usr/bin:/bin:/usr/sbin:/sbin` (always appended; a prelude without `/usr/sbin` hid `lsof` from a gh-resolve gate on Oct 14, while the same test passed in the worker's run).
 - Every other variable comes from an explicit per-project allow-list. Anything not listed is absent. The allow-list may also set named `ILK_*` variables (for example `ILK_TEST_TOOLKIT_ROOT`), but only to values the project declares, never copied from the host.
 
 On Oct 12, 36 V1 loop-gate reds did not reproduce in an isolated copy, because tests leaked through `ILK_SKILL_HOME`, `ILK_CODE_ROOT` and `~/.ilk-data` (gh-resolve review, finding F7).
@@ -179,10 +224,10 @@ A project may declare a setup command, for example `bun install --frozen-lockfil
 
 - **The base:** the driver runs each gate at the batch base and stores the failing tests, each as a test ID plus a **failure fingerprint**. Fingerprints are adapter-specific. Each is a hash of:
   - the exception or failure type;
-  - a digest of the assertion or error message, with only **recognized volatile values** replaced by placeholders: ISO and epoch timestamps, temporary paths, memory addresses, UUIDs and generated ids, process ids and ports. Assertion operands such as "expected 1, got 2" are kept, so different assertions stay different;
+  - a digest of the assertion or error message, with only **recognized volatile values** replaced by placeholders: ISO and epoch timestamps, temporary paths, any path under `~/.ilk2` (a gate's `TMPDIR` is `~/.ilk2/data/runs/<run>/tmp`), the measurement root (a diagnostic worktree at the base, the execution root after a step), memory addresses, UUIDs and generated ids, commit SHAs and short hex ids (7+ characters mixing digits and letters), process ids and ports. Assertion operands such as "expected 1, got 2" are kept, so different assertions stay different;
   - the top three normalized frames inside the project.
 
-  So two different assertion failures at the same line get different fingerprints, while line-number drift and temporary paths do not change them.
+  So two different assertion failures at the same line get different fingerprints, while line-number drift and temporary paths do not change them. The fingerprint rules have a version (now 3) that is part of every gate's specification version: when the rules change, earlier base measurements and probe results are measured again instead of being compared across rules (Oct 14: per-run paths and hex ids had made base failures read as new in every run).
 - **A failure is new** when its test ID was not failing at the base, when it was failing at the base but its fingerprint changed, or when the test did not exist at the base and is not declared as an expected red.
 - **When a step changes a gate's specification** (a new test file, a changed runner config, the gate's own `package.json` script entry), the new specification is generally not portable to the base (§2.5.7): there is **no comparable base** for it. That gate's failures at that step are all charged to the current step, and attribution is unavailable for them. The one exception is a pure addition: new test files with the runner, config and environment unchanged. Then the base is measured in a diagnostic worktree at the base commit, the new tests are absent there ("0 tests"), and every collected new test counts as new. To limit spurious changes, the specification hashes only the gate's own `package.json` script entry, not the whole file. Plan authors should put gate-specification changes in a step of their own (Codex review 3, finding 4).
 - **In M1, and until attribution lands before P4, every new failure is judged against the current step,** as in V1. The driver also records, for each new failure, whether it was already present at the current step's parent (one probe of the failing IDs in a diagnostic worktree at the parent commit; diagnostic worktrees are part of M1, §2.5.7). If it was, the failure is marked `possibly-inherited` in the attempt record and in the worker's red evidence, so the worker is told it may be repairing earlier damage. This is evidence only; it changes neither the verdict nor who repairs.
@@ -223,35 +268,51 @@ The feature is split in two (Codex review 3, finding 6).
 1. **Walk backwards.** Starting from the step's parent (known failing), probe the failing test IDs at each earlier accepted commit of the batch, newest first, until the first commit where the failure is absent. That commit and its child form the edge (last clean commit, first failing child). The child's step introduced the failure. Walking backwards, never binary search, means the edge found is always the **most recent** clean-to-failing transition, even if the history went clean, failing, fixed and failing again (Codex review 3, finding 3).
 2. **Confirm it.** Re-probe both sides of the edge twice more. The failure must be absent on the clean side and present on the failing side every time. If any probe disagrees, the result is `unattributable (flaky)`.
 3. **If the walk reaches the batch base and the failure is still there,** it is a base failure whose fingerprint changed, and it is judged against the current step.
-4. **Budget.** Every probe run counts, confirmation probes included. Results already in the cache, keyed by (commit, specification version, test ID), are reused and do not count. The limit is 12 probes per failure and 20 minutes of wall time for the whole phase. The cache persists across requeues. When the budget is spent, the result is `unattributable (budget)`.
+4. **Probes run only the failing test:** the gate command with its test paths replaced by the test ID (every positional after the interpreter is a path; a bare `tests` used to survive and made each probe a full suite run).
+5. **Budget.** Every probe run counts, confirmation probes included. Results already in the cache, keyed by (commit, specification version, test ID), are reused and do not count. The limit is 12 probes per failure and 20 minutes of wall time for the whole phase. The cache persists across requeues. When the budget is spent, the result is `unattributable (budget)`.
 
 **What each result does:**
 
 | Result | Current step | Repair |
 |---|---|---|
-| Attributed to step *k* of plan P | Passes if its only failures are attributed ones (`pass-with-attributed`, recorded with the failing IDs) | The driver adds a **repair plan** to the batch (amend, actor `driver`, reason `regression-attributed`), with `repair_of_step_id = k`, the failing IDs and the edge as its brief. Repair plans are deduplicated by (test ID, fingerprint, edge): a second attribution of the same failure to the same edge joins the existing repair plan. A repair plan is a **batch barrier**: it runs at the highest priority, and no other plan in the batch starts a new step until it ships. All plans share one branch, and no impact graph exists to prove a plan unaffected. P stays `shipped`; nothing is reopened. The batch cannot ship until every repair plan has shipped |
+| Attributed to step *k* of plan P | Passes if its only failures are attributed ones (`pass-with-attributed`, recorded with the failing IDs) | The driver adds a **repair plan** to the batch (amend, actor `driver`, reason `regression-attributed`), with `repair_of_step_id = k`, the failing IDs and the edge as its brief. Its gate is the failing gate **narrowed to the repaired test** (judged on the whole gate, any other open failure turned it red, Oct 14); the verification plan's full run still catches what a repair breaks. Repair plans are deduplicated by (test ID, fingerprint, edge): a second attribution of the same failure to the same edge joins the existing repair plan. A repair plan is a **batch barrier**: it runs at the highest priority, and no other plan in the batch starts a new step until it ships. All plans share one branch, and no impact graph exists to prove a plan unaffected. P stays `shipped`; nothing is reopened. The batch cannot ship until every repair plan has shipped |
 | `unattributable (spec-changed / flaky / budget)` | Judged on all new failures, as in M1 | None. The reason is recorded and reported in `ilk2 report` |
 
 ## 2.6 Worker isolation
 
 - **Private Claude config dir per run,** copied from a pinned template: model `mimo-v2.6-pro`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, the hooks, and an MCP allow-list.
-- **macOS `sandbox-exec` profile:** writes allowed only to the worktree and a per-attempt temp dir. The store, plans, `~/.ilk2/releases` and `.git` internals are read-only to the worker.
+- **macOS `sandbox-exec` profile:** writes allowed only to the worktree and a per-attempt temp dir. **Reads are denied** (contents only, so path lookups still work) for `~/.ilk2/data` except the worker's own worktree and attempt dirs, the worker template, `~/.ilk-data`, and V1's worker homes (`~/.claude-worker*`, `~/.claude-manager`). V1's code releases (`~/.ilk`) stay readable: consumer tests load V1 skills through them. (Oct 14: a worker spent 21 of 25 minutes reading the store and ilk2's own source to work out why it had been refused.)
 - **A hook refuses `git commit`, `git push` and edits outside the worktree**, as a second layer behind the sandbox.
 - **One step is the context bound** (as in V1, where each iteration is a fresh session). An attempt is one session for one step, capped at 60 min and 400 turns; attempt 2 resumes, attempt 3 starts fresh (Q6), and no session spans two steps. Compaction is never a design element: auto-compact is pinned on in every worker session only as a safety net, and each attempt records `peak_context_tokens` and `compactions` in its timings, so a step that outgrows the bound is visible and gets split, not silently compacted (Chad, Oct 13).
 - **The worker runs targeted tests only.** The brief tells it to run only the tests for the files it changed. A hook refuses any test command that resolves to the whole suite of a declared gate, with a message saying the driver runs that gate after the attempt. (gh-resolve review M1: the worker's own full-suite run plus the driver's gate cost about 13 minutes per iteration on rezmac. Chad approved the hook on Oct 13.)
-- **The brief** contains the step instructions, the declared gates, the previous attempt's red evidence, and paths the worker may read. It contains no plan files the worker could edit.
-- **The brief can preload context.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). That span includes model thinking, start-up, prompt processing and tool latency, not only discovery, so preloading's effect is unknown. The driver can assemble, at no model cost, the files and symbols the step names, their tests, the failing output, and the earlier steps' diff. Whether that lowers total time per accepted step is open question Q10, tested in P1 with a counterbalanced comparison over several steps.
+- **The brief** contains the step instructions, the declared gates, the previous attempt's red evidence (all attempts' evidence in the escalation round), the step's scope (as a limit, or as advice for V1-planned projects), and the **plan documents**: a V1 master and its sub-plans are snapshotted at claim and copied into each attempt's temp dir, and the brief names their paths (workers had searched the disk for the MASTER every attempt). It contains no plan files the worker could edit.
+- **The brief can preload context.** In V1, 42% of iteration wall time passed before the first edit ([evidence](evidence/2026-10-12-v1-stuck-and-slow.md) §2). That span includes model thinking, start-up, prompt processing and tool latency, not only discovery, so preloading's effect is unknown. The driver can assemble, at no model cost, the files and symbols the step names, their tests, the failing output, and the earlier steps' diff. As built: the `file:line` ranges the step text names come first (padded and merged), then scope and gate files, with identifier windows capped at 25k characters per file, all within 150k. Whether that lowers total time per accepted step is open question Q10, tested in P1 with a counterbalanced comparison over several steps.
 - **Dispatch adapter (Q1):** one interface (`start`, `resume`, `cancel`, `stream events`) with the Claude Code CLI as the baseline implementation, since it already works with MiMo. A Claude Agent SDK implementation is adopted only if P1 proves, with MiMo: compatibility, stable session identity on resume, hook parity, cancellation by process group, streaming timing metrics, and the same sandbox behaviour.
 
 ## 2.7 Releases and upgrades
 
 - **A release** is `~/.ilk2/releases/<version>/`: the code, a uv-built virtualenv and a manifest with hashes. `~/.ilk2/current` points at one release. launchd starts the supervisor and the health job from `current`.
-- **Upgrades drain at step boundaries:** `ilk2 upgrade <version>` tells the supervisor to stop admitting new steps. Each driver finishes its current step and exits with reason `drained`. The drain is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, exactly as in a crash. Then the supervisor re-executes itself from the new release and requeues the drained runs. Runs record which release made each commit.
+- **Upgrades drain only when the supervisor's code changed** (Oct 14). At start the supervisor records a hash of every ilk2 module it loaded (`meta.supervisor_code`). `ilk2 release upgrade` swaps `current` atomically, then compares those modules with the new release:
+
+```mermaid
+flowchart LR
+  U[release upgrade] --> SW[swap ~/.ilk2/current]
+  SW --> C{any module the running<br/>supervisor loaded changed?}
+  C -- no --> N[no drain:<br/>the next driver spawn runs the new code]
+  C -- yes --> DR[drain: admit nothing]
+  DR --> E{live runs left?}
+  E -- yes, within bound --> DR
+  E -- bound passed --> K[terminate, requeue uncounted] --> X
+  E -- no --> X[supervisor exits;<br/>launchd restarts it from current]
+```
+
+  Drivers start from `current`, so driver, worker and gate changes reach the next run without a restart. A drain admits nothing until every live run reaches an attempt boundary. It is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, uncounted, with its work kept (§2.4). Runs record which release made each commit.
+- **Retention.** Hourly, the supervisor removes what a finished batch left on disk once it has been shipped or cancelled for 7 days: its ilk2-made worktree (the branch stays), its diagnostic worktrees, and its runs' temp dirs (logs stay). A root another unfinished batch uses is left alone.
 - **Both hosts** install the same release with `ilk2 upgrade`. `ilk2 doctor --hosts` compares versions over ssh.
 
 ## 2.8 Consumer interface
 
-- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF] [--meta JSON]`, `ilk2 status [--batch ID | --consumer-ref REF] --json` (each batch carries its `meta` back unchanged), `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 lease acquire|release` (§2.4.2), `ilk2 export --v1`.
+- **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF] [--meta JSON]`, `ilk2 status [--batch ID | --consumer-ref REF] --json` (each batch carries its `meta` back unchanged), `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 lease acquire|release|renew|recover` (§2.4.2), `ilk2 export --v1`. Operator commands, not consumer contract: `ilk2 project add|set|take-over`, `ilk2 v1 status|off|on [--apply]` (V1's scheduler per host, [document 4](04-v1-relation-and-migration.md) §4.9), `ilk2 report [--project P [--v1-baseline] | --batch B]`.
 - **Versioning.** Every JSON output carries `api_version`. A consumer may pass `--api-version N` to get an older shape. The CLI keeps every version that a registered consumer has pinned, and at least the two previous ones; `ilk2 doctor --hosts` lists each host's pinned versions. (rezmac runs a pinned gh-resolve tag, so one previous version was not enough.)
 - **`status --json` schema,** per batch: status, priority, consumer reference, terminal reason (from a fixed enum), the failing gate with its new failures and fingerprints, `root_lease`, `accepted_head`, and per accepted step its commit SHA, gate results, attempt count and release version. The per-step record is the publication evidence a consumer can cite. It replaces V1's ship-proof provenance fields.
 - **Events** carry a monotonic cursor and are kept for 30 days. A cursor older than that returns `cursor-expired`, and the consumer re-reads `status`. Every event carries the batch's consumer reference.

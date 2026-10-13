@@ -140,12 +140,34 @@ def install(version: str, load: bool = True) -> dict:
     return out
 
 
+def needs_drain(recorded: dict[str, str] | None, pkg: Path) -> bool:
+    """A drain restarts the supervisor, and admits nothing until every live run reaches an
+    attempt boundary. It is needed only when code the running supervisor loaded changed:
+    drivers spawn from `current`, so driver and worker changes reach the next run anyway
+    (docs/06, upgrades block admission, Oct 14). Unknown means drain."""
+    if not recorded:
+        return True
+    for rel, sha in recorded.items():
+        f = pkg / rel
+        if not f.exists() or sha256(f) != sha:
+            return True
+    return False
+
+
 def upgrade(version: str) -> dict:
-    """Install the new release and ask the running supervisor to drain (§2.7)."""
+    """Install the new release; ask the running supervisor to drain only when its own code
+    changed (§2.7)."""
     from .store import Store
     out = install(version, load=True)
     s = Store(paths.db())
     try:
+        row = s.one("SELECT value FROM meta WHERE key = 'supervisor_code'")
+        pkgs = sorted((releases() / version / "venv" / "lib").glob("python*/site-packages/ilk2"))
+        if pkgs and not needs_drain(json.loads(row["value"]) if row else None, pkgs[-1]):
+            s.event("upgrade", {"version": version, "drain": False})
+            out["drain"] = False
+            return out
+        out["drain"] = True
         with s.tx() as c:
             c.execute("INSERT INTO meta(key, value) VALUES ('draining', '1') "
                       "ON CONFLICT(key) DO UPDATE SET value = '1'")

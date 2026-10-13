@@ -819,3 +819,43 @@ def test_three_batches_of_one_project_run_at_once(ilk):
         for p in sp.children.values():
             p.kill()
             p.wait()
+
+
+def test_a_finished_batchs_worktree_goes_after_the_keep_window_its_branch_stays(ilk):
+    from ilk2 import supervisor
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    root = Path(b["execution_root"])
+    sp = supervisor.Supervisor(ilk.s, load_check=False)
+    assert sp.gc_worktrees() == [] and root.exists()            # inside the keep window
+    with ilk.s.tx() as c:
+        c.execute("UPDATE transitions SET at = at - ? WHERE entity = 'batches' AND entity_id = ?",
+                  (sp.b.worktrees_keep + 60, bid))
+    assert sp.gc_worktrees() == [bid]
+    assert not root.exists()
+    assert ilk.git(ilk.repo, "rev-parse", "--verify", b["branch"])  # the branch stays
+
+
+def test_a_repair_step_is_not_red_first_checked(ilk):
+    # gh-resolve P5 batch, Oct 14: a repair edited the file of the test it repairs and was judged
+    # "passes without your change". A repair's must_pass is a test that failed; it is no new pin.
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    v = ilk.s.get("batches", bid)["version"]
+    v = batches.amend(ilk.s, bid, [{"op": "add_plan", "slug": "repair-1", "repair_of_step_id": f"{bid}.p.0",
+                                    "steps": [{"title": "Repair", "instructions": "fix the test file",
+                                               "gates": [gate("tests/test_new.py")],
+                                               "must_pass": ["tests/test_new.py::test_new"]}]}],
+                      expect_version=v, actor="driver", reason="regression-attributed")
+    passes_anyway = {"write": "tests/test_new.py", "text": "def test_new():\n    assert True\n"}
+    ilk.script([passes_anyway], [GOOD])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    rep = ilk.s.one("SELECT a.outcome FROM attempts a JOIN steps st ON st.id = a.step_id "
+                    "WHERE st.plan_id = ?", f"{bid}.repair-1")
+    assert rep["outcome"] == "accepted"

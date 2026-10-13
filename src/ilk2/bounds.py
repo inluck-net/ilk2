@@ -45,6 +45,10 @@ class Bounds:
     # 15 min then 1 h; wrong if crash loops are nearly always deterministic (they then reach
     # the human 75 min later than before).
     events_keep: float = 30 * 24 * 60 * 60  # §2.8: events are kept 30 days
+    # Judgment call (Oct 14): a finished batch's worktree, diag worktrees and run temp dirs go
+    # 7 days after it ends (kira: ~7 GB per batch); its branch stays. Wrong if anyone inspects
+    # finished worktrees by path after a week.
+    worktrees_keep: float = 7 * 24 * 60 * 60
     crash_backoff_first: float = 15 * 60
     crash_backoff_second: float = 60 * 60
 

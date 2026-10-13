@@ -240,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("report")
     rp.add_argument("--json", action="store_true")
     rp.add_argument("--project", help="one project (the §4.5 targets compare a project with its V1 baseline)")
+    rp.add_argument("--batch", help="per-step numbers for one batch (--steps table)")
     rp.add_argument("--v1-baseline", action="store_true",
                     help="with --project: also V1's numbers for the same repo, by the same method")
 
@@ -404,6 +405,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2 if a.op == "off" and a.apply and not out.get("applied") else 0
         elif a.cmd == "report":
             from . import report as report_mod
+            if a.batch:
+                out = report_mod.steps(s, a.batch)
+                if not a.json:
+                    print(report_mod.steps_table(out))
+                    return 0
+                _out(out, True)
+                return 0
             out = report_mod.build(s, project=a.project)
             if a.v1_baseline and a.project:
                 from . import v1

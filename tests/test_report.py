@@ -67,3 +67,17 @@ def test_v1_baseline_from_close_records(tmp_path, monkeypatch):
     b = v1.baseline("k")
     assert b["iterations"] == 4 and b["steps_advanced"] == 3 and b["iterations_without_a_step"] == 2
     assert b["minutes_per_accepted_step"] == 60.0  # 180 min / 3 steps
+
+
+def test_steps_report_per_batch(ilk):
+    # Oct 14: the P5 batch's per-step baseline was assembled by hand; it is one command now.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([BAD], [GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    r = report.steps(ilk.s, bid)
+    assert r["accepted"] == 1 and r["of"] == 1 and r["first_attempt_share"] == 0.0
+    row = r["steps"][0]
+    assert row["kind"] == "work" and row["attempts"] == 2 and row["red"] == 1
+    assert row["minutes"] >= 0 and "| 1 |" in report.steps_table(r)

@@ -677,7 +677,13 @@ class Driver:
                 lines.append("\nOutput tail:\n" + r.tail[-2500:])
                 reds.append("\n".join(lines))
         unmet, missing_reds = gates.unmet_obligations(runs, expect_red, list(must_pass))
-        if not reds and not unmet and not missing_reds and must_pass:
+        plan = self.s.get("plans", step["plan_id"])
+        # Red-first proves a new pin can detect the defect. A repair's must_pass is the failing
+        # test it must turn green, and a verification step writes no pins: neither is checked
+        # (gh-resolve P5 batch, Oct 14: repair-1 edited the guard's allowlist file and was
+        # judged unable to detect anything).
+        if not reds and not unmet and not missing_reds and must_pass \
+                and not plan["repair_of_step_id"] and not plan["verification"]:
             weak = self.red_first(gate_list, list(must_pass), parent, aid, step)
             if weak:
                 verdicts["red-first"] = {"outcome": "fail", "pass_without_change": weak}
