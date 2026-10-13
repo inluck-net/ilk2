@@ -145,6 +145,17 @@ These items only matter once gh-resolve's resolver runs on ilk2. They stay open 
 | R7 | gh-resolve's pre-push hook time is outside ilk2's timings | ilk2 counts its own setup time; the hook time comes from gh-resolve's own records in the P5 comparison |
 | R8 | Found Oct 13 (kira-cloudflare #8463): gh-resolve refuses issues whose write target is on its denylist (`convex/migrations/` here). ilk2 has no denylist, so a batch submitted to ilk2 would bypass that control | gh-resolve keeps enforcing its denylist before it submits; ilk2 adds a per-project `deny_paths` to the scope check (an out-of-scope red, never a pass), so the control holds whoever submits. Before P5 |
 
+## Worker context (ilk2-f0 review, Chad's go, Oct 13)
+
+| # | Item | State |
+|---|---|---|
+| W1 | One step is the context bound; compaction is never a design element ([document 2](02-architecture.md) §2.6) | written |
+| W2 | Pin auto-compact on in every worker session, so a Claude Code default change cannot change behaviour. Judgment call: on, as a safety net; wrong if compacted sessions produce worse attempts than a fresh session with evidence, then pin it off and let attempt 3's fresh session cover it | **done**: `--settings '{"autoCompactEnabled": true}'` on every worker (the command line outranks the consumer repo's `.claude/settings.json`; Claude Code 2.1.296 `--settings <file-or-json>`), and `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT`, which would override it, never reach the worker. Compactions are counted from `system`/`compact_boundary` events, whose `compact_metadata.pre_tokens` also feeds the peak. Unverified: whether the key applies under `-p` (not documented), and whether the CLI stream emits `compact_boundary` (documented for the Agent SDK). The counter will show it on the first session that compacts. Judgment call: `autoCompactWindow` is not pinned; wrong if W4's peaks approach the window |
+| W3 | Record `peak_context_tokens` (largest turn prompt: input + cache read + cache creation) and `compactions` per attempt in `timings` | done (`test_attempt_records_peak_context_and_compactions`) |
+| W4 (P4) | Watch the numbers on gh-resolve batches. Measured over the 12 worker logs on chad-mbp so far: peak 140,224 tokens (the P4 D-469 rewrite), next 75,705; 0 compaction events | open |
+
+Also fixed with these: an attempt closed because its run had already ended now ends when the run ended, not when it was found. `ilk2 report` had counted 294.6 and 291.4 min for two attempts that ran 0.7 and 0.2 min.
+
 ## Before P4
 
 | # | Item |

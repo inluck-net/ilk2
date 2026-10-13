@@ -14,6 +14,8 @@ A script is
   {"api_error": 429}                          end with an API error result
   {"exit": code}                              exit without a result event
   {"delete": "path"}                          remove a file
+  {"context": n}                              an assistant turn with n prompt tokens of usage
+  {"compact": true}                           a compaction system event
   {"ignore_term": true}                       ignore SIGTERM from here on (S17)
 Each start or resume appends one line to $CLAUDE_CONFIG_DIR/stub-calls.jsonl.
 """
@@ -52,6 +54,8 @@ def main():
     sid = resume or str(uuid.uuid4())
     with open(os.path.join(cfg, "stub-calls.jsonl"), "a") as f:
         f.write(json.dumps({"resume": resume, "session_id": sid, "prompt_chars": len(prompt),
+                            "settings": args[args.index("--settings") + 1] if "--settings" in args else None,
+                            "disable_auto_compact": os.environ.get("DISABLE_AUTO_COMPACT"),
                             "pid": os.getpid(), "pgid": os.getpgid(0)}) + "\n")
     emit({"type": "system", "subtype": "init", "session_id": sid, "model": "stub-model",
           "cwd": os.getcwd()})
@@ -66,6 +70,13 @@ def main():
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "a" if "append" in a else "w") as f:
                 f.write(a["text"])
+        elif "context" in a:  # an assistant turn whose prompt used this many tokens
+            emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "."}],
+                  "usage": {"input_tokens": 1000, "cache_read_input_tokens": a["context"] - 1000,
+                            "output_tokens": 10}}})
+        elif a.get("compact"):
+            emit({"type": "system", "subtype": "compact_boundary", "session_id": sid,
+                  "compact_metadata": {"trigger": "auto", "pre_tokens": a.get("pre_tokens", 0)}})
         elif "delete" in a:
             os.remove(a["delete"])
         elif "sleep" in a:

@@ -136,11 +136,12 @@ class Supervisor:
 
     def close_orphan_attempts(self) -> None:
         """An attempt still `running` under an ended run can never finish: close it (I11)."""
-        for a in self.s.all("SELECT a.id FROM attempts a JOIN runs r ON r.id = a.run_id "
-                            "WHERE a.status = 'running' AND r.status = 'ended'"):
+        for a in self.s.all("SELECT a.id, r.ended_at AS run_ended FROM attempts a JOIN runs r ON "
+                            "r.id = a.run_id WHERE a.status = 'running' AND r.status = 'ended'"):
+            # It stopped when its run ended; the time until someone noticed is not work.
             self.s.transition("attempts", a["id"], "done", actor="supervisor", reason="run ended",
                               fields={"outcome": "interrupted", "reason": "its run had ended",
-                                      "ended_at": clock.wall()})
+                                      "ended_at": a["run_ended"] or clock.wall()})
 
     # -- stalls (§2.11.1) -------------------------------------------------------------------
 

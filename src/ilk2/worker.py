@@ -24,7 +24,13 @@ from pathlib import Path
 from . import paths, procs
 
 HOOK = Path(__file__).with_name("worker_hook.py")
-SCRUB = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "ILK_", "ILK2_")
+SCRUB = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "ILK_", "ILK2_",
+         # these override autoCompactEnabled, so the pin below would silently not hold (W2)
+         "DISABLE_AUTO_COMPACT", "DISABLE_COMPACT")
+# docs/06 W2: auto-compact pinned on, as a safety net only (one step is the context bound,
+# docs/02 §2.6). Passed with --settings, which outranks the consumer repo's .claude/settings.json.
+# Judgment call: the window (autoCompactWindow) is left to Claude Code; wrong if W4's peaks near it.
+PINNED_SETTINGS = {"autoCompactEnabled": True}
 
 API_ERROR = re.compile(r"API Error: (429|5\d\d)|overloaded|rate.?limit", re.I)
 QUOTA = re.compile(r"quota|insufficient.?balance|usage limit|credit balance", re.I)
@@ -117,6 +123,8 @@ class Dispatch:
     tool_uses: list = field(default_factory=list)
     thinking_chars: int = 0
     thinking_s: float = 0.0
+    peak_context: int = 0      # largest prompt (input + cache) of any turn: docs/02 §2.6
+    compactions: int = 0       # compaction system events seen in the stream
     capped: bool = False
     cancelled: bool = False
     terminated: dict | None = None
@@ -133,8 +141,18 @@ class Dispatch:
             self.session_id = ev.get("session_id")
             self.init_model = ev.get("model")
             self.timings.setdefault("init_s", t)
+        elif typ == "system" and ev.get("subtype") == "compact_boundary":
+            # Agent SDK SDKCompactBoundaryMessage; pre_tokens is the context just before it
+            self.compactions += 1
+            pre = int((ev.get("compact_metadata") or {}).get("pre_tokens") or 0)
+            self.peak_context = max(self.peak_context, pre)
         elif typ == "assistant":
             self.timings.setdefault("first_assistant_s", t)
+            # main loop only: a subagent's turns (parent_tool_use_id set) have their own context
+            u = {} if ev.get("parent_tool_use_id") else ((ev.get("message") or {}).get("usage") or {})
+            ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                     "cache_creation_input_tokens"))
+            self.peak_context = max(self.peak_context, ctx)
             for b in (ev.get("message") or {}).get("content", []):
                 if b.get("type") == "thinking":
                     self.thinking_chars += len(b.get("thinking", ""))
@@ -227,6 +245,7 @@ class Dispatch:
             "model_usage": sorted((r.get("modelUsage") or {}).keys()),
             "tool_counts": {n: self.tool_uses.count(n) for n in sorted(set(self.tool_uses))},
             "thinking_chars": self.thinking_chars, "thinking_s": round(self.thinking_s, 1),
+            "peak_context_tokens": self.peak_context, "compactions": self.compactions,
             "timings": {k: round(v, 3) for k, v in self.timings.items()},
             "terminated": self.terminated,
         }
@@ -236,7 +255,7 @@ def dispatch(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, prompt: str
              resume: str | None = None) -> Dispatch:
     argv = [cfg.claude_bin, "-p", "--output-format", "stream-json", "--verbose",
             "--max-turns", str(cfg.max_turns), "--permission-mode", cfg.permission_mode,
-            "--strict-mcp-config"]
+            "--strict-mcp-config", "--settings", json.dumps(PINNED_SETTINGS)]
     if resume:
         argv += ["--resume", resume]
     if cfg.sandbox:

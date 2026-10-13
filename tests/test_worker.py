@@ -189,3 +189,30 @@ def test_full_suite_covers_collection_roots_and_scripts(tmp_path):
     egate = [["python3", "-m", "pytest", "tests/test_a.py", "tests/test_b.py"]]
     assert full_suite("python3 -m pytest tests", egate, r)
     assert not full_suite("python3 -m pytest tests/test_a.py", egate, r)
+
+
+def test_attempt_records_peak_context_and_compactions(env):
+    # docs/02 §2.6: one step is the context bound; P4's peak was 140k of 1M. Record it per
+    # attempt so a session nearing the limit, or compacting, is visible (ilk2-f0, Oct 13).
+    cfg, files, wt = env
+    script(files, actions=[{"context": 20000}, {"context": 140224}, {"compact": True, "pre_tokens": 180000},
+                           {"context": 30000}])
+    d = worker.dispatch(cfg, files, wt, "x")
+    assert d.wait(30) == "done"
+    s = d.summary()
+    # the turn just before a compaction can be larger than any turn the stream showed
+    assert s["peak_context_tokens"] == 180000 and s["compactions"] == 1
+
+
+def test_auto_compact_is_pinned_on_whatever_the_host_or_repo_says(env, monkeypatch):
+    # docs/06 W2: --settings outranks a repo's .claude/settings.json, and DISABLE_AUTO_COMPACT
+    # would override the setting, so it never reaches the worker.
+    cfg, files, wt = env
+    monkeypatch.setenv("DISABLE_AUTO_COMPACT", "1")
+    monkeypatch.setenv("DISABLE_COMPACT", "1")
+    script(files, actions=[])
+    d = worker.dispatch(cfg, files, wt, "x")
+    assert d.wait(30) == "done"
+    c = calls(files)[0]
+    assert json.loads(c["settings"]) == {"autoCompactEnabled": True}
+    assert c["disable_auto_compact"] is None

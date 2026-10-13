@@ -574,11 +574,15 @@ def test_attempt_left_running_by_an_ended_run_is_closed(stall):
     step = stall.s.one("SELECT id FROM steps WHERE batch_id = ?", bid)
     stall.s.insert("attempts", {"id": "a-orphan", "run_id": rid, "step_id": step["id"], "n": 1,
                                 "status": "running", "created_at": clock.wall()})
-    stall.s.update("runs", rid, {"status": "ended", "terminal_reason": "lost"}, actor="test", reason="x")
+    died = clock.wall() - 3600  # the run died an hour before anyone closed its attempt
+    stall.s.update("runs", rid, {"status": "ended", "terminal_reason": "lost", "ended_at": died},
+                   actor="test", reason="x")
     sp = sup(stall)
     sp.tick()
     a = stall.s.get("attempts", "a-orphan")
     assert a["status"] == "done" and a["outcome"] == "interrupted"
+    # ended when its run ended, not when it was found (ilk2-f0: `ilk2 report` counted 291 min)
+    assert a["ended_at"] == died
 
 
 def test_notifications_are_opt_in(stall):
