@@ -287,3 +287,12 @@ def test_fingerprint_ignores_commit_shas_and_short_hex_ids():
     assert a == b
     assert fingerprint("E", "expected 1234567, got 7654321", []) != \
         fingerprint("E", "expected 1234567, got 1234568", [])  # numbers are operands, kept
+
+
+def test_pinned_path_always_ends_with_the_system_dirs(tmp_path):
+    # gh-resolve P5 batch, Oct 13: a prelude of (venv, /usr/bin, /bin) left out /usr/sbin (lsof);
+    # a test passed in the worker's run and failed only in ilk2's gate.
+    env = pinned_env(home=tmp_path / "h", tmp=tmp_path / "t", path_prelude=["/x/venv/bin", "/usr/bin", "/bin"])
+    parts = env["PATH"].split(os.pathsep)
+    assert parts[:3] == ["/x/venv/bin", "/usr/bin", "/bin"]
+    assert "/usr/sbin" in parts and "/sbin" in parts and parts.count("/usr/bin") == 1

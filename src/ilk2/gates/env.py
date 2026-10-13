@@ -14,6 +14,7 @@ from pathlib import Path
 
 # Variables every process needs to behave; their values come from the host, never ILK_*.
 BASELINE = ("LANG", "LC_ALL", "USER", "LOGNAME", "SHELL")
+SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 
 def pinned_env(*, home: Path, tmp: Path, path_prelude: list[str], allow: list[str] | None = None,
@@ -36,5 +37,9 @@ def pinned_env(*, home: Path, tmp: Path, path_prelude: list[str], allow: list[st
         env[k] = v  # declared values, ILK_* names included (e.g. ILK_TEST_TOOLKIT_ROOT)
     env["HOME"] = str(home)
     env["TMPDIR"] = str(tmp) + "/"
-    env["PATH"] = os.pathsep.join([*path_prelude, *(release_tools or [])])
+    # The system dirs always close the PATH: a project's prelude replaces the default, and
+    # gh-resolve's (venv, /usr/bin, /bin) left out /usr/sbin, so reap's lsof check failed only in
+    # ilk2's gate, never in the worker's run (P5 batch, Oct 13).
+    tail = [d for d in SYSTEM_PATH if d not in path_prelude]
+    env["PATH"] = os.pathsep.join([*path_prelude, *(release_tools or []), *tail])
     return env
