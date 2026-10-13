@@ -164,3 +164,5 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 4. V1's planning skills (`/ilk-plan`, `ilk-spec`, inbox and lark tickets) keep working: they write masters into V1's plans dir, and ilk2 claims the queued ones of the projects it owns.
 
 **Order:** chad-mbp first (ilk-skills takeover now; fleet b at P5 live), then rezmac (P6).
+
+**chad-mbp: V1 scheduler off** (Oct 14 00:40, Chad's go): `ilk2 v1 status` listed nothing, `ilk2 v1 off --apply` booted out `net.inluck.ilk.scheduler` and moved its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. Rollback: `ilk2 v1 on --apply`. rezmac still runs V1 (the resolver, until P6).
