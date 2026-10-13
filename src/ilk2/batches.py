@@ -48,6 +48,10 @@ class ProjectConfig:
     # work as the repo it shadows, with no outward effect. Its roots are never leased to a
     # consumer, and its events carry shadow: true.
     shadow_of: str | None = None
+    # The project's batch verification under ilk2: its full suite, run at the batch head. A V1
+    # batch-verify plan's gates call V1's own tooling (~/.ilk/current scripts writing V1
+    # records); on import they are replaced by this command (gh-resolve's P5 master, Oct 13).
+    verify_command: list[str] | None = None
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":
@@ -160,6 +164,32 @@ def preflight(spec: plans.BatchSpec, repo: Path, base_sha: str, cfg: "ProjectCon
     return problems
 
 
+def _v1_tooling(g: plans.Gate) -> bool:
+    return any("/.ilk/" in a or ".ilk-data" in a for a in g.command)
+
+
+def translate_v1_tooling(spec: plans.BatchSpec, cfg: "ProjectConfig") -> list[str]:
+    """Drop gates that run V1's own tooling; a step left without gates gets the project's
+    verify_command. Returns problems when a step needs it and the project has none."""
+    problems = []
+    for p in spec.plans:
+        for i, st in enumerate(p.steps):
+            v1 = [g for g in st.gates if _v1_tooling(g)]
+            if not v1:
+                continue
+            st.gates = [g for g in st.gates if not _v1_tooling(g)]
+            if st.gates:
+                continue
+            if not cfg.verify_command:
+                problems.append(f"plan {p.slug} step {i}: its gates run V1's tooling ({' '.join(v1[0].command)[:120]}); "
+                                "set the project's verify_command (its full suite) for ilk2 to verify instead")
+                continue
+            cmd = list(cfg.verify_command)
+            st.gates = [plans.Gate(name="batch-verify", adapter=plans.adapter_for(cmd), command=cmd,
+                                   cap_s=3600, declares_tests=plans.adapter_for(cmd) != "shell")]
+    return problems
+
+
 class SubmitRejected(ValueError):
     def __init__(self, problems: list[str]):
         super().__init__("; ".join(problems))
@@ -193,6 +223,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         problems.append(f"base {base or proj['default_branch']!r} is not a commit")
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
+    problems += translate_v1_tooling(spec, cfg)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
     deny = list(cfg.deny_paths) + list(deny_paths or [])
     for p in spec.plans:

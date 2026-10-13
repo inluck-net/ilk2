@@ -488,3 +488,52 @@ def test_plain_scope_entries_cover_everything_below_them():
     assert path_matches("tools/gh_resolve/x.py", ["tools/gh_resolve/"])
     assert path_matches("tools/gh_resolve", ["tools/gh_resolve"])
     assert not path_matches("tools/gh_resolver/x.py", ["tools/gh_resolve"])
+
+
+def _verify_spec():
+    v1_tool = {"name": "local-check-1", "adapter": "shell", "declares_tests": False,
+               "command": ["python3", "/Users/x/.ilk/current/skills/ilk-loop/scripts/verification_record.py",
+                           "--project", "."]}
+    return {"plans": [
+        {"slug": "work", "steps": [{"title": "add", "instructions": "implement add",
+                                    "gates": [gate("tests/test_calc.py")],
+                                    "must_pass": ["tests/test_calc.py::test_add"]}]},
+        {"slug": "x-batch-verify", "verification": True, "depends_on": ["work"],
+         "steps": [{"title": "Run the full suite, record the result", "instructions": "verify",
+                    "gates": [v1_tool]}]}]}
+
+
+def test_v1_verification_tooling_becomes_the_projects_verify_command(ilk):
+    # gh-resolve's P5 master (Oct 13): its batch-verify plan gates only on V1 scripts that
+    # write V1 records. Under ilk2 it runs the project's full suite at the batch head instead.
+    import pytest
+    from ilk2 import batches, plans
+    ilk.make_repo()
+    ilk.project()
+    with pytest.raises(batches.SubmitRejected, match="verify_command"):
+        ilk.submit(_verify_spec())
+    from dataclasses import asdict
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    bid = ilk.submit(_verify_spec())
+    vstep = ilk.s.one("SELECT * FROM steps WHERE batch_id = ? AND plan_id LIKE '%verify'", bid)
+    cmds = [g["command"] for g in json.loads(vstep["gates"])]
+    assert cmds == [cfg.verify_command] and not any(".ilk/" in " ".join(c) for c in cmds)
+
+
+def test_a_verification_step_that_changes_nothing_is_accepted_without_a_commit(ilk):
+    from dataclasses import asdict
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    ilk.script([GOOD], [])  # the work step edits; the verify step's worker changes nothing
+    bid = ilk.submit(_verify_spec())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    work = ilk.s.one("SELECT accepted_commit FROM steps WHERE plan_id = ?", f"{bid}.work")["accepted_commit"]
+    ver = ilk.s.one("SELECT accepted_commit FROM steps WHERE plan_id LIKE '%verify'")["accepted_commit"]
+    assert ver == work == ilk.git(b["execution_root"], "rev-parse", b["branch"])  # no extra commit

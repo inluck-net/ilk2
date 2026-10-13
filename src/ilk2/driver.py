@@ -370,7 +370,9 @@ class Driver:
                 self.api_backoff(outcome)
                 continue
             red = None
-            if gitops.worktree_tree(self.root) == gitops.commit_tree_of(self.root, parent):
+            if not plan["verification"] and \
+                    gitops.worktree_tree(self.root) == gitops.commit_tree_of(self.root, parent):
+                # (a verification plan's step may change nothing: it checks the batch head)
                 red = ("The attempt made no change to any file. The step needs a change that makes its "
                        "gates pass; nothing was committed.")
             unfinished = None if outcome == "done" else (
@@ -648,6 +650,11 @@ class Driver:
         self.s.transition("steps", step["id"], "accepting", actor="driver", reason="intent",
                           expect_from={"pending"}, fields={"accepting": dumps(intent)})
         faults.hit("after-intent")
+        if tree == gitops.commit_tree_of(self.root, parent):
+            # Nothing changed (a verification step): accepted at the parent, no empty commit.
+            # A crash here recovers by undo (no trailer commit, head at the parent): re-run.
+            self.finalize(step["id"], parent)
+            return
         sha = gitops.find_trailer_commit(self.root, self.branch, aid)
         if sha is None:
             plan = self.s.get("plans", step["plan_id"])
