@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 
 from . import clock, gitops, lease, paths, plans, procs
@@ -31,12 +32,19 @@ class ProjectConfig:
     sandbox: bool = True
     sandbox_allow: list[str] = field(default_factory=list)   # extra writable paths (caches)
     preload: bool = True                      # Q10: adopted after P1 step 4 (docs/spikes/p1.md)
+    # Paths no batch may change (docs/06 R8), e.g. gh-resolve's write-target denylist
+    # ["convex/migrations/"]: a directory prefix or a glob. Checked on every attempt.
+    deny_paths: list[str] = field(default_factory=list)
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":
         d = json.loads(text or "{}")
         known = {f for f in ProjectConfig.__dataclass_fields__}
         return ProjectConfig(**{k: v for k, v in d.items() if k in known})
+
+
+def path_matches(path: str, patterns: list[str]) -> bool:
+    return any(path == s or path.startswith(s.rstrip("/") + "/") or fnmatch(path, s) for s in patterns)
 
 
 def project_add(s: Store, project_id: str, repo_root: Path, config: ProjectConfig,
@@ -66,6 +74,7 @@ def resolve_scripts(spec: plans.BatchSpec, repo: Path, commit: str) -> None:
                     if r:
                         g.adapter, g.command = r["adapter"], r["command"]
                         g.script, g.script_entry = r["script"], r["script_entry"]
+                        g.env = {**r.get("env", {}), **g.env}
 
 
 class SubmitRejected(ValueError):
@@ -85,6 +94,13 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
+    for p in spec.plans:
+        for i, st in enumerate(p.steps):
+            bad = [x for x in st.scope if path_matches(x, cfg.deny_paths)
+                   or any(path_matches(d, [x]) for d in cfg.deny_paths)]
+            if bad:
+                problems.append(f"plan {p.slug} step {i}: scope names denied paths {bad} "
+                                f"(project deny_paths {cfg.deny_paths})")
     if problems:
         raise SubmitRejected(problems)
     bid = new_id("b")

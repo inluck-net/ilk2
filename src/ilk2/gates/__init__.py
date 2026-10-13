@@ -14,7 +14,7 @@ import re
 import signal
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from ..plans import Gate
@@ -67,7 +67,7 @@ class GateRun:
 def spec_version(gate: Gate, root: Path, env: dict[str, str]) -> str:
     h = hashlib.sha256()
     h.update(json.dumps([gate.adapter, gate.command, gate.cwd, gate.cap_s, gate.script,
-                         gate.script_entry]).encode())
+                         gate.script_entry] + ([gate.env] if gate.env else [])).encode())
     stable_env = {k: v for k, v in env.items() if k not in ("HOME", "TMPDIR")}
     h.update(json.dumps(stable_env, sort_keys=True).encode())
     for rel in config_files(gate, root):
@@ -265,13 +265,11 @@ def with_test_ids(command: list[str], ids: list[str], drop: tuple[str, ...] = ()
 def rerun_alone(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path,
                 test_id: str) -> bool:
     """Re-run one timeout-class test alone, without xdist; True if it passes (§2.5.5, S21)."""
+    env = {**env, **gate.env}
     if gate.adapter == "vitest":
-        g = Gate(name=gate.name, adapter="vitest", command=vitest.with_test_ids(gate.command, [test_id]),
-                 cwd=gate.cwd, cap_s=gate.cap_s)
+        g = replace(gate, command=vitest.with_test_ids(gate.command, [test_id]))
         return run_vitest(g, root, env, spec, workdir).outcome == "pass"
-    g = Gate(name=gate.name, adapter=gate.adapter,
-             command=with_test_ids(gate.command, [test_id], drop=("-n", "--deselect", "-k")),
-             cwd=gate.cwd, cap_s=gate.cap_s)
+    g = replace(gate, command=with_test_ids(gate.command, [test_id], drop=("-n", "--deselect", "-k")))
     return run_pytest(g, root, env, spec, workdir).outcome == "pass"
 
 
@@ -305,6 +303,8 @@ def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
     """Run a gate with the §2.5.5 rules: a transient unmeasured is re-run once on the same
     tree, and each timeout-class failure is re-run alone once and dropped if it passes."""
     spec = spec or spec_version(gate, root, env)
+    if gate.env:
+        env = {**env, **gate.env}  # the gate's own assignments win over the pinned environment
     runner = {"pytest": run_pytest, "vitest": run_vitest, "shell": run_shell}.get(gate.adapter)
     if runner is None:
         return GateRun(gate=gate.name, spec_version=spec, outcome="unmeasured",

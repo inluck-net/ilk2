@@ -14,7 +14,7 @@ budget | foreign (the failing side is not an ilk2 step).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from . import bounds, clock, gates, gitops
@@ -121,8 +121,7 @@ class Attributor:
             cmd = vitest.with_test_ids(gate.command, [test_id])
         else:
             cmd = gates.with_test_ids(gate.command, [test_id], drop=("--deselect", "-k"))
-        g = Gate(name=f"{gate.name}-probe", adapter=gate.adapter, command=cmd, cwd=gate.cwd,
-                 cap_s=gate.cap_s)
+        g = replace(gate, name=f"{gate.name}-probe", command=cmd)  # keeps the gate's env
         r = gates.measure(g, where, self.d.env(), self.d.dir / "gates")
         if r.outcome == "unmeasured":
             a.result = "flaky"  # a probe that cannot measure cannot confirm an edge

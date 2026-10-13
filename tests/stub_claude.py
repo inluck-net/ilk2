@@ -13,6 +13,7 @@ A script is
   {"bash_child": seconds}                     a foreground `sleep` child in its own group
   {"api_error": 429}                          end with an API error result
   {"exit": code}                              exit without a result event
+  {"delete": "path"}                          remove a file
   {"ignore_term": true}                       ignore SIGTERM from here on (S17)
 Each start or resume appends one line to $CLAUDE_CONFIG_DIR/stub-calls.jsonl.
 """
@@ -65,6 +66,8 @@ def main():
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "a" if "append" in a else "w") as f:
                 f.write(a["text"])
+        elif "delete" in a:
+            os.remove(a["delete"])
         elif "sleep" in a:
             time.sleep(a["sleep"])
         elif a.get("hang"):

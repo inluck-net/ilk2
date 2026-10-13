@@ -44,6 +44,7 @@ class Gate:
     declares_tests: bool = True
     script: str | None = None          # package script name the command was resolved from
     script_entry: str | None = None    # its package.json entry: the only part of it hashed
+    env: dict[str, str] = field(default_factory=dict)  # the script's leading VAR=value (e.g. TZ=UTC)
 
 
 @dataclass
@@ -95,7 +96,8 @@ def _gate(d: dict, i: int) -> Gate:
                 command=list(cmd), cwd=d.get("cwd", "."),
                 cap_s=int(d.get("cap_s", DEFAULT_GATE_CAP_S)),
                 declares_tests=bool(d.get("declares_tests", True)),
-                script=d.get("script"), script_entry=d.get("script_entry"))
+                script=d.get("script"), script_entry=d.get("script_entry"),
+                env=dict(d.get("env") or {}))
 
 
 def from_dict(d: dict) -> BatchSpec:

@@ -50,18 +50,23 @@ def resolve(command: list[str], cwd: str, read: Callable[[str], str | None]) -> 
     if not entry:
         return None
     argv = shlex.split(entry)
+    env = {}
     while argv and "=" in argv[0] and not argv[0].startswith("-"):
-        argv = argv[1:]  # leading VAR=value assignments
+        k, _, v = argv[0].partition("=")  # leading VAR=value assignments: kept as the gate's env
+        env[k] = v
+        argv = argv[1:]
     if argv[:1] in (["npx"], ["bunx"], ["pnpm"]) and argv[1:2] == ["vitest"]:
         argv = argv[1:]
     extra = command[3:] if command[1:2] == ["run"] else command[2:]
     if extra[:1] == ["--"]:
         extra = extra[1:]
     if argv[:1] == ["vitest"] and not any(t in argv for t in ("&&", "||", ";", "|")):
-        return {"adapter": "vitest", "command": argv + extra, "script": name, "script_entry": entry}
+        return {"adapter": "vitest", "command": argv + extra, "script": name, "script_entry": entry,
+                "env": env}
     if any(t in ("pytest",) for t in argv[:3]) or argv[:3] == ["python", "-m", "pytest"]:
-        return {"adapter": "pytest", "command": argv + extra, "script": name, "script_entry": entry}
-    return {"adapter": "shell", "command": command, "script": name, "script_entry": entry}
+        return {"adapter": "pytest", "command": argv + extra, "script": name, "script_entry": entry,
+                "env": env}
+    return {"adapter": "shell", "command": command, "script": name, "script_entry": entry, "env": {}}
 
 
 def config_files(command: list[str], cwd: str) -> list[str]:

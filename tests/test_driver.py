@@ -340,3 +340,28 @@ def test_s21_timeout_class_rerun_costs_no_attempt(ilk):
     assert ilk.stub_calls() == 1
     step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
     assert step["attempt_count"] == 1
+
+
+def test_deny_paths_make_an_attempt_red_whatever_the_scope(ilk):
+    # docs/06 R8: a project's denied paths (gh-resolve's write-target denylist, e.g.
+    # convex/migrations/) hold for every batch, whoever submits it and whatever its scope.
+    ilk.make_repo()
+    ilk.project(deny_paths=["migrations/"])
+    ilk.script([GOOD, {"write": "migrations/0001.py", "text": "x = 1\n"}],
+               [{"delete": "migrations/0001.py"}])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "accepted"]
+    assert "migrations/0001.py" in atts[0]["evidence"] and "denied" in atts[0]["evidence"]
+    b = ilk.s.get("batches", bid)
+    assert "migrations" not in ilk.git(b["execution_root"], "ls-tree", "-r", "--name-only", b["branch"])
+
+
+def test_deny_paths_reject_a_scope_that_names_them(ilk):
+    import pytest
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project(deny_paths=["migrations/"])
+    with pytest.raises(batches.SubmitRejected, match="denied"):
+        ilk.submit(one_step(scope=["migrations/0002.py"]))

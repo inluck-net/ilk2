@@ -12,7 +12,7 @@ import os
 import time
 import traceback
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -353,8 +353,14 @@ class Driver:
                 f"{', exit ' + str(summary.get('returncode')) if outcome == 'crashed' else ''}). "
                 "Its work so far is kept in the worktree; finish the step.")
             with self.phase("scope", step=step["id"]):
+                denied = [p for p in gitops.changed_paths(self.root)
+                          if batches.path_matches(p, self.cfg.deny_paths)]
                 out_of_scope = self.out_of_scope(scope)
-                if out_of_scope and red is None:
+                if denied and red is None:
+                    # docs/06 R8: never accepted, whatever the step's scope says
+                    red = ("Changes to paths this project denied to every batch (deny_paths "
+                           f"{self.cfg.deny_paths}); revert them: " + ", ".join(denied[:20]))
+                elif out_of_scope and red is None:
                     red = "Changes outside the step's declared scope: " + ", ".join(out_of_scope[:20])
             verdicts: dict = {}
             if red is None:
@@ -459,11 +465,7 @@ class Driver:
     def out_of_scope(self, scope: list[str]) -> list[str]:
         if not scope:
             return []
-        out = []
-        for p in gitops.changed_paths(self.root):
-            if not any(p == s or p.startswith(s.rstrip("/") + "/") or fnmatch(p, s) for s in scope):
-                out.append(p)
-        return out
+        return [p for p in gitops.changed_paths(self.root) if not batches.path_matches(p, scope)]
 
     def run_gates(self, step, aid: str, gate_list: list[Gate], expect_red: list[str],
                   parent: str, must_pass: list[str] = ()) -> tuple[str | None, dict]:
@@ -593,8 +595,7 @@ class Driver:
         diag = self.diag_worktree(parent)
         cmd = gates.vitest.with_test_ids(gate.command, ids) if gate.adapter == "vitest" else \
             gates.with_test_ids(gate.command, ids, drop=("--deselect", "-k"))
-        probe = Gate(name=gate.name + "-parent-probe", adapter=gate.adapter, command=cmd,
-                     cwd=gate.cwd, cap_s=gate.cap_s)
+        probe = replace(gate, name=gate.name + "-parent-probe", command=cmd)
         r = gates.measure(probe, diag, self.env(), self.dir / "gates")
         return sorted(t for t in ids if t in r.failures)
 

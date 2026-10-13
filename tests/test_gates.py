@@ -238,3 +238,22 @@ def test_step_obligations_span_gates(tmp_path):
     unmet, missing = gates.unmet_obligations([ra], ["tests/test_b.py::test_b"],
                                              ["tests/test_b.py::test_b"])
     assert unmet == ["tests/test_b.py::test_b"] and missing == ["tests/test_b.py::test_b"]
+
+
+def test_script_env_assignments_reach_the_gate(tmp_path):
+    # kira-cloudflare's `test:non-ui:convex` is `TZ=UTC vitest run -c ...`: the assignment is
+    # part of the gate, so it must reach every run (and probe) and its spec version.
+    from ilk2.gates import vitest
+    pkg = '{"scripts": {"t": "TZ=UTC FOO=1 vitest run -c v.config.ts"}}'
+    r = vitest.resolve(["bun", "run", "t"], ".", lambda rel: pkg)
+    assert r["command"][:2] == ["vitest", "run"] and r["env"] == {"TZ": "UTC", "FOO": "1"}
+    root = project(tmp_path, {"tests/test_tz.py": "import os\ndef test_tz():\n    assert os.environ.get('TZ') == 'UTC'\n"})
+    g = gate("tests/test_tz.py")
+    assert m(g, root, tmp_path).outcome == "fail"  # the pinned environment has no TZ
+    g.env = {"TZ": "UTC"}
+    assert m(g, root, tmp_path).outcome == "pass"
+    env = env_for(tmp_path)
+    assert gates.spec_version(g, root, env) != gates.spec_version(gate("tests/test_tz.py"), root, env)
+    # probes keep it: a re-run of one test id runs with the same assignments
+    assert gates.rerun_alone(g, root, env, gates.spec_version(g, root, env), tmp_path / "w",
+                             "tests/test_tz.py::test_tz")
