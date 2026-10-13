@@ -28,6 +28,30 @@ def _current_step(b: dict) -> dict | None:
     return None
 
 
+def _mins(seconds: float | None) -> str:
+    if seconds is None:
+        return "?"
+    return f"{int(seconds // 60)}m" if seconds >= 60 else f"{int(seconds)}s"
+
+
+def _steps(b: dict) -> list[dict]:
+    return [st for p in b.get("plans", []) for st in p.get("steps", [])]
+
+
+def live_runs(s) -> dict[str, dict]:
+    """batch id -> the live run's phase, its age, and the running attempt's age."""
+    from . import clock
+    out = {}
+    for r in s.all("SELECT * FROM runs WHERE status IN ('starting', 'running')"):
+        same_boot = r["boot_time"] in (None, clock.boot_time())
+        phase_age = (clock.mono() - r["phase_started_mono"]) if (same_boot and r["phase_started_mono"]) else None
+        a = s.one("SELECT created_at FROM attempts WHERE run_id = ? AND status = 'running' "
+                  "ORDER BY created_at DESC LIMIT 1", r["id"])
+        out[r["batch_id"]] = {"phase": r["phase"] or "starting", "phase_age_s": phase_age,
+                              "attempt_age_s": (clock.wall() - a["created_at"]) if a else None}
+    return out
+
+
 def render(st: dict, tick_age: float | None, stale: float) -> str:
     batches = st.get("batches", [])
     rows = st.get("needs_human", [])
@@ -80,9 +104,22 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     out += ["---", f"▶ running ({len(running)})" + ("" if running else "  — none")]
     for b in running:
         ref = f" [{b['consumer_ref']}]" if b.get("consumer_ref") else ""
+        steps = _steps(b)
         cur = _current_step(b)
-        step = f"  step {cur['idx']}: {_trunc(cur['title'], 50)}, attempt {cur['attempts']}" if cur else ""
-        out.append(f"{b['id']}{ref}  {b['project']}{step}")
+        parts = []
+        if cur:
+            parts += [f"step {steps.index(cur) + 1}/{len(steps)}", f"attempt {max(cur.get('attempts') or 1, 1)}"]
+        live = b.get("live")
+        if live:
+            parts.append(f"{live['phase']} {_mins(live.get('phase_age_s'))}")
+        elif b["status"] == "queued":
+            parts.append("queued")
+        out.append(f"{b['id']}{ref}  {b['project']} · " + " · ".join(parts))
+        for st_ in steps:
+            mark = {"accepted": "✓", "blocked": "✗", "cancelled": "–"}.get(
+                st_["status"], "▶" if st_ is cur else "·")
+            commit = f"  ({st_['commit'][:7]})" if st_.get("commit") else ""
+            out.append(f"--{mark} {_trunc(st_['title'], 70)}{commit}")
 
     done = [b for b in batches if b["status"] in ("shipped", "cancelled")][:3]
     if done:
@@ -103,6 +140,10 @@ def main() -> int:
         s = Store(paths.db())
         try:
             st = status(s, None)
+            live = live_runs(s)
+            for b in st["batches"]:
+                if b["id"] in live:
+                    b["live"] = live[b["id"]]
             row = s.one("SELECT tick_mono, tick_wall, boot_time FROM supervisor WHERE id = 1")
             tick_age = None
             if row and row["tick_wall"] is not None:

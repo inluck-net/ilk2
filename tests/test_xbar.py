@@ -58,3 +58,31 @@ def test_cli_prints_a_menu(ilk, capsys):
     assert cli.main(["xbar"]) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[0].startswith("ilk2 ") and "---" in out
+
+
+def test_running_shows_progress_phase_and_steps():
+    # Chad, Oct 13: "I don't see any progress". Step k of n, the attempt, the live phase and
+    # its age; every step in a submenu with its state and commit.
+    b = batch("b-3", "active", [("D-523 pin flip", "accepted", 1), ("D-469 drain pins", "pending", 1)],
+              ref="p4-batch1", project="gh-resolve")
+    b["plans"][0]["steps"][0]["commit"] = "efef1fdacd0000"
+    b["live"] = {"phase": "dispatch", "phase_age_s": 725, "attempt_age_s": 740}
+    out = xbar.render({"batches": [b], "needs_human": []}, tick_age=5, stale=180)
+    line = next(x for x in out.splitlines() if x.startswith("b-3"))
+    assert "step 2/2" in line and "attempt 1" in line and "dispatch 12m" in line
+    subs = [x for x in out.splitlines() if x.startswith("--")]
+    assert any("✓" in x and "D-523" in x and "efef1fd" in x for x in subs)
+    assert any("▶" in x and "D-469" in x for x in subs)
+
+
+def test_live_phase_is_read_from_the_run(ilk):
+    from conftest import one_step
+    from ilk2 import clock, xbar as xb
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    rid = ilk.new_run(bid)
+    ilk.s.update("runs", rid, {"status": "running", "phase": "gates",
+                               "phase_started_mono": clock.mono() - 125}, actor="test", reason="x")
+    live = xb.live_runs(ilk.s)
+    assert live[bid]["phase"] == "gates" and 120 <= live[bid]["phase_age_s"] < 200
