@@ -21,8 +21,7 @@ import time
 from pathlib import Path
 
 from . import batches, bounds, clock, faults, gitops, lease, paths, procs
-from .driver import (counts_as_restart, fenced, finish_cancel, has_unfinished_cancel,
-                     root_in_use_by_other)
+from .runs import counts_as_restart, fenced, has_unfinished_cancel, root_in_use_by_other
 from .store import Conflict, Store, new_id
 
 HOST_BUDGET = 2  # Q15: ilk2 runs per host, an experiment guarded by load admission
@@ -340,7 +339,7 @@ class Supervisor:
                 continue
             if b["status"] == "cancelled":
                 if has_unfinished_cancel(self.s, b["id"]):
-                    finish_cancel(self.s, b["id"], self.b)
+                    _finish_cancel(self.s, b["id"], self.b)
                 continue
             row = lease.get(self.s, b["execution_root"])
             accepting = self.s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'",
@@ -588,3 +587,8 @@ def main(stop_after: float | None = None) -> int:
     finally:
         s.close()
     return 0
+
+
+def _finish_cancel(s, batch_id, b=None):
+    from .driver import finish_cancel  # lazy: keeps driver code out of the supervisor's start
+    return finish_cancel(s, batch_id, b)

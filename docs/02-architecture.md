@@ -154,7 +154,7 @@ Added since the design closed (each with a test; why in [document 6](06-open-ite
 - **Session carry-over.** The first attempt of step *k* > 0 continues step *k*-1's session when that step was accepted and stayed under `carry_max_context` (400k). It skips re-reading the repo: carried steps took 6-19 min, fresh ones 24-33 min.
 - **V1 ceremony merge.** At import, a V1 "Red-first pins" step folds into the next step, and a trailing "Neighbour gate" step into the one before. `amend merge_ceremony` does the same for a plan that has not started. Gates that look up the folded step's own commit are dropped, since that commit is the merged step itself.
 - **Red-first inside a step.** A `must_pass` test in a file the plan added must fail on the code it replaces: on the step's parent, or on the plan's starting commit when the pin was written in an earlier step of the plan. A control test that passes on the old code by design does not belong in `must_pass`. Repair and verification plans are not checked: a repair's `must_pass` is the failing test it must turn green, not a new pin.
-- **Verification plans run gates first.** If they are green, the step is accepted with no worker. If they are red, the worker is briefed that the gate already ran and that no V1 record exists.
+- **Verification plans run gates first, on every entry** (a fresh step, and again after repairs or a restart, so a worker never gets stale evidence). If they are green, the step is accepted with no worker. If they are red, the worker is briefed that the gate already ran and that no V1 record exists.
 
 What this removes from V1:
 - **Plans ship themselves.** When the driver finalizes a plan's last step, the plan is shipped in that same store transaction. No separate worker ship, `gate_first` marker or ship script is needed, so the Oct 12 #8309 deadlock cannot occur.
@@ -306,7 +306,7 @@ flowchart LR
   E -- no --> X[supervisor exits;<br/>launchd restarts it from current]
 ```
 
-  Drivers start from `current`, so driver, worker and gate changes reach the next run without a restart. A drain admits nothing until every live run reaches an attempt boundary. It is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, uncounted, with its work kept (§2.4). Runs record which release made each commit.
+  Drivers start from `current`, so driver, worker and gate changes reach the next run without a restart. The supervisor's start loads only the bookkeeping modules (`cli`, `supervisor`, `runs`, `batches`, `plans`, `store`, `lease`, `gitops`, `procs` and their basics); it imports the `Driver` lazily, only for cancel and park recovery. So a release that changes the driver, worker or gates does not drain. A drain admits nothing until every live run reaches an attempt boundary. It is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, uncounted, with its work kept (§2.4). Runs record which release made each commit.
 - **Retention.** Hourly, the supervisor removes what a finished batch left on disk once it has been shipped or cancelled for 7 days: its ilk2-made worktree (the branch stays), its diagnostic worktrees, and its runs' temp dirs (logs stay). A root another unfinished batch uses is left alone.
 - **Both hosts** install the same release with `ilk2 upgrade`. `ilk2 doctor --hosts` compares versions over ssh.
 

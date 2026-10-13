@@ -20,6 +20,8 @@ from . import batches, bounds, clock, faults, gates, gitops, lease, paths, procs
 from .gates import vitest
 from .gates.env import pinned_env
 from .plans import Gate, v1_documents
+from .runs import (NOT_A_RESTART, Stop, counts_as_restart, fenced, has_unfinished_cancel,  # noqa: F401
+                   root_in_use_by_other)
 from .store import Conflict, Store, StoreBusy, dumps, new_id
 
 LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lock.yaml",
@@ -30,21 +32,6 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
 SETUP_DONE = ".ilk2-setup-done"  # in a diagnostic worktree: its setup hook completed
-NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api", "waiting-lease"}
-
-
-def counts_as_restart(reason: str | None) -> bool:
-    return not (reason in NOT_A_RESTART or (reason or "").startswith("blocked"))
-
-
-class Stop(Exception):
-    """End the run with a terminal reason."""
-
-    def __init__(self, reason: str, detail: str = ""):
-        super().__init__(f"{reason}: {detail}")
-        self.reason, self.detail = reason, detail
-
-
 KEPT_NOTE = ("The worktree still holds the previous attempt's changes (the driver restarted "
              "between attempts and kept them). Start from them: check what they do against the "
              "evidence above and finish the step rather than starting over.")
@@ -370,12 +357,15 @@ class Driver:
             evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
-        if plan["verification"] and n == 0 and not kept:
+        if plan["verification"] and n < limit and not kept:
             # A verification step checks the batch head: its gates run first, and a worker is
             # dispatched only when they are red, with their failures as its brief. gh-resolve P5
             # batch, Oct 14: a worker spent 18 min trying to run and record the full suite that
             # is this step's own gate.
-            n = 1
+            # Every (re)entry, not only the first: after repairs or a restart the last evidence
+            # is stale (gh-resolve P5 batch, Oct 14: a worker chased failures the repairs had
+            # already fixed).
+            n += 1
             aid = new_id("a")
             self.s.insert("attempts", {"id": aid, "run_id": self.run_id, "step_id": step["id"],
                                        "n": n, "status": "running", "parent_commit": parent,
@@ -936,37 +926,6 @@ class Driver:
             lease.driver_release(self.s, str(self.root), gitops.branch_head(self.root, self.branch))
         self.s.clear_needs_human(self.batch_id)
         return True
-
-
-def fenced(s: Store, batch_id: str, root: Path) -> bool:
-    """True, with an open `unkillable` row, while any process other than ours is in root."""
-    found = procs.strays(root)
-    if found:
-        s.open_needs_human("unkillable", f"processes still inside {root}: {found}",
-                           "kill the listed pids; the supervisor then carries on",
-                           batch_id=batch_id)
-    return bool(found)
-
-
-def root_in_use_by_other(s: Store, batch_id: str) -> bool:
-    """Another queued or active batch works on this batch's root: the root's lease is not this
-    batch's to release (R4, shared resolver-<issue> roots)."""
-    b = s.get("batches", batch_id)
-    return s.one("SELECT 1 FROM batches WHERE execution_root = ? AND id != ? AND status IN "
-                 "('queued', 'active')", b["execution_root"], batch_id) is not None
-
-
-def has_unfinished_cancel(s: Store, batch_id: str) -> bool:
-    """A cancelled batch with anything left to end: a live child row or a held root."""
-    if s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status IN ('pending', 'accepting', "
-             "'blocked') UNION SELECT 1 FROM plans WHERE batch_id = ? AND status IN ('pending', "
-             "'active', 'blocked') UNION SELECT 1 FROM attempts a JOIN steps st ON "
-             "st.id = a.step_id WHERE st.batch_id = ? AND a.status = 'running'",
-             batch_id, batch_id, batch_id):
-        return True
-    b = s.get("batches", batch_id)
-    row = lease.get(s, b["execution_root"])
-    return bool(row and row["holder"] == "driver") and not root_in_use_by_other(s, batch_id)
 
 
 def finish_cancel(s: Store, batch_id: str, b: bounds.Bounds | None = None) -> bool:

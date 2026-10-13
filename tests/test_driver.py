@@ -871,3 +871,26 @@ def test_doctor_shows_host_budget_and_each_projects_limit(ilk, capsys):
     cli.main(["doctor"])
     out = capsys.readouterr().out
     assert "runs: 0 of host_budget 4" in out and "proj: 0 of 3 running, 0 queued" in out
+
+
+def test_a_verification_step_reruns_its_gates_on_every_entry(ilk):
+    # gh-resolve P5 batch, Oct 14: after two repairs landed, the verification step's worker was
+    # briefed with the failures of its first gates-first run, which the repairs had fixed.
+    from dataclasses import asdict
+    from ilk2 import batches, clock
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    ilk.script([GOOD])
+    bid = ilk.submit(_verify_spec())
+    vstep = ilk.s.one("SELECT * FROM steps WHERE batch_id = ? AND plan_id LIKE '%verify'", bid)
+    rid = ilk.new_run(bid)
+    ilk.s.insert("attempts", {"id": "a-stale", "run_id": rid, "step_id": vstep["id"], "n": 1,
+                              "status": "done", "outcome": "red", "evidence": "stale: test_x failed",
+                              "parent_commit": "x", "created_at": clock.wall()})
+    ilk.s.update("steps", vstep["id"], {"attempt_count": 1}, actor="test", reason="earlier red")
+    ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test", reason="x")
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.stub_calls() == 1  # the work step only; the verify step needed no worker
