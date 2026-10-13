@@ -187,6 +187,16 @@ An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; 
 
 After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
 
+### Upgrades block admission (found Oct 14, for P6)
+
+`ilk2 release upgrade` sets `draining`; the supervisor then admits nothing until every live run reaches an attempt boundary, and exits so launchd restarts it from the new release (§2.7). With 3 batches live and releases every 20-30 min (Oct 14, 00:40-02:00), draining was nearly continuous: a queued gh-triage batch waited behind it for 20+ min with budget free.
+
+| Option | Cost |
+|---|---|
+| Drain only when the supervisor's own code changed; drivers spawn from `current` and pick up driver/worker changes at their next run without a restart | the release must say which modules changed; cheap |
+| A restarted supervisor adopts live drivers by pid + start time instead of terminating them | contradicts I4 ("never adopt", §2.10): design change, Chad's call |
+| Operational: group changes into fewer releases | no code; adopted from Oct 14 02:05 |
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |
