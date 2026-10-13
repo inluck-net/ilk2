@@ -55,6 +55,10 @@ class ProjectConfig:
     # Step k of a plan continues step k-1's session (Oct 13: 19 of 27.5 min of a gh-resolve step
     # went to re-exploring). Judgment call: on, unless that session passed carry_max_context.
     carry_session: bool = True
+    # A step's scope as a hard limit (ilk2's own plans) or as advice (projects planned with V1's
+    # /ilk-plan, whose scope_paths V1 itself never enforced: plan_lint and the ship report only).
+    # deny_paths stay hard either way. Set False when a project is taken over from V1.
+    enforce_scope: bool = True
     carry_max_context: int = 400_000
 
     @staticmethod

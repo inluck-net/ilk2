@@ -603,3 +603,17 @@ def test_red_first_whole_file_needs_one_failing_test_not_all(ilk):
                               must_pass=["tests/test_pins.py"]))
     assert ilk.drive_inprocess(bid) == "shipped"
     assert [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts")] == ["accepted"]
+
+
+def test_advisory_scope_records_but_never_reds(ilk):
+    # gh-resolve P5 batch, Oct 13: a step's V1 scope_paths left out tests/test_ledger.py, whose
+    # schema test the gate needed changed; 3 attempts died on it. V1 never enforced scope_paths
+    # (plan_lint and the ship report only), so V1-planned projects treat scope as advisory.
+    ilk.make_repo()
+    ilk.project(enforce_scope=False, deny_paths=["secrets/"])
+    ilk.script([GOOD, {"write": "notes/extra.txt", "text": "x"}])
+    bid = ilk.submit(one_step(scope=["calc.py"]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts")] == ["accepted"]
+    ev = [e for e in ilk.s.events_since(0) if e["kind"] == "scope.advisory"]
+    assert ev and "notes/extra.txt" in ev[0]["payload"]["outside"]

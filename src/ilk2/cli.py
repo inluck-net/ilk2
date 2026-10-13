@@ -262,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 done = v1.take_over(proj["repo_root"], key)
                 cfg = batches.project_config(s, a.project_id)
                 cfg.v1_key = key
+                cfg.enforce_scope = False  # V1's scope_paths are advice, not a limit
                 s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))},
                          actor="human", reason="take over from V1")
                 print(json.dumps(done))
@@ -281,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             if a.take_over:
                 cfg.v1_key = v1.find_key(root)
+                cfg.enforce_scope = False  # V1's scope_paths are advice, not a limit
                 print(json.dumps(v1.take_over(root, cfg.v1_key)), file=sys.stderr)
             batches.project_add(s, a.project_id, Path(a.repo), cfg, a.default_branch)
             print(a.project_id)

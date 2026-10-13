@@ -383,6 +383,9 @@ class Driver:
                 deny = self.deny_paths()
                 denied = [p for p in gitops.changed_paths(self.root) if batches.path_matches(p, deny)]
                 out_of_scope = self.out_of_scope(scope)
+                if out_of_scope and not self.cfg.enforce_scope:
+                    self.event("scope.advisory", step=step["id"], outside=out_of_scope[:50])
+                    out_of_scope = []
                 if denied and red is None:
                     # docs/06 R8: never accepted, whatever the step's scope says
                     red = ("Changes to denied paths (deny_paths: the project's plus this batch's); "
