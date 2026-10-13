@@ -96,3 +96,14 @@ def test_progress_counts_done_steps_when_a_repair_plan_sorts_first():
     out = xbar.render({"batches": [b], "needs_human": []}, tick_age=5, stale=180)
     line = next(x for x in out.splitlines() if x.startswith("b-4"))
     assert "2/3 done (+1 repair)" in line and "repair-1" in line and "attempt 3" in line
+
+
+def test_a_batch_with_lanes_shows_them_and_marks_each_lanes_step():
+    b = batch("b-5", "active", [("p1 work", "pending", 1)], project="ilk-skills")
+    b["plans"][0]["slug"] = "p1"
+    b["plans"].append({"slug": "p2", "status": "active", "steps": [{"title": "p2 work", "status": "pending", "attempts": 1}]})
+    b["live"] = {"phase": "dispatch", "phase_age_s": 60, "attempt_age_s": 60, "lanes": ["p1", "p2"]}
+    out = xbar.render({"batches": [b], "needs_human": []}, tick_age=5, stale=180)
+    line = next(x for x in out.splitlines() if x.startswith("b-5"))
+    assert "2 lanes" in line
+    assert sum(1 for x in out.splitlines() if x.startswith("--▶")) == 2

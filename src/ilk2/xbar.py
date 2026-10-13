@@ -47,8 +47,13 @@ def live_runs(s) -> dict[str, dict]:
         phase_age = (clock.mono() - r["phase_started_mono"]) if (same_boot and r["phase_started_mono"]) else None
         a = s.one("SELECT created_at FROM attempts WHERE run_id = ? AND status = 'running' "
                   "ORDER BY created_at DESC LIMIT 1", r["id"])
-        out[r["batch_id"]] = {"phase": r["phase"] or "starting", "phase_age_s": phase_age,
-                              "attempt_age_s": (clock.wall() - a["created_at"]) if a else None}
+        info = {"phase": r["phase"] or "starting", "phase_age_s": phase_age,
+                "attempt_age_s": (clock.wall() - a["created_at"]) if a else None}
+        plan = s.one("SELECT slug FROM plans WHERE id = ?", r["plan_id"]) if "plan_id" in r.keys() \
+            and r["plan_id"] else None
+        cur = out.setdefault(r["batch_id"], {**info, "lanes": []})
+        if plan:
+            cur["lanes"].append(plan["slug"])  # lanes: several live runs on one batch
     return out
 
 
@@ -118,14 +123,19 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
             parts += [total] + ([plan] if plan else []) + \
                 [f"attempt {max(cur.get('attempts') or 1, 1)}"]
         live = b.get("live")
+        lanes = (live or {}).get("lanes") or []
+        if len(lanes) > 1:
+            parts.append(f"{len(lanes)} lanes")
         if live:
             parts.append(f"{live['phase']} {_mins(live.get('phase_age_s'))}")
         elif b["status"] == "queued":
             parts.append("queued")
         out.append(f"{b['id']}{ref}  {b['project']} · " + " · ".join(parts))
+        lane_cur = [next((x for x in p.get("steps", []) if x.get("status") != "accepted"), None)
+                    for p in b.get("plans", []) if p.get("slug") in lanes]
         for st_ in steps:
             mark = {"accepted": "✓", "blocked": "✗", "cancelled": "–"}.get(
-                st_["status"], "▶" if st_ is cur else "·")
+                st_["status"], "▶" if st_ is cur or any(st_ is x for x in lane_cur) else "·")
             commit = f"  ({st_['commit'][:7]})" if st_.get("commit") else ""
             out.append(f"--{mark} {_trunc(st_['title'], 70)}{commit}")
 
