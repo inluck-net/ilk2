@@ -911,3 +911,31 @@ def test_a_base_failure_is_not_charged_to_a_step_that_changes_the_gates_config(i
     assert ilk.drive_inprocess(bid) == "shipped"
     gr = ilk.s.one("SELECT details FROM gate_results ORDER BY id DESC LIMIT 1")
     assert json.loads(gr["details"])["comparable_base"] is False   # recorded as before
+
+
+def test_a_verification_step_gates_its_kept_work_first(ilk):
+    # gh-resolve P5 batch, Oct 14: after a restart the kept work skipped gates-first, and the
+    # worker was briefed with the previous attempt's failures.
+    from dataclasses import asdict
+    from ilk2 import batches, clock
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    spec = _verify_spec()
+    spec["plans"] = spec["plans"][1:]
+    spec["plans"][0]["depends_on"] = []
+    bid = ilk.submit(spec)
+    root = Path(ilk.s.get("batches", bid)["execution_root"])
+    vstep = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    rid = ilk.new_run(bid)
+    ilk.s.insert("attempts", {"id": "a-old", "run_id": rid, "step_id": vstep["id"], "n": 1,
+                              "status": "done", "outcome": "interrupted", "parent_commit": "x",
+                              "created_at": clock.wall()})
+    ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test", reason="x")
+    (root / "calc.py").write_text(GOOD["text"])            # the earlier attempt's kept work
+    ilk.script([])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.stub_calls() == 0                           # gated first: no worker needed
+    assert ilk.git(root, "show", f"{ilk.s.get('batches', bid)['branch']}:calc.py") == GOOD["text"].strip()

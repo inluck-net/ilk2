@@ -545,7 +545,9 @@ class Driver:
             evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
-        if plan["verification"] and n < limit and not kept:
+        # Kept work is gated too: it may already be green, and otherwise the worker gets the
+        # failures as they stand now, not the last attempt's (gh-resolve P5 batch, Oct 14).
+        if plan["verification"] and n < limit:
             # A verification step checks the batch head: its gates run first, and a worker is
             # dispatched only when they are red, with their failures as its brief. gh-resolve P5
             # batch, Oct 14: a worker spent 18 min trying to run and record the full suite that
@@ -568,7 +570,7 @@ class Driver:
                 self.end_attempt(aid, "accepted", "gates green; no worker needed", {},
                                  gates_out=verdicts)
                 return
-            evidence = red
+            evidence = red + ("\n\n" + KEPT_NOTE if kept else "")
             self.end_attempt(aid, "red", red[:300], {}, evidence=red, gates_out=verdicts)
         while n < limit:
             self.check_control()
