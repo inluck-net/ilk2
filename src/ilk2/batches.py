@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path
 
 from . import clock, gitops, lease, paths, plans, procs
@@ -57,8 +56,40 @@ class ProjectConfig:
         return ProjectConfig(**{k: v for k, v in d.items() if k in known})
 
 
+def _glob_re(pattern: str) -> "re.Pattern[str]":
+    """A path glob with gh-resolve's semantics (admission._matches_any): `**/` matches zero or
+    more directories, `/**` at the end everything below, `*` and `?` stay within one segment."""
+    import re
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
 def path_matches(path: str, patterns: list[str]) -> bool:
-    return any(path == s or path.startswith(s.rstrip("/") + "/") or fnmatch(path, s) for s in patterns)
+    for s in patterns:
+        if not any(c in s for c in "*?["):
+            d = s.rstrip("/")
+            if path == d or path.startswith(d + "/"):
+                return True  # a plain path: itself and everything under it (scope_paths style)
+            continue
+        if _glob_re(s).match(path):
+            return True
+    return False
 
 
 def project_add(s: Store, project_id: str, repo_root: Path, config: ProjectConfig,
@@ -137,7 +168,8 @@ class SubmitRejected(ValueError):
 
 def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None = None,
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
-           originals: dict | None = None, branch: str | None = None) -> str:
+           originals: dict | None = None, branch: str | None = None,
+           deny_paths: list[str] | None = None) -> str:
     proj = s.get("projects", project_id)
     cfg = ProjectConfig.from_json(proj["config"])
     repo = Path(proj["repo_root"])
@@ -162,14 +194,15 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
+    deny = list(cfg.deny_paths) + list(deny_paths or [])
     for p in spec.plans:
         for i, st in enumerate(p.steps):
             # a scope entry inside a denied path; a broader scope is fine, since the attempt-time
             # check turns any edit under a denied path red
-            bad = [x for x in st.scope if path_matches(x, cfg.deny_paths)]
+            bad = [x for x in st.scope if path_matches(x, deny)]
             if bad:
                 problems.append(f"plan {p.slug} step {i}: scope names denied paths {bad} "
-                                f"(project deny_paths {cfg.deny_paths})")
+                                f"(deny_paths {deny})")
     if not problems and not cfg.setup:
         problems += preflight(spec, repo, base_sha, cfg)
     if problems:
@@ -191,6 +224,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         # here. The driver checks out this batch's branch once it holds the lease (R4).
         root = root.resolve()
     snapshot = spec.to_dict()
+    if deny_paths:
+        snapshot["deny_paths"] = list(deny_paths)  # submit --deny-path: this batch only, additive
     with s.tx():
         s.insert("batches", {"id": bid, "project_id": project_id, "base_commit": base_sha,
                              "branch": branch, "execution_root": str(root), "priority": priority,

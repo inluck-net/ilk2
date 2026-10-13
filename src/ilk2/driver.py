@@ -117,6 +117,10 @@ class Driver:
             pass
         return reason
 
+    def deny_paths(self) -> list[str]:
+        snap = json.loads(self.s.get("batches", self.batch_id)["snapshot"])
+        return list(self.cfg.deny_paths) + list(snap.get("deny_paths") or [])
+
     def take_root(self) -> None:
         """Hold the root's lease and stand on this batch's branch (R4). A root a consumer
         holds is waited for behind a refusal row that the supervisor clears on release."""
@@ -374,13 +378,13 @@ class Driver:
                 f"{', exit ' + str(summary.get('returncode')) if outcome == 'crashed' else ''}). "
                 "Its work so far is kept in the worktree; finish the step.")
             with self.phase("scope", step=step["id"]):
-                denied = [p for p in gitops.changed_paths(self.root)
-                          if batches.path_matches(p, self.cfg.deny_paths)]
+                deny = self.deny_paths()
+                denied = [p for p in gitops.changed_paths(self.root) if batches.path_matches(p, deny)]
                 out_of_scope = self.out_of_scope(scope)
                 if denied and red is None:
                     # docs/06 R8: never accepted, whatever the step's scope says
-                    red = ("Changes to paths this project denied to every batch (deny_paths "
-                           f"{self.cfg.deny_paths}); revert them: " + ", ".join(denied[:20]))
+                    red = ("Changes to denied paths (deny_paths: the project's plus this batch's); "
+                           "revert them: " + ", ".join(denied[:20]))
                 elif out_of_scope and red is None:
                     red = "Changes outside the step's declared scope: " + ", ".join(out_of_scope[:20])
             verdicts: dict = {}

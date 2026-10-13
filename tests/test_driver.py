@@ -442,3 +442,49 @@ def test_interrupted_setup_is_rerun_in_a_reused_diag_worktree(ilk):
     assert (p / "setup-ran").read_text() == "xx"  # setup ran again
     d.diag_worktree(base)
     assert (p / "setup-ran").read_text() == "xx"  # and not a third time once it completed
+
+
+def test_deny_patterns_follow_gitignore_style_double_star():
+    # gh-resolve's path_denylist ('**/schema.ts', '**/migrations/**', '**/wrangler.toml'):
+    # fnmatch missed the top-level file, since '**/' needed at least one directory.
+    from ilk2.batches import path_matches
+    yes = [("schema.ts", "**/schema.ts"), ("convex/schema.ts", "**/schema.ts"),
+           ("migrations/a.ts", "**/migrations/**"), ("convex/migrations/a.ts", "**/migrations/**"),
+           ("wrangler.toml", "**/wrangler.toml"), ("a/b", "a/**/b"), ("a/x/y/b", "a/**/b")]
+    no = [("convex/schemas.ts", "**/schema.ts"), ("convex/schema.tsx", "**/schema.ts"),
+          ("migrationsx/a.ts", "**/migrations/**")]
+    assert all(path_matches(p, [pat]) for p, pat in yes), [x for x in yes if not path_matches(*x[:1], [x[1]])]
+    assert not any(path_matches(p, [pat]) for p, pat in no)
+
+
+def test_submit_deny_paths_add_to_the_projects(ilk):
+    # gh-resolve keeps its denylist as the one source: `submit --deny-path` per batch, additive.
+    ilk.make_repo()
+    ilk.project(deny_paths=["nothing/"])
+    ilk.script([GOOD, {"write": "schema.ts", "text": "x = 1\n"}], [{"delete": "schema.ts"}])
+    from ilk2 import batches, plans
+    bid = batches.submit(ilk.s, "proj", plans.from_dict(one_step()), deny_paths=["**/schema.ts"])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "accepted"]
+    assert "schema.ts" in atts[0]["evidence"] and "denied" in atts[0]["evidence"]
+
+
+def test_deny_glob_star_stays_in_one_segment_like_gh_resolve():
+    # gh-resolve admission._matches_any: '**/' spans directories, a single '*' does not.
+    from ilk2.batches import path_matches
+    assert path_matches(".env.local", [".env*"]) and not path_matches("app/.env.local", [".env*"])
+    assert path_matches("app/.env.local", ["**/.env*"])
+    assert not path_matches("src/key.pem", ["*.pem"]) and path_matches("src/key.pem", ["**/*.pem"])
+    assert path_matches("packages/ui/components/x/_generated/api.ts", ["**/components/*/_generated/**"])
+    assert not path_matches("components/x/y/_generated/api.ts", ["**/components/*/_generated/**"])
+    assert path_matches("infra/aws/main.tf", ["infra/**"]) and path_matches("infra", ["infra/**"]) is False
+    assert path_matches("convex/migrations/a.ts", ["convex/migrations/"])  # a bare dir prefix
+
+
+def test_plain_scope_entries_cover_everything_below_them():
+    from ilk2.batches import path_matches
+    assert path_matches("tools/gh_resolve/x.py", ["tools/gh_resolve"])
+    assert path_matches("tools/gh_resolve/x.py", ["tools/gh_resolve/"])
+    assert path_matches("tools/gh_resolve", ["tools/gh_resolve"])
+    assert not path_matches("tools/gh_resolver/x.py", ["tools/gh_resolve"])

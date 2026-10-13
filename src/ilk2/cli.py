@@ -178,6 +178,9 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--base")
     sm.add_argument("--root")
     sm.add_argument("--branch", help="the branch to build on (created from --base if new; B1)")
+    sm.add_argument("--deny-path", action="append", default=[],
+                    help="a path or glob no step may change, for this batch only (repeatable; adds "
+                         "to the project's deny_paths)")
     sm.add_argument("--json", action="store_true")
 
     st = sub.add_parser("status")
@@ -309,7 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                 bid = batches.submit(s, a.project, spec, base=a.base, priority=a.priority,
                                      consumer_ref=a.consumer_ref,
                                      root=Path(a.root) if a.root else None,
-                                     originals={f.name: f.read_text()}, branch=a.branch)
+                                     originals={f.name: f.read_text()}, branch=a.branch,
+                                     deny_paths=a.deny_path)
             except batches.SubmitRejected as e:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
