@@ -137,3 +137,9 @@ def parent_of(root: Path, sha: str) -> str | None:
 def reset_hard(root: Path, sha: str) -> None:
     git(root, "reset", "-q", "--hard", sha)
     git(root, "clean", "-q", "-fd")
+
+
+def is_ancestor(root: Path, a: str, b: str) -> bool:
+    """True if commit a is an ancestor of (or equal to) commit b."""
+    return subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", a, b],
+                          capture_output=True).returncode == 0

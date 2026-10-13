@@ -79,11 +79,27 @@ def private_dirs() -> list[str]:
     return [os.path.realpath(p) for p in dirs]
 
 
+def user_temp_dir() -> str | None:
+    try:
+        out = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return os.path.realpath(out) if out else None
+
+
 def sandbox_profile(worktree: Path, files: AttemptFiles, extra: list[str] = (),
                     private: list[str] | None = None) -> str:
     allowed = [os.path.realpath(p) for p in (worktree, files.tmp, files.config, files.logs, *extra)]
     allowed += tool_dirs(worktree)
+    # macOS mktemp ignores TMPDIR and writes to the per-user temp dir: a consumer script's bare
+    # `mktemp` (kira's consistency-regression.sh) failed in V1's sandbox on the unchanged base
+    # (gh-resolve-e1, Oct 14). That dir holds temp files only.
     subpaths = " ".join(f'(subpath "{p}")' for p in allowed)
+    user_tmp = user_temp_dir()
+    # writes only: reads there are not restricted anyway, and adding it to the read allow-list
+    # would re-allow private dirs that happen to sit under it
+    write_extra = f' (subpath "{user_tmp}")' if user_tmp else ""
     private = private_dirs() if private is None else private
     # Contents only (file-read-data): path lookups and stat through these dirs keep working, so
     # git and realpath on the worktree under data/worktrees are unaffected. Later rules win.
@@ -91,7 +107,7 @@ def sandbox_profile(worktree: Path, files: AttemptFiles, extra: list[str] = (),
     reads = (f"(deny file-read-data {hidden})\n(allow file-read-data {subpaths})\n"
              if private else "")
     return ("(version 1)\n(allow default)\n(deny file-write*)\n"
-            f'(allow file-write* {subpaths} (subpath "/dev")\n'
+            f'(allow file-write* {subpaths}{write_extra} (subpath "/dev")\n'
             '  (regex #"^/private/tmp/claude-[0-9a-f]+-cwd$"))\n' + reads)
 
 
@@ -308,6 +324,8 @@ Rules:
 - Do not weaken tests to make them pass.
 - The loop engine is not part of your task: its store, logs and other attempts are not
   readable from here. Everything you need about earlier attempts is in this brief.
+- `git fetch` cannot update this repository's refs from here (the sandbox blocks it, and -q
+  hides the error). Do not trust a fetch you ran; use the refs as the driver left them.
 
 Declared gates (the driver runs these after you finish):
 {gates}
@@ -346,9 +364,12 @@ Plan documents (the MASTER and sub-plans this step refers to; a relative link su
 
 def brief(title: str, instructions: str, gate_lines: list[str], evidence: str | None = None,
           preload: str | None = None, scope: list[str] = (), scope_enforced: bool = True,
-          documents: list[str] = ()) -> str:
+          documents: list[str] = (), refreshed_at: str | None = None) -> str:
     b = BRIEF.format(title=title, instructions=instructions,
                      gates="\n".join(f"- `{g}`" for g in gate_lines) or "- (none)")
+    if refreshed_at:
+        b += (f"\nThe remote-tracking refs (origin/*) were fetched by the driver at {refreshed_at}, "
+              "when this run started: compare against them, not against a fetch of your own.\n")
     if documents:
         b += DOCUMENTS.format(paths="\n".join(f"- `{p}`" for p in documents))
     if scope:

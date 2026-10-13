@@ -45,6 +45,10 @@ class ProjectConfig:
     # sets about 3600). reserve: host runs kept free for this project even while it is idle.
     max_lease_s: float | None = None
     reserve: int = 0
+    # Lanes (docs/06 "Parallel plans", Chad's go Oct 14): independent work plans of one batch
+    # run at once, each in its own worktree and lane branch, merged into the batch branch when
+    # the plan's steps are accepted. 1 keeps the serial path exactly.
+    max_lanes: int = 1
     # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same
     # work as the repo it shadows, with no outward effect. Its roots are never leased to a
     # consumer, and its events carry shadow: true.
@@ -226,6 +230,11 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
             problems.append(f"branch {branch} is at {existing[:12]}, not the requested base "
                             f"{base[:12]}: merge the base into the branch first, or omit --base")
         base = existing
+    if cfg.shadow_of:
+        # A shadow clone's remote refs are only as fresh as its last fetch: kira-shadow's
+        # origin/main was July's, and a worker's own fetch cannot write the shared .git from its
+        # sandbox (kira-cloudflare-a2, Oct 14: wrong "on main?" verdicts). Refresh all of them.
+        gitops.git(repo, "fetch", "-q", "--prune", "origin", check=False)
     base_sha = gitops.rev(repo, base or proj["default_branch"])
     if base_sha is None and cfg.shadow_of:
         # B6: a shadow clone may not have the base yet; fetch only (its push URL is disabled)

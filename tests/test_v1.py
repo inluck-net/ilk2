@@ -233,3 +233,23 @@ def test_v1_status_cli_lists_what_still_needs_v1(ilk, v1data, agents, capsys):
     out = json.loads(capsys.readouterr().out)
     assert any("not owned by ilk2" in b for b in out["needs_v1"]) and out["plist"]
     assert cli.main(["v1", "off", "--apply"]) == 2  # refused: the registry still lists repos
+
+
+def test_a_shadow_projects_remote_refs_are_refreshed_and_the_brief_says_when(ilk, tmp_path):
+    # kira-cloudflare-a2, Oct 14: kira-shadow's origin/main was July's; a worker's fetch cannot
+    # write the shared .git from its sandbox, and -q hid the failure: wrong "on main?" verdicts.
+    from conftest import one_step
+    origin = ilk.make_repo()
+    c = _clone(ilk, tmp_path, "DISABLED-ilk2-shadow")
+    branch = ilk.git(origin, "rev-parse", "--abbrev-ref", "HEAD")
+    ilk.git(origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+            "-m", "landed after the clone")
+    new = ilk.git(origin, "rev-parse", "HEAD")
+    assert ilk.git(c, "rev-parse", f"origin/{branch}") != new
+    ilk.repo = c
+    ilk.project(shadow_of=str(tmp_path / "consumer"))
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.git(c, "rev-parse", f"origin/{branch}") == new  # refreshed at submit
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert "fetched by the driver at" in ilk.stub_prompts()[0]

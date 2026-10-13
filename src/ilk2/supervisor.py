@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 from . import batches, bounds, clock, faults, gitops, lease, paths, procs
-from .runs import counts_as_restart, fenced, has_unfinished_cancel, root_in_use_by_other
+from .runs import counts_as_restart, fenced, has_unfinished_cancel, ready_plans, root_in_use_by_other
 from .store import Conflict, Store, new_id
 
 HOST_BUDGET = 2  # Q15: ilk2 runs per host, an experiment guarded by load admission
@@ -248,9 +248,11 @@ class Supervisor:
 
     # -- requeue, restart counting, crash loops ----------------------------------------------
 
-    def current_step(self, batch_id: str):
+    def current_step(self, batch_id: str, plan_id: str | None = None):
+        """The step a lost run was on: its own plan's, for a lane run."""
         for p in self.s.all("SELECT * FROM plans WHERE batch_id = ? AND status IN ('pending', 'active') "
-                            "ORDER BY ord", batch_id):
+                            + ("AND id = ? " if plan_id else "") + "ORDER BY ord",
+                            batch_id, *([plan_id] if plan_id else [])):
             st = self.s.one("SELECT * FROM steps WHERE plan_id = ? AND status IN ('pending', 'accepting') "
                             "ORDER BY idx LIMIT 1", p["id"])
             if st:
@@ -278,7 +280,7 @@ class Supervisor:
         batch = self.s.get("batches", run["batch_id"])
         if batch["status"] != "active":
             return
-        step = self.current_step(run["batch_id"])
+        step = self.current_step(run["batch_id"], run["plan_id"] if "plan_id" in run.keys() else None)
         if step is None or not count:
             return
         n = step["restart_count"] + 1
@@ -417,16 +419,24 @@ class Supervisor:
         return None
 
     def admit(self) -> None:
-        live = {r["batch_id"] for r in self.s.all("SELECT batch_id FROM runs WHERE status IN "
-                                                   "('starting', 'running')")}
+        live_runs = self.s.all("SELECT batch_id FROM runs WHERE status IN ('starting', 'running')")
+        live = {r["batch_id"] for r in live_runs}
+        n_live = len(live_runs)  # the host budget counts runs: under lanes a batch has several
         candidates = self.s.all("SELECT * FROM batches WHERE status IN ('queued', 'active') "
                                 "ORDER BY priority DESC, created_at")
         load = None
         load_checked = False
         for b in candidates:
+            lane_plan = None
+            cfg = batches.project_config(self.s, b["project_id"])
             if b["id"] in live:
                 self.s.clear_refusal(b["id"], "host-budget")
-                continue
+                lane_plan = self.next_lane(b, cfg)
+                if lane_plan is None:
+                    continue
+            elif cfg.max_lanes > 1:
+                ready = ready_plans(self.s, b["id"])
+                lane_plan = ready[0]["id"] if ready else None  # none ready: a plain run ships or blocks
             if not self.wait_over(b["id"]):
                 continue
             per_project = sum(1 for x in self.s.all(
@@ -446,8 +456,8 @@ class Supervisor:
                               "that run ends", "supervisor")
                 continue
             reserved = self.reserved_for_others(b["project_id"])
-            if len(live) + reserved >= self.host_budget:
-                why = f"{len(live)} of {self.host_budget} runs in use" + (
+            if n_live + reserved >= self.host_budget:
+                why = f"{n_live} of {self.host_budget} runs in use" + (
                     f", {reserved} reserved for other projects (R5)" if reserved else "")
                 self.s.refuse(b["id"], "host-budget", why, "a run ends", "supervisor")
                 continue
@@ -459,8 +469,9 @@ class Supervisor:
             for reason in ("project-limit", "host-budget", "host-load", "waiting-api", "quota",
                            "crash-backoff", "root-lease", "root-busy"):
                 self.s.clear_refusal(b["id"], reason)
-            self.spawn(b)
+            self.spawn(b, plan_id=lane_plan)
             live.add(b["id"])
+            n_live += 1
 
     def gc_worktrees(self) -> list[str]:
         """Remove what a finished batch left on disk once it has been finished for
@@ -508,6 +519,22 @@ class Supervisor:
             self.s.event("host.config", {"host_budget": int(hc["host_budget"]), "was": self.host_budget})
             self.host_budget = int(hc["host_budget"])
 
+    def next_lane(self, b, cfg) -> str | None:
+        """Another lane for a batch that already runs: under max_lanes, once its base is
+        measured (the first run measures it), and when a plan no live run holds is ready."""
+        if cfg.max_lanes <= 1:
+            return None
+        n = self.s.one("SELECT COUNT(*) n FROM runs WHERE batch_id = ? AND status IN ('starting', "
+                       "'running')", b["id"])["n"]
+        if n >= cfg.max_lanes or not self.s.one(
+                "SELECT 1 FROM base_measurements WHERE batch_id = ? LIMIT 1", b["id"]):
+            return None
+        if self.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', 'running') "
+                      "AND plan_id IS NULL", b["id"]):
+            return None  # a plain run is shipping or blocking the batch
+        ready = ready_plans(self.s, b["id"])
+        return ready[0]["id"] if ready else None
+
     def reserved_for_others(self, project_id: str) -> int:
         """Runs other projects reserve and are not using now (R5)."""
         total = 0
@@ -520,12 +547,12 @@ class Supervisor:
                 total += max(0, want - used)
         return total
 
-    def spawn(self, b) -> str:
+    def spawn(self, b, plan_id: str | None = None) -> str:
         if b["status"] == "queued":
             self.s.transition("batches", b["id"], "active", actor="supervisor", reason="admitted",
                               expect_from={"queued"})
         rid = new_id("r")
-        self.s.insert("runs", {"id": rid, "batch_id": b["id"], "status": "starting",
+        self.s.insert("runs", {"id": rid, "batch_id": b["id"], "status": "starting", "plan_id": plan_id,
                                "created_at": clock.wall(), "spawned_mono": clock.mono(),
                                "boot_time": clock.boot_time()})
         log = paths.run_dir(rid)

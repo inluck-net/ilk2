@@ -21,7 +21,7 @@ from .gates import vitest
 from .gates.env import pinned_env
 from .plans import Gate, v1_documents
 from .runs import (NOT_A_RESTART, Stop, counts_as_restart, fenced, has_unfinished_cancel,  # noqa: F401
-                   root_in_use_by_other)
+                   is_root_plan, lane_names, root_in_use_by_other)
 from .store import Conflict, Store, StoreBusy, dumps, new_id
 
 LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lock.yaml",
@@ -58,6 +58,15 @@ class Driver:
         self.root = Path(batch["execution_root"])
         self.branch = batch["branch"]
         self.base = batch["base_commit"]
+        # Lanes (docs/02 §2.4.2a): a run bound to a plan. A work plan under max_lanes > 1 runs
+        # in its own worktree and lane branch; repair and verification plans run in the batch
+        # root. batch_root/batch_branch always name the batch's own.
+        self.batch_root, self.batch_branch = self.root, self.branch
+        self.plan_id = run["plan_id"] if "plan_id" in run.keys() else None
+        self.plan = s.get("plans", self.plan_id) if self.plan_id else None
+        self.lane = bool(self.plan) and not is_root_plan(self.plan) and self.cfg.max_lanes > 1
+        if self.lane:
+            self.root, self.branch = lane_names(batch, self.plan["slug"])
         self.dir = paths.run_dir(run_id)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.api_spent = 0.0
@@ -110,6 +119,7 @@ class Driver:
         except Exception:  # noqa: BLE001 - recorded, the supervisor requeues
             reason = "error"
             (self.dir / "driver-error.txt").write_text(traceback.format_exc())
+        self.release_lock()
         try:
             self.s.transition("runs", self.run_id, "ended", actor="driver", reason=reason,
                               fields={"terminal_reason": reason, "ended_at": clock.wall()})
@@ -122,22 +132,171 @@ class Driver:
         return list(self.cfg.deny_paths) + list(snap.get("deny_paths") or [])
 
     def take_root(self) -> None:
-        """Hold the root's lease and stand on this batch's branch (R4). A root a consumer
-        holds is waited for behind a refusal row that the supervisor clears on release."""
-        row = lease.get(self.s, str(self.root))
+        """Hold the batch root's lease and stand on the batch branch (R4); a lane then stands
+        in its own worktree, and a repair or verification plan's run takes the batch's merge
+        lock for its whole run (nothing merges under it)."""
+        self.refresh_remote()
+        self._take_batch_root()
+        if self.lane:
+            self.make_lane()
+        elif self.plan_id:
+            self.take_lock()
+
+    def refresh_remote(self) -> None:
+        """A shadow project's remote refs are refreshed at every run start, outside the
+        sandbox: a worker cannot fetch into the shared .git, and a batch runs for hours."""
+        self.refreshed_at = None
+        if not self.cfg.shadow_of:
+            return
+        gitops.git(self.repo, "fetch", "-q", "--prune", "origin", check=False)
+        self.refreshed_at = time.strftime("%Y-%m-%d %H:%M %Z")
+        self.event("remote.refreshed", at=self.refreshed_at)
+
+    def _take_batch_root(self) -> None:
+        """A root a consumer holds is waited for behind a refusal row that the supervisor
+        clears on release."""
+        root, branch = self.batch_root, self.batch_branch
+        row = lease.get(self.s, str(root))
         if row and row["holder"] in ("consumer", "consumer-expired"):
             self.s.refuse(self.batch_id, "root-lease", f"root {self.root} is held by "
                           f"{row['holder']} {row['owner']}", "cleared by the supervisor once the "
                           "consumer releases the root", "supervisor")
             raise Stop("waiting-lease")
         if row and row["holder"] == "released":
-            lease.driver_acquire(self.s, str(self.root), row["generation"])
-        cur = gitops.git(self.root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
-        if cur != self.branch:
-            if gitops.branch_head(self.root, self.branch) is None:
-                gitops.git(self.root, "checkout", "-q", "-b", self.branch, self.base)
+            lease.driver_acquire(self.s, str(root), row["generation"])
+        cur = gitops.git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
+        if cur != branch:
+            if gitops.branch_head(root, branch) is None:
+                gitops.git(root, "checkout", "-q", "-b", branch, self.base)
             else:
-                gitops.git(self.root, "checkout", "-q", self.branch)
+                gitops.git(root, "checkout", "-q", branch)
+
+    # -- lanes (docs/02 §2.4.2a) ------------------------------------------------------------
+
+    def make_lane(self) -> None:
+        """The lane's worktree, cut from the batch head when the lane first starts; reused
+        (with the step's kept work) when the plan's run is requeued."""
+        if (self.root / ".git").exists():
+            return
+        if gitops.branch_head(self.repo, self.branch):
+            self.root.parent.mkdir(parents=True, exist_ok=True)
+            gitops.git(self.repo, "worktree", "add", "-q", str(self.root), self.branch)
+        else:
+            head = gitops.branch_head(self.batch_root, self.batch_branch)
+            gitops.add_worktree(self.repo, self.root, head, branch=self.branch)
+        self.event("lane.started", plan=self.plan["slug"], root=str(self.root))
+        if self.cfg.setup:
+            self.setup(self.root)
+
+    def lock_key(self) -> str:
+        return f"merge-lock:{self.batch_id}"
+
+    def take_lock(self) -> None:
+        """The batch's merge lock: one merge, or one run working in the batch root, at a time.
+        A lock whose owner run has ended is free."""
+        while True:
+            with self.s.tx() as c:
+                row = c.execute("SELECT value FROM meta WHERE key = ?", (self.lock_key(),)).fetchone()
+                owner = row["value"] if row else None
+                live = owner and owner != self.run_id and c.execute(
+                    "SELECT 1 FROM runs WHERE id = ? AND status IN ('starting', 'running')",
+                    (owner,)).fetchone()
+                if not live:
+                    c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE "
+                              "SET value = excluded.value", (self.lock_key(), self.run_id))
+                    return
+            self.check_control()
+            time.sleep(min(5.0, self.b.tick))
+
+    def release_lock(self) -> None:
+        try:
+            with self.s.tx() as c:
+                c.execute("DELETE FROM meta WHERE key = ? AND value = ?", (self.lock_key(), self.run_id))
+        except Exception:  # noqa: BLE001 - an ended run's lock counts as free anyway
+            pass
+
+    def merge_lane(self) -> None:
+        """Merge the lane into the batch branch under the merge lock, re-gate the plan's gates
+        on the merged head, and ship the plan. A conflict or a red re-gate adds a repair plan
+        on the batch branch, which runs before anything else (§2.5.7)."""
+        self.take_lock()
+        root, branch, slug = self.batch_root, self.batch_branch, self.plan["slug"]
+        with self.phase("merge", plan=slug):
+            if gitops.git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).strip():
+                gitops.git(root, "merge", "--abort", check=False)  # a merge a crash left behind
+            parent = gitops.branch_head(root, branch)
+            lane_head = gitops.branch_head(self.repo, self.branch)
+            done = gitops.is_ancestor(root, lane_head, parent)  # merged before a crash: re-gate only
+            repair = None
+            if not done:
+                out = gitops.git(root, *gitops.NO_HOOKS, "merge", "--no-ff", "--no-edit", "-m",
+                                 f"Merge plan {slug} (ilk2 lane)", self.branch,
+                                 env=gitops.IDENT, check=False)
+                if not gitops.is_ancestor(root, lane_head, gitops.branch_head(root, branch)):
+                    files = gitops.git(root, "diff", "--name-only", "--diff-filter=U", check=False).split()
+                    gitops.git(root, "merge", "--abort", check=False)
+                    repair = ("conflict", self.conflict_brief(files, parent, lane_head, out))
+            if repair is None:
+                red = self.regate(parent)
+                if red:
+                    repair = ("red", red)
+            if repair:
+                self.add_merge_repair(*repair)
+            head = gitops.branch_head(root, branch)
+            self.s.transition("plans", self.plan_id, "shipped", actor="driver",
+                              reason="lane merged" if repair is None else f"lane merged; repair: {repair[0]}")
+            lease.set_accepted_head(self.s, str(root), head)
+            self.event("lane.merged", plan=slug, head=head, repair=repair[0] if repair else None)
+        gitops.remove_worktree(self.repo, self.root)
+
+    def conflict_brief(self, files: list[str], parent: str, lane_head: str, out: str) -> str:
+        return (f"Plan {self.plan['slug']} was built in its own lane (branch {self.branch}) from an "
+                f"earlier batch head, and merging it into the batch branch conflicts in: "
+                f"{', '.join(files[:30]) or '(see output)'}.\n\nApply the plan's changes onto the "
+                f"current batch head, keeping what the other plans changed. See them with "
+                f"`git diff $(git merge-base {parent} {lane_head}) {lane_head}`. The plan's own "
+                f"instructions and gates still apply.\n\nMerge output:\n{out[-2000:]}")
+
+    def regate(self, parent: str) -> str | None:
+        """The plan's gates on the merged batch head, against the batch base."""
+        seen, reds = set(), []
+        for r in self.s.all("SELECT gates FROM steps WHERE plan_id = ? ORDER BY idx", self.plan_id):
+            for g in json.loads(r["gates"]):
+                key = json.dumps(g, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                gate = Gate(**g)
+                env = self.env()
+                spec = gates.spec_version(gate, self.batch_root, env)
+                res = gates.measure(gate, self.batch_root, env, self.dir / "gates", spec)
+                base = {} if gate.adapter == "shell" else self.base_for(gate, spec)
+                v = gates.judge(res, base, [], obligations=False)
+                if v.outcome == "unmeasured":
+                    reds.append(f"Gate `{gate.name}` could not be measured on the merged head: {res.reason}")
+                elif v.outcome == "fail":
+                    reds.append(f"Gate `{gate.name}` failed on the merged head: `{' '.join(gate.command)}`\n"
+                                + "\n".join(f"- {tid}" for tid in v.new_failures[:30])
+                                + "\n\nOutput tail:\n" + res.tail[-2000:])
+        return "\n\n".join(reds) if reds else None
+
+    def add_merge_repair(self, kind: str, brief: str) -> None:
+        last = self.s.one("SELECT id FROM steps WHERE plan_id = ? ORDER BY idx DESC LIMIT 1",
+                          self.plan_id)["id"]
+        gl, seen = [], set()
+        for r in self.s.all("SELECT gates FROM steps WHERE plan_id = ? ORDER BY idx", self.plan_id):
+            for g in json.loads(r["gates"]):
+                if json.dumps(g, sort_keys=True) not in seen:
+                    seen.add(json.dumps(g, sort_keys=True))
+                    gl.append(g)
+        slug = f"merge-{self.plan['slug']}"
+        b = self.s.get("batches", self.batch_id)
+        batches.amend(self.s, self.batch_id, [{
+            "op": "add_plan", "slug": slug, "repair_of_step_id": last,
+            "steps": [{"title": f"Repair the merge of plan {self.plan['slug']} ({kind})",
+                       "instructions": brief, "gates": gl}]}],
+            expect_version=b["version"], actor="driver", reason=f"lane-merge-{kind}")
+        self.event("repair.added", plan=slug, repair_of=last, kind=f"merge-{kind}")
 
     # -- activation: setup and base measurement (§2.5.3, §2.11.2) -------------------------
 
@@ -224,6 +383,17 @@ class Driver:
         while True:
             self.check_control()
             step = self.next_step()
+            if step == "lane-merge":
+                self.merge_lane()
+                step = "plan-done"
+            if step == "plan-done":
+                if all(p["status"] == "shipped" for p in self.s.all(
+                        "SELECT status FROM plans WHERE batch_id = ?", self.batch_id)):
+                    self.ship_batch()
+                    return "shipped"
+                return "plan-done"
+            if step == "plan-blocked":
+                return "plan-blocked"
             if step == "shipped":
                 self.ship_batch()
                 return "shipped"
@@ -242,6 +412,21 @@ class Driver:
             raise Stop("drained")
 
     def next_step(self):
+        if self.plan_id:  # a run bound to one plan (lanes)
+            plan = self.s.get("plans", self.plan_id)
+            if plan["status"] == "shipped":
+                return "plan-done"
+            if plan["status"] == "blocked":
+                return "plan-blocked"
+            step = self.s.one("SELECT * FROM steps WHERE plan_id = ? AND status != 'accepted' "
+                              "ORDER BY idx LIMIT 1", self.plan_id)
+            if step is None:
+                if self.lane:
+                    return "lane-merge"
+                self.s.transition("plans", self.plan_id, "shipped", actor="driver",
+                                  reason="all steps accepted")
+                return "plan-done"
+            return "plan-blocked" if step["status"] == "blocked" else step
         plans = self.s.all("SELECT * FROM plans WHERE batch_id = ? ORDER BY ord", self.batch_id)
         status = {p["slug"]: p["status"] for p in plans}
         repairs = [p for p in plans if p["repair_of_step_id"] and p["status"] != "shipped"]
@@ -287,10 +472,10 @@ class Driver:
         return "blocked"
 
     def ship_batch(self) -> None:
-        head = gitops.branch_head(self.root, self.branch)
+        head = gitops.branch_head(self.batch_root, self.batch_branch)
         self.s.transition("batches", self.batch_id, "shipped", actor="driver", reason="all plans shipped",
                           expect_from={"active"}, fields={"terminal_reason": "shipped"})
-        lease.driver_release(self.s, str(self.root), head)
+        lease.driver_release(self.s, str(self.batch_root), head)
         self.cleanup_diag()
         self.event("batch.shipped", head=head)
 
@@ -552,7 +737,7 @@ class Driver:
                           step["title"], step["instructions"],
                           [" ".join(g.command) for g in gate_list], evidence, preload=None,
                           scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope,
-                          documents=docs))
+                          documents=docs, refreshed_at=getattr(self, "refreshed_at", None)))
         elif resume:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
@@ -565,7 +750,8 @@ class Driver:
             prompt = worker.brief(step["title"], step["instructions"],
                                   [" ".join(g.command) for g in gate_list], evidence, preload=pre,
                                   scope=json.loads(step["scope"]),
-                                  scope_enforced=self.cfg.enforce_scope, documents=docs)
+                                  scope_enforced=self.cfg.enforce_scope, documents=docs,
+                                  refreshed_at=getattr(self, "refreshed_at", None))
         if self.s.get("plans", step["plan_id"])["verification"] and not resume:
             prompt = VERIFY_NOTE + prompt
         with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume),
@@ -862,15 +1048,16 @@ class Driver:
                               fields={"accepted_commit": sha, "accepting": None})
             last = self.s.one("SELECT COUNT(*) AS n FROM steps WHERE plan_id = ? AND status != "
                               "'accepted'", step["plan_id"])["n"] == 0
-            if last:
+            if last and not self.lane:  # a lane's plan ships when it has merged
                 self.s.transition("plans", step["plan_id"], "shipped", actor="driver",
                                   reason="last step accepted")
             lease.set_accepted_head(self.s, str(self.root), sha)
             self.event("step.accepted", step=step_id, commit=sha, plan_shipped=last)
 
     def recover_accepting(self) -> None:
-        for step in self.s.all("SELECT * FROM steps WHERE batch_id = ? AND status = 'accepting'",
-                               self.batch_id):
+        for step in self.s.all("SELECT * FROM steps WHERE batch_id = ? AND status = 'accepting'"
+                               + (" AND plan_id = ?" if self.plan_id else ""),
+                               self.batch_id, *([self.plan_id] if self.plan_id else [])):
             intent = json.loads(step["accepting"])
             aid, parent, tree = intent["attempt_id"], intent["parent"], intent["tree"]
             sha = gitops.find_trailer_commit(self.root, self.branch, aid)

@@ -208,6 +208,11 @@ class Store:
                 if stmt.strip():
                     c.execute(stmt)
             c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
+            # Added columns (ALTER TABLE only adds; old releases ignore them).
+            for table, col, decl in (("runs", "plan_id", "TEXT"),):  # lanes (docs/06, Oct 14)
+                have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+                if col not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             c.execute("INSERT OR IGNORE INTO supervisor(id) VALUES (1)")
 
     # -- reads --------------------------------------------------------------------------

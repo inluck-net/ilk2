@@ -93,11 +93,19 @@ def test_orphan_swept_after_exit(env):
 
 
 def test_sandbox_denies_write_outside(env, tmp_path):
+    # Outside every allowed path: not the attempt dirs, not the per-user temp dir (where pytest's
+    # tmp_path lives, and which the sandbox allows for mktemp).
+    import shutil
+    import tempfile
     cfg, files, wt = env
-    script(files, actions=[{"write": str(tmp_path / "outside.txt"), "text": "x"}])
-    out = worker.dispatch(cfg, files, wt, "x").wait(30)
-    assert out == "crashed"
-    assert not (tmp_path / "outside.txt").exists()
+    out_dir = Path(tempfile.mkdtemp(dir="/private/tmp", prefix="ilk2-test-outside-"))
+    try:
+        script(files, actions=[{"write": str(out_dir / "outside.txt"), "text": "x"}])
+        out = worker.dispatch(cfg, files, wt, "x").wait(30)
+        assert out == "crashed"
+        assert not (out_dir / "outside.txt").exists()
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def test_prompt_not_in_argv_and_env_scrubbed(env, monkeypatch):
@@ -295,3 +303,13 @@ def test_private_dirs_hide_data_not_v1_code(monkeypatch, tmp_path):
     hidden = worker.private_dirs()
     assert os.path.realpath(tmp_path / ".ilk-data") in hidden
     assert os.path.realpath(tmp_path / ".ilk") not in hidden
+
+
+def test_sandboxed_bare_mktemp_works(env, tmp_path):
+    # macOS mktemp ignores TMPDIR; kira's consistency script's bare mktemp failed in V1's sandbox.
+    cfg, files, wt = env
+    sb = tmp_path / "m.sb"
+    sb.write_text(worker.sandbox_profile(wt, files, private=[]))
+    r = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(sb), "/bin/bash", "-c",
+                        'f=$(mktemp) && echo ok && rm "$f"'], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
