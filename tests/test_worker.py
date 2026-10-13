@@ -269,3 +269,20 @@ def test_brief_states_scope_as_limit_or_advice():
     assert "may change" in hard and "advice" not in hard
     assert "advice" in soft and "no longer applies" in soft
     assert "may change" not in worker.brief("t", "i", ["g"])
+
+
+def test_preload_puts_the_named_ranges_first_and_caps_identifier_windows(tmp_path):
+    # gh-resolve, Oct 13: windows from 3 large files filled the 150k preload; the sub-plan's
+    # file:line ranges and the gate's test files never made it in.
+    big = "\n".join(f"x = 'engine' # {i}" for i in range(3000))
+    for name in ("a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py"):
+        (tmp_path / name).write_text(big)
+    (tmp_path / "far.py").write_text("\n".join(f"line_{i} = {i}" for i in range(1, 2001)))
+    (tmp_path / "test_x.py").write_text("def test_x():\n    assert True\n")
+    text = worker.preload(tmp_path, ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py"],
+                          "Read `far.py:1500-1504` and use `engine`.",
+                          [["python3", "-m", "pytest", "test_x.py"]], "")
+    assert "1502: line_1502 = 1502" in text and "1490: " in text  # padded by REF_PAD
+    assert text.index("1502: line_1502") < text.index("## a.py")
+    assert "def test_x" in text                                  # the gate's test file
+    assert "[preload truncated]" not in text

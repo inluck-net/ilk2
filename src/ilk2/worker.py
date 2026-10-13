@@ -365,6 +365,37 @@ def brief(title: str, instructions: str, gate_lines: list[str], evidence: str | 
 WHOLE_FILE_MAX_LINES = 600
 WINDOW = 30
 PRELOAD_CAP = 150_000
+REF_PAD = 10
+# Judgment call (Oct 13): identifier windows capped at 25k characters per file. On a gh-resolve
+# step, windows from 3 large files filled the whole 150k preload and pushed out the gate's test
+# files and the ranges the sub-plan names. Wrong if workers then re-read windows they lost.
+WINDOWS_PER_FILE_CAP = 25_000
+_REF = re.compile(r"([\w./-]+\.\w+):(\d+)(?:-(\d+))?")
+
+
+def named_ranges(root: Path, instructions: str) -> dict[str, list[tuple[int, int]]]:
+    """`path:start-end` and `path:line` references in a step's text, for files that exist:
+    0-based [a, b) spans padded by REF_PAD lines and merged per file."""
+    out: dict[str, list[tuple[int, int]]] = {}
+    for path, a, b in _REF.findall(instructions):
+        p = root / path
+        if not p.is_file():
+            continue
+        lo, hi = int(a), int(b or a)
+        out.setdefault(path, []).append((max(0, lo - 1 - REF_PAD), hi + REF_PAD))
+    for path, spans in out.items():
+        merged: list[tuple[int, int]] = []
+        for a, b in sorted(spans):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        out[path] = merged
+    return out
+
+
+def _numbered(lines: list[str], a: int, b: int) -> str:
+    return "```\n" + "\n".join(f"{i + 1}: {lines[i]}" for i in range(a, min(b, len(lines)))) + "\n```\n"
 
 
 def _windows(lines: list[str], idents: set[str]) -> list[tuple[int, int]]:
@@ -399,15 +430,31 @@ def preload(root: Path, scope: list[str], instructions: str, gate_commands: list
             if not a.startswith("-") and (root / a.split("::")[0]).is_file():
                 files.append(a.split("::")[0])
     parts = ["# Preloaded context (assembled by the driver)\n"]
+    # First the ranges the step's text names (gh-resolve sub-plans name file:line ranges to
+    # read; the worker otherwise reads each one in its own turn).
+    ranges = named_ranges(root, instructions)
+    for rel, spans in ranges.items():
+        lines = (root / rel).read_text(errors="replace").splitlines()
+        parts.append(f"\n## {rel}: the ranges the step names ({len(lines)} lines in all)\n")
+        parts += [_numbered(lines, a, b) for a, b in spans]
     for rel in dict.fromkeys(files):
         body = (root / rel).read_text(errors="replace")
         lines = body.splitlines()
         if len(lines) <= WHOLE_FILE_MAX_LINES:
-            parts.append(f"\n## {rel} ({len(lines)} lines)\n```\n{body}\n```\n")
+            if rel not in ranges:
+                parts.append(f"\n## {rel} ({len(lines)} lines)\n```\n{body}\n```\n")
         else:
-            parts.append(f"\n## {rel} ({len(lines)} lines; windows around names the step uses)\n")
+            wins, size = [], 0
             for a, b in _windows(lines, idents):
-                parts.append("```\n" + "\n".join(f"{i + 1}: {lines[i]}" for i in range(a, b)) + "\n```\n")
+                w = _numbered(lines, a, b)
+                if size + len(w) > WINDOWS_PER_FILE_CAP:
+                    wins.append(f"[more windows in {rel} left out: read the file]\n")
+                    break
+                wins.append(w)
+                size += len(w)
+            if wins:
+                parts.append(f"\n## {rel} ({len(lines)} lines; windows around names the step uses)\n")
+                parts += wins
     if earlier_diff:
         parts.append(f"\n## Changes from this batch's earlier steps\n```diff\n{earlier_diff}\n```\n")
     text = "".join(parts)
