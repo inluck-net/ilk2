@@ -164,3 +164,16 @@ def test_push_ships_a_bundle_and_upgrades_the_same_version(tmp_path, monkeypatch
     text = log.read_text()
     assert "rezmac:/tmp/ilk2.bundle" in text
     assert "release upgrade --version 0.2.0+g1" in text and "git fetch -q /tmp/ilk2.bundle main" in text
+
+
+def test_the_supervisor_entry_loads_no_driver_worker_gates_or_cli():
+    # An upgrade drains only when code the running supervisor loaded changed (docs/02 2.7).
+    import subprocess
+    import sys
+    code = ("import sys, runpy; sys.argv = ['ilk2', 'supervise']; import ilk2.supervisor as s; "
+            "s.main = lambda stop_after=None: (print(','.join(sorted(m for m in sys.modules "
+            "if m.startswith('ilk2')))), 0)[1]; runpy.run_module('ilk2', run_name='__main__')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout
+    loaded = set(out.strip().split(","))
+    assert "ilk2.supervisor" in loaded and "ilk2.runs" in loaded
+    assert not loaded & {"ilk2.cli", "ilk2.driver", "ilk2.worker", "ilk2.gates", "ilk2.attribution"}
