@@ -147,7 +147,12 @@ def test_s5_api_errors_not_counted(ilk):
     assert ilk.s.open_refusals(bid) == [] and ilk.s.open_human_rows(bid) == []
 
 
-def test_s19_possibly_inherited_marked(ilk):
+def test_s19_possibly_inherited_marked(ilk, monkeypatch):
+    # The marking is what an unattributed inherited failure gets. Attribution would otherwise
+    # trace this one to step 0 within its budget (2 s at the test time scale) on an idle host,
+    # and pass the step; under load it ran out, which is why this test passed only on a busy
+    # machine (Oct 14). Budget 0: attribution ends at `budget`, deterministically.
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"attribution_wall": 0}))
     ilk.make_repo({"calc.py": "def add(a, b):\n    return a + b\n",
                    "b.py": "B = 1\n",
                    "tests/conftest.py": "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
