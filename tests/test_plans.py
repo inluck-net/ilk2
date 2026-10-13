@@ -80,3 +80,16 @@ def test_v1_remove_every_xfail_maps_to_file_must_pass():
     assert p.steps[0].must_pass == ["skills/a/tests/test_x.py"]
     partial = text.replace("Remove every xfail", "Remove AC-1's xfail")
     assert plans.parse_v1_subplan(partial).steps[0].must_pass == []
+
+
+def test_s9_rejected_at_submit_and_nothing_runs(ilk):
+    import pytest as _pytest
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    for g in ([], [{"name": "unit", "adapter": "pytest", "command": ["no-such-runner-xyz", "x"]}]):
+        spec = {"plans": [{"slug": "p", "steps": [{"title": "t", "instructions": "x", "gates": g}]}]}
+        with _pytest.raises(batches.SubmitRejected):
+            ilk.submit(spec)
+    assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
+    assert ilk.s.one("SELECT COUNT(*) n FROM runs")["n"] == 0

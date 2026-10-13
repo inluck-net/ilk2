@@ -115,13 +115,20 @@ def test_scope_violation_is_red(ilk):
 def test_s5_api_errors_not_counted(ilk):
     ilk.make_repo()
     ilk.project()
-    ilk.script([{"api_error": 429}], [{"api_error": 503}], [GOOD])
+    # §2.11.4: 429/5xx for 10 minutes. Backoff 1, 2, 4, 8 min (time-scaled) spans 15.
+    ilk.script([{"api_error": 429}], [{"api_error": 503}], [{"api_error": 429}],
+               [{"api_error": 502}], [GOOD])
     bid = ilk.submit(one_step())
     assert ilk.drive_inprocess(bid) == "shipped"
     step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
     assert step["attempt_count"] == 1
     outs = [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts ORDER BY created_at")]
-    assert outs == ["api", "api", "accepted"]
+    assert outs == ["api"] * 4 + ["accepted"]
+    from ilk2 import bounds
+    scale = bounds.load().api_backoff_first / 60
+    waited = sum(e["payload"]["seconds"] for e in ilk.s.events_since(0) if e["kind"] == "api.backoff")
+    assert waited / scale >= 10 * 60  # in unscaled terms, more than 10 minutes of errors
+    assert ilk.s.open_refusals(bid) == [] and ilk.s.open_human_rows(bid) == []
 
 
 def test_s19_possibly_inherited_marked(ilk):
@@ -144,25 +151,42 @@ def test_s19_possibly_inherited_marked(ilk):
     assert details["possibly_inherited"] == ["tests/test_b.py::test_b"]
     ev = ilk.s.all("SELECT evidence FROM attempts WHERE evidence IS NOT NULL")[0]["evidence"]
     assert "possibly-inherited" in ev
+    # the brief of step 1's second attempt (the 3rd worker call) carries the probe's verdict
+    prompt = ilk.stub_prompts()[2]
+    assert "tests/test_b.py::test_b [possibly-inherited" in prompt
 
 
 def test_s14_crash_points_recover_without_duplicates(ilk):
     ilk.make_repo()
     ilk.project()
-    for point in ("after-intent", "after-commit", "before-finalize"):
+    # §2.4.1: after-intent recovers by undo (a new attempt); after-commit and before-finalize
+    # recover by finalizing the commit already made (no new worker call, same SHA).
+    for point, commits_before, undo in (("after-intent", 0, True), ("after-commit", 1, False),
+                                        ("before-finalize", 1, False)):
         ilk.script([GOOD], [GOOD])
         bid = ilk.submit(one_step())
         rc = ilk.drive_subprocess(bid, faults=point)
         assert rc != 0
         step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
         assert step["status"] == "accepting", point
+        b = ilk.s.get("batches", bid)
+        root, branch = b["execution_root"], b["branch"]
+        assert len(commits_with_trailer(ilk, root, branch)) == commits_before, point
+        crashed_head = ilk.git(root, "rev-parse", branch)
+        assert ilk.stub_calls() == 1, point
         ilk.s.update("runs", ilk.s.one("SELECT id FROM runs WHERE batch_id = ? AND status != 'ended'",
                                        bid)["id"], {"status": "ended", "terminal_reason": "lost"},
                      actor="test", reason="crash")
         assert ilk.drive_inprocess(bid) == "shipped", point
-        b = ilk.s.get("batches", bid)
-        assert len(commits_with_trailer(ilk, b["execution_root"], b["branch"])) == 1, point
-        assert ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)["accepted_commit"]
+        step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+        assert len(commits_with_trailer(ilk, root, branch)) == 1, point
+        assert step["accepted_commit"] == ilk.git(root, "rev-parse", branch), point
+        assert ilk.stub_calls() == (2 if undo else 1), point
+        if not undo:
+            assert step["accepted_commit"] == crashed_head, point  # the commit was kept
+        recovery = [e["payload"]["action"] for e in ilk.s.events_since(0)
+                    if e["kind"] == "recovery" and e["batch_id"] == bid]
+        assert recovery == (["undo"] if undo else ["finalize"]), point
 
 
 def test_amend_pending_only_version_checked_and_journalled(ilk):
@@ -293,3 +317,26 @@ def test_shell_gate_red_at_base_blocks_the_batch(ilk):
     assert ilk.stub_calls() == 0
     row = ilk.s.open_human_rows(bid)[0]
     assert "red at the base" in row["detail"]
+
+
+def test_s21_timeout_class_rerun_costs_no_attempt(ilk):
+    marker = ilk.tmp / "timed-out-once"
+    flaky = (f"import os, pytest\nfrom calc import add\nM = {str(marker)!r}\n"
+             "def test_flaky():\n"
+             "    try:\n        add(1, 1)\n    except NotImplementedError:\n        return\n"
+             "    if not os.path.exists(M):\n"
+             "        open(M, 'w').close()\n"
+             "        pytest.fail('Timeout >15.0s')\n")
+    ilk.make_repo({"calc.py": "def add(a, b):\n    raise NotImplementedError\n",
+                   "tests/conftest.py": "import sys, os\n"
+                   "sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n",
+                   "tests/test_flaky.py": flaky})
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_flaky.py")]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert marker.exists()  # the timeout-class failure happened after the step, and was re-run
+    assert ilk.stub_calls() == 1
+    step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    assert step["attempt_count"] == 1

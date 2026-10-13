@@ -104,7 +104,15 @@ Judgment calls in these fixes:
 - **C1:** `cancelled` is a new terminal state for plans and steps, not a reuse of `blocked`. No column changes, so no migration.
 - **C7:** a shell gate red at the base uses the existing `base-unmeasured` reason, with the detail "red at the base".
 
-The S1-S27 strength table asked of Codex was not in its reply; to request again.
+### Stall suite strength review (Codex, Oct 13, at `275ae76`)
+
+Codex rated S1-S27: 11 STRONG, 16 WEAK, 0 MISSING (prompt: `~/Documents/handoffs/ilk2-stall-suite-table-prompt.md`). The builder checked each claim against the tests:
+- **CI never ran the vitest cases.** CI had no Node, so `tests/test_vitest.py` skipped (CI: 104 passed, 3 skipped). S20 and S21-vitest had only run on chad-mbp. CI now installs Node 20 and vitest 3.2.4 from `tests/fixtures/vitest-cache/package.json`, and with `ILK2_REQUIRE_VITEST=1` a missing cache fails the run instead of skipping it.
+- **B5-shaped tests, confirmed and fixed:** S18 asserted a state set before the fault, S16 had no attempt, S22 raced sequentially and swallowed the loser's reason, S27 used batch status as proof nothing ran, S15 never checked its base. Also S14, which accepted the wrong recovery mode.
+- **Refuted:** "S23 can cancel before an attempt exists" (the attempt row is inserted before the dispatch phase). S23 was weak for a different reason Codex missed: the test helper `until()` killed every driver on return, so S23 never cancelled a live run. `until(..., keep=True)` now keeps them.
+- **Strengthened:** S3 (two real starts, no survivors), S5 (15 scaled minutes of API errors), S9 (through `submit`, no rows), S13 (kickstart within the start-up bound), S17 (KILL only after the TERM grace), S19 (the inherited tag reaches the worker's prompt), S21 (through the driver: one attempt), S23 (live worker gone, its attempt closed), S24 (base rows), S26 (the channel, not only the count).
+- **Mutation-checked:** for S3, S5, S14, S15, S16, S17, S18, S19, S22, S23, S26, S27, a mutant with the defect Codex described passes the old test and fails the new one. S9, S13, S21 and S24 were strengthened without a mutant.
+
 
 ## P5 addendum: resolver integration (from gh-resolve's re-review at 5e0e3ca)
 

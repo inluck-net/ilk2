@@ -72,6 +72,7 @@ def test_s17_sigterm_ignored_then_killed(env):
     out = d.wait(cap_s=1, term_grace_s=1, kill_grace_s=2)
     assert out == "timeout" and d.terminated["signals"] == ["TERM", "KILL"]
     assert d.terminated["survivors"] == []
+    assert d.terminated["seconds"] >= 1  # KILL came only after the TERM grace
 
 
 def test_api_error_and_crash_outcomes(env):

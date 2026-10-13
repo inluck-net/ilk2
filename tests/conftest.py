@@ -70,6 +70,10 @@ class Env:
         log = Path(str(self.script_path) + ".calls")
         return sum(1 for _ in log.open()) if log.exists() else 0
 
+    def stub_prompts(self) -> list[str]:
+        log = Path(str(self.script_path) + ".calls")
+        return [json.loads(line)["prompt"] for line in log.open()] if log.exists() else []
+
     def submit(self, spec: dict, **kw) -> str:
         return batches.submit(self.s, "proj", plans.from_dict(spec), **kw)
 

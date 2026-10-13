@@ -27,7 +27,7 @@ Batch `b-26687da364b1` on the throwaway consumer `~/.ilk2/m1/consumer` (todo-lit
 - 0 human transitions, 0 needs_human rows;
 - the supervisor was killed with SIGKILL during step 2's dispatch (04:21:32). launchd restarted it, reconcile marked run `r-32f0460ee630` lost and requeued it, and run `r-36c98ec6fd2c` shipped the batch;
 - the consumer's own suite passes at the final head (7 passed), run outside ilk2;
-- the stall suite S1-S27 passes in CI.
+- the stall suite S1-S27 passes in CI (the vitest cases only since the stall-suite review: before it, CI skipped them; docs/06).
 
 The first M1 attempt (`b-1b3841db9323`) found a bug (docs/06 B5: the scope check read `odo.py`) and was cancelled by hand. That is the one human transition of the day, outside the batch that met the criterion.
 

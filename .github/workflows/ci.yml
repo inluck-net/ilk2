@@ -13,7 +13,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Sync (Python 3.12, locked)
         run: uv sync --locked --python 3.12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Vitest cache for S20/S21 (tests/test_vitest.py)
+        run: |
+          mkdir -p ~/.cache/ilk2-test-vitest
+          cp tests/fixtures/vitest-cache/package.json ~/.cache/ilk2-test-vitest/
+          npm install --prefix ~/.cache/ilk2-test-vitest --no-audit --no-fund
       - name: Tests
-        run: uv run pytest -q
+        env:
+          ILK2_REQUIRE_VITEST: "1"
+        run: uv run pytest -q -rs
       - name: Core size per module (diagnostic, docs/02 §2.12)
         run: uv run python tools/size.py

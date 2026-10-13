@@ -45,7 +45,9 @@ def sup(ilk, **kw) -> supervisor.Supervisor:
     return s
 
 
-def until(sp: supervisor.Supervisor, pred, timeout: float = 90) -> bool:
+def until(sp: supervisor.Supervisor, pred, timeout: float = 90, keep: bool = False) -> bool:
+    """Tick until pred holds. Drivers still running are then killed, unless keep=True (the
+    test goes on with them)."""
     end = time.monotonic() + timeout
     try:
         while time.monotonic() < end:
@@ -55,7 +57,7 @@ def until(sp: supervisor.Supervisor, pred, timeout: float = 90) -> bool:
             time.sleep(sp.b.tick)
         return False
     finally:
-        for rid, p in list(sp.children.items()):
+        for rid, p in ([] if keep else list(sp.children.items())):
             if p.poll() is None:
                 procs.terminate_group(p.pid, p.poll, 0.5, 1)
 
@@ -195,13 +197,18 @@ def test_s13_hung_supervisor_is_kickstarted(stall, monkeypatch):
     monkeypatch.setenv("ILK2_KICKSTART_CMD", json.dumps(restart))
     b = bounds.load()
     deadline = time.monotonic() + 60
-    kicked = False
+    kicked_after = None
     try:
         while time.monotonic() < deadline and status(stall, bid) != "shipped":
             r = health.check(stall.s, b)
-            kicked = kicked or r["kickstarted"]
+            if r["kickstarted"] and kicked_after is None:
+                started = stall.s.one("SELECT started_wall FROM supervisor WHERE id = 1")["started_wall"]
+                kicked_after = clock.wall() - started
             time.sleep(1)
-        assert kicked and status(stall, bid) == "shipped"
+        assert kicked_after is not None and status(stall, bid) == "shipped"
+        # the hung supervisor is within its start-up bound, so the bound is supervisor_startup;
+        # the health loop here polls every 1 s
+        assert kicked_after <= b.supervisor_startup + 2.5, kicked_after
     finally:
         row = stall.s.one("SELECT pid FROM supervisor WHERE id = 1")
         for pid in {hung.pid, row["pid"]}:
@@ -214,12 +221,21 @@ def test_s13_hung_supervisor_is_kickstarted(stall, monkeypatch):
 # -- S16: host sleep ---------------------------------------------------------------------------
 
 def test_s16_host_sleep_is_recorded_not_a_stall(stall, monkeypatch):
+    stall.script([{"sleep": 4}, GOOD])
+    bid = stall.submit(one_step())
     sp = sup(stall)
+    assert until(sp, lambda: stall.s.one("SELECT 1 FROM attempts WHERE status = 'running'"), timeout=30,
+                 keep=True)
+    att = stall.s.one("SELECT * FROM attempts WHERE status = 'running'")
     real_wall = clock.wall
-    monkeypatch.setattr(clock, "wall", lambda: real_wall() + 7200)  # wall jumps, monotonic does not
+    # The host sleeps mid-attempt: wall time jumps past the attempt cap, monotonic does not.
+    monkeypatch.setattr(clock, "wall", lambda: real_wall() + sp.b.attempt_cap + 7200)
     sp.tick()
-    kinds = [e["kind"] for e in stall.s.events_since(0)]
-    assert "host-slept" in kinds
+    assert "host-slept" in [e["kind"] for e in stall.s.events_since(0)]
+    assert stall.s.get("attempts", att["id"])["status"] == "running"  # the same attempt goes on
+    assert until(sp, lambda: status(stall, bid) == "shipped")
+    assert reasons(stall, bid) == ["shipped"]  # no stall, no requeue
+    assert [a["outcome"] for a in stall.s.all("SELECT outcome FROM attempts")] == ["accepted"]
 
 
 # -- S18: store locked ------------------------------------------------------------------------
@@ -242,8 +258,14 @@ def test_s18_store_busy_ends_run_not_hung(stall):
     finally:
         locker.execute("ROLLBACK")
     assert reason == "store-busy" and time.monotonic() - t0 < 5
-    # the run row could not be ended; the supervisor reaps the exited driver and requeues
-    assert stall.s.get("runs", rid)["status"] == "starting"
+    s2.conn.close()
+    # The driver could not even end its run. A supervisor finds it with no live driver,
+    # ends it as lost and requeues the batch, which then ships.
+    sp = sup(stall)
+    assert stall.s.get("runs", rid)["status"] == "ended"
+    assert stall.s.get("runs", rid)["terminal_reason"] == "lost"
+    assert until(sp, lambda: status(stall, bid) == "shipped")
+    assert reasons(stall, bid) == ["lost", "shipped"]
 
 
 # -- S22: lease races --------------------------------------------------------------------------
@@ -253,22 +275,41 @@ def test_s22_lease_races(stall):
     bid = stall.submit(one_step())
     root = stall.s.get("batches", bid)["execution_root"]
     head = stall.git(root, "rev-parse", "HEAD")
+    batches.park(stall.s, bid)
     g = lease.driver_release(stall.s, root, head)
-    # (a) consumer acquire and a resume at the same generation: exactly one wins
-    wins = 0
-    for fn in (lambda: lease.consumer_acquire(stall.s, root, g, head, "gh", head, 60),
-               lambda: lease.driver_acquire(stall.s, root, g)):
+    # (a) a consumer acquire and `ilk2 resume` race at the same generation, on separate
+    # connections released together: exactly one wins, and the loser fails for that reason.
+    import threading
+    from ilk2 import paths
+    from ilk2.store import Conflict
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def race(name, fn):
+        s = Store(paths.db())
         try:
-            fn()
-            wins += 1
-        except Exception:
-            pass
-    assert wins == 1
-    # reset to released for the next cases
+            barrier.wait()
+            fn(s)
+            results[name] = "won"
+        except (Conflict, batches.SubmitRejected) as e:
+            results[name] = f"lost: {type(e).__name__}"
+        finally:
+            s.close()
+    threads = [threading.Thread(target=race, args=("consumer", lambda s: lease.consumer_acquire(
+                   s, root, g, head, "gh", head, 60))),
+               threading.Thread(target=race, args=("resume", lambda s: batches.resume(s, bid)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert sorted(v == "won" for v in results.values()) == [False, True], results
     row = lease.get(stall.s, root)
-    if row["holder"] == "consumer":
+    if results["consumer"] == "won":
+        assert row["holder"] == "consumer" and status(stall, bid) == "parked"
         g = lease.consumer_release(stall.s, root, row["generation"], head)
     else:
+        assert row["holder"] == "driver" and status(stall, bid) == "queued"
+        batches.park(stall.s, bid)
         g = lease.driver_release(stall.s, root, head)
     # (b) stale expected head refused
     with pytest.raises(Exception):
@@ -277,11 +318,19 @@ def test_s22_lease_races(stall):
     g = lease.consumer_acquire(stall.s, root, g, head, "gh", head, -1)
     assert lease.expire_due(stall.s) == [root]
     assert lease.get(stall.s, root)["holder"] == "consumer-expired"
-    batches.park(stall.s, bid)
     with pytest.raises(batches.SubmitRejected):
         batches.resume(stall.s, bid)
-    g = lease.consumer_release(stall.s, root, lease.get(stall.s, root)["generation"], head)
+    # the expired consumer pushes late, then releases: its commit is the head, no driver
+    # commit came in between
+    (Path(root) / "late.txt").write_text("late\n")
+    stall.git(root, "add", "late.txt")
+    stall.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "late push")
+    late = stall.git(root, "rev-parse", "HEAD")
+    assert stall.git(root, "rev-parse", "HEAD~1") == head
+    g = lease.consumer_release(stall.s, root, lease.get(stall.s, root)["generation"], late)
     assert lease.get(stall.s, root)["holder"] == "released"
+    assert lease.get(stall.s, root)["expected_head"] == late
+    head = late
     # (d) a renewing consumer does not expire
     g = lease.consumer_acquire(stall.s, root, g, head, "gh", head, 60)
     g = lease.consumer_renew(stall.s, root, g, 60)
@@ -295,14 +344,24 @@ def test_s23_cancel_mid_attempt(stall):
     bid = stall.submit(one_step())
     sp = sup(stall)
     assert until(sp, lambda: stall.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND phase = 'dispatch'", bid),
-                 timeout=30)
+                 timeout=30, keep=True)
+    att = stall.s.one("SELECT * FROM attempts WHERE status = 'running'")
+    root = stall.s.get("batches", bid)["execution_root"]
+    end = time.monotonic() + 10
+    while not procs.processes_in(root) and time.monotonic() < end:
+        time.sleep(0.1)
+    assert procs.processes_in(root), "the worker should be running in the root"
+    assert all(p.poll() is None for p in sp.children.values())  # the driver is alive
     batches.cancel(stall.s, bid, "issue-closed")
     assert until(sp, lambda: not stall.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status != 'ended'", bid),
                  timeout=30)
     assert status(stall, bid) == "cancelled"
-    root = stall.s.get("batches", bid)["execution_root"]
     assert lease.get(stall.s, root)["holder"] == "released"
     assert_cancelled_hierarchy(stall, bid)
+    a = stall.s.get("attempts", att["id"])
+    assert a["status"] == "done" and a["outcome"] in ("interrupted", "cancelled")
+    assert procs.processes_in(root) == []  # the worker is gone
+    assert stall.stub_calls() == 1  # cancelled, not retried
 
 
 def assert_cancelled_hierarchy(ilk, bid):
@@ -319,11 +378,13 @@ def test_s23_cancel_while_accepting(stall, monkeypatch):
     bid = stall.submit(one_step())
     sp = sup(stall)
     assert until(sp, lambda: stall.s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status = 'accepting'", bid),
-                 timeout=30)
+                 timeout=30, keep=True)
+    assert all(p.poll() is None for p in sp.children.values())  # the driver hangs in accepting
     batches.cancel(stall.s, bid, "stand-down")
     assert until(sp, lambda: not stall.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status != 'ended'", bid),
                  timeout=30)
     root = stall.s.get("batches", bid)["execution_root"]
+    assert status(stall, bid) == "cancelled"
     assert lease.get(stall.s, root)["holder"] == "released"
     assert_cancelled_hierarchy(stall, bid)  # recovered by undo (no commit), then cancelled
     # Codex M1 review #4: undo resets the worktree before the root is released
@@ -375,6 +436,8 @@ def test_s24_setup_installs_then_base_measures(stall):
     bid = stall.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_nm.py")]))
     sp = sup(stall)
     assert until(sp, lambda: status(stall, bid) == "shipped")
+    base = stall.s.all("SELECT * FROM base_measurements WHERE batch_id = ?", bid)
+    assert len(base) == 1 and "tests/test_nm.py::test_nm" not in json.loads(base[0]["failures"])
 
 
 def test_s24_failing_setup_blocks_setup_not_base(stall):
@@ -384,6 +447,9 @@ def test_s24_failing_setup_blocks_setup_not_base(stall):
     sp = sup(stall)
     assert until(sp, lambda: status(stall, bid) == "blocked")
     assert [r["reason"] for r in stall.s.open_human_rows(bid)] == ["setup"]
+    assert stall.s.one("SELECT COUNT(*) n FROM base_measurements WHERE batch_id = ?", bid)["n"] == 0
+    assert stall.s.one("SELECT COUNT(*) n FROM gate_results")["n"] == 0
+    assert stall.stub_calls() == 0
 
 
 # -- S26: resolver project, consumer policy ----------------------------------------------------
@@ -400,14 +466,29 @@ def test_s26_consumer_policy_no_page(stall, monkeypatch):
     evs = [e for e in stall.s.events_since(0) if e["kind"] == "needs_human"]
     assert evs and evs[0]["consumer_ref"] == "issue-42"
     b = bounds.load()
-    assert notify.due(stall.s, b) == 0  # no macOS, no off-host page
+    from ilk2 import paths
+
+    def sent():
+        log = paths.logs() / "notify.log"
+        return [json.loads(x)["text"] for x in log.open()] if log.exists() else []
+    assert notify.due(stall.s, b) == 0
+    assert sent() == []  # no macOS, no off-host page
     with stall.s.tx() as c:
         c.execute("UPDATE needs_human SET created_at = created_at - ?", (b.consumer_offhost + 1,))
     assert notify.due(stall.s, b) == 1
     assert notify.due(stall.s, b) == 0  # one notice, never re-sent
+    out = sent()
+    assert len(out) == 1 and out[0].startswith("[offhost]"), out
 
 
 # -- S27: host load admission ------------------------------------------------------------------
+
+def assert_nothing_ran(ilk, bid):
+    assert ilk.s.one("SELECT COUNT(*) n FROM runs WHERE batch_id = ?", bid)["n"] == 0
+    assert ilk.s.one("SELECT COUNT(*) n FROM gate_results")["n"] == 0
+    assert ilk.s.one("SELECT COUNT(*) n FROM base_measurements WHERE batch_id = ?", bid)["n"] == 0
+    assert ilk.stub_calls() == 0
+
 
 def test_s27_host_load_refuses_then_clears(stall, monkeypatch):
     stall.script([GOOD])
@@ -418,6 +499,7 @@ def test_s27_host_load_refuses_then_clears(stall, monkeypatch):
     sp.tick()
     assert status(stall, bid) == "queued"
     assert [r["reason"] for r in stall.s.open_refusals(bid)] == ["host-load"]
+    assert_nothing_ran(stall, bid)
     monkeypatch.setattr(os, "getloadavg", lambda: (0.1, 0.1, 0.1))
     monkeypatch.setattr(supervisor, "free_memory", lambda: 8 * 1024 ** 3)
     for _ in range(3):
@@ -425,6 +507,7 @@ def test_s27_host_load_refuses_then_clears(stall, monkeypatch):
     sp.tick()
     assert status(stall, bid) == "queued"
     assert "gate timeouts" in stall.s.open_refusals(bid)[0]["detail"]
+    assert_nothing_ran(stall, bid)
     with stall.s.tx() as c:  # the timeouts age out of the 30-minute window (time compressed)
         c.execute("UPDATE events SET mono = mono - ? WHERE kind = 'gate.timeout'",
                   (sp.b.load_timeout_window + 1,))

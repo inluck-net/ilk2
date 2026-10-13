@@ -45,7 +45,7 @@ def main():
         log = p + ".calls"
         n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
         with open(log, "a") as f:
-            f.write("x\n")
+            f.write(json.dumps({"prompt": prompt}) + "\n")
         seq = script["calls"]
         script = seq[min(n, len(seq) - 1)]
     sid = resume or str(uuid.uuid4())

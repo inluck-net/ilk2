@@ -18,8 +18,12 @@ from ilk2.plans import Gate
 CACHE = Path.home() / ".cache" / "ilk2-test-vitest" / "node_modules"
 NODE = shutil.which("node")
 NODE = os.path.realpath(NODE) if NODE else None  # fnm's multishell path is per-shell
-pytestmark = pytest.mark.skipif(not (CACHE / ".bin" / "vitest").exists() or not NODE,
-                                reason="vitest cache or node missing")
+# The cache is built from tests/fixtures/vitest-cache/package.json (CI does it). Locally a
+# missing cache skips these tests; with ILK2_REQUIRE_VITEST=1 (CI) it fails instead, so S20
+# and S21 cannot vanish from a green run (Codex stall-suite review).
+HAVE = (CACHE / ".bin" / "vitest").exists() and bool(NODE)
+REQUIRED = os.environ.get("ILK2_REQUIRE_VITEST") == "1"
+pytestmark = pytest.mark.skipif(not HAVE and not REQUIRED, reason="vitest cache or node missing")
 PRELUDE = [str(Path(NODE).parent) if NODE else "", PY_BIN, "/usr/bin", "/bin"]
 
 PKG = {"name": "fx", "private": True, "type": "module",
@@ -97,3 +101,7 @@ def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_pa
     base = ilk.s.one("SELECT spec_version FROM base_measurements WHERE batch_id = ?", bid)
     assert gr["spec_version"] != base["spec_version"]  # the config edit changed the gate version
     assert json.loads(gr["details"])["comparable_base"] is False
+
+
+def test_vitest_prerequisites_present():
+    assert HAVE, f"node ({NODE}) or the vitest cache ({CACHE}) is missing"

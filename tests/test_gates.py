@@ -52,9 +52,14 @@ def test_pass_and_fail_with_fingerprints(tmp_path):
 def test_s15_changed_failure_is_new(tmp_path):
     root = project(tmp_path, {"tests/test_a.py": "def test_bad():\n    assert 1 == 2\n"})
     base = m(gate("tests/test_a.py"), root, tmp_path).failure_map()
+    assert list(base) == ["tests/test_a.py::test_bad"]  # the base signal exists
     (root / "tests/test_a.py").write_text("def test_bad():\n    assert 3 == 4\n")
-    v = gates.judge(m(gate("tests/test_a.py"), root, tmp_path), base=base)
+    r = m(gate("tests/test_a.py"), root, tmp_path)
+    assert r.failure_map()["tests/test_a.py::test_bad"] != base["tests/test_a.py::test_bad"]
+    v = gates.judge(r, base=base)
     assert v.outcome == "fail" and v.new_failures == ["tests/test_a.py::test_bad"]
+    # the same failure as the base is not new: the comparison, not the base, decides
+    assert gates.judge(m(gate("tests/test_a.py"), root, tmp_path), base=r.failure_map()).outcome == "pass"
 
 
 def test_volatile_values_do_not_change_fingerprint(tmp_path):
@@ -80,12 +85,17 @@ def test_s4_runner_missing_is_permanent_unmeasured(tmp_path):
     assert r.outcome == "unmeasured" and not r.transient and "runner-not-found" in r.reason
 
 
-def test_s3_gate_cap_is_transient_then_permanent(tmp_path):
-    root = project(tmp_path, {"tests/test_a.py": "import time\ndef test_slow():\n    time.sleep(30)\n"})
-    gates.KILL_GRACE_S = 1
+def test_s3_gate_cap_is_transient_then_permanent(tmp_path, monkeypatch):
+    starts = tmp_path / "starts"
+    root = project(tmp_path, {"tests/test_a.py": f"import time\nopen({str(starts)!r}, 'a').write('x')\n"
+                                                 "def test_slow():\n    time.sleep(30)\n"})
+    monkeypatch.setattr(gates, "KILL_GRACE_S", 1)
     r = m(gate("tests/test_a.py", cap=2), root, tmp_path)
     assert r.outcome == "unmeasured" and not r.transient and "twice" in r.reason
     assert r.duration_s < 10
+    assert starts.read_text() == "xx"  # the cap hit once, the gate was re-run once, then gave up
+    from ilk2 import procs
+    assert procs.processes_in(root) == []  # each capped run was killed
 
 
 def test_collection_error_recorded_per_file(tmp_path):
