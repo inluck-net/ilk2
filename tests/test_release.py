@@ -131,3 +131,36 @@ def test_supervisor_records_the_code_it_loaded(ilk):
     sp.start()
     code = json.loads(ilk.s.one("SELECT value FROM meta WHERE key = 'supervisor_code'")["value"])
     assert "supervisor.py" in code and "store.py" in code
+
+
+def _fake(tmp_path, name, body):
+    f = tmp_path / name
+    f.write_text("#!/bin/bash\n" + body)
+    f.chmod(0o755)
+    return str(f)
+
+
+def test_doctor_hosts_compares_releases(tmp_path, monkeypatch):
+    from ilk2 import release
+    monkeypatch.setenv("ILK2_SSH", _fake(tmp_path, "ssh", 'echo /Users/x/.ilk2/releases/0.9.9+gabc\n'))
+    assert release.host_version("rezmac") == "0.9.9+gabc"
+    monkeypatch.setenv("ILK2_SSH", _fake(tmp_path, "ssh2", "exit 255\n"))
+    assert release.host_version("rezmac") is None
+
+
+def test_push_ships_a_bundle_and_upgrades_the_same_version(tmp_path, monkeypatch):
+    import subprocess
+    from ilk2 import release
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                    "-q", "--allow-empty", "-m", "x"], check=True)
+    log = tmp_path / "log"
+    monkeypatch.setenv("ILK2_SCP", _fake(tmp_path, "scp", f'echo "scp $@" >> {log}\n'))
+    monkeypatch.setenv("ILK2_SSH", _fake(tmp_path, "ssh", f'echo "ssh $2" >> {log}\n'
+                                                          'echo /Users/x/.ilk2/releases/0.2.0+g1\n'))
+    out = release.push("rezmac", repo, "0.2.0+g1")
+    assert out["ok"] and out["current"] == "0.2.0+g1"
+    text = log.read_text()
+    assert "rezmac:/tmp/ilk2.bundle" in text
+    assert "release upgrade --version 0.2.0+g1" in text and "git fetch -q /tmp/ilk2.bundle main" in text

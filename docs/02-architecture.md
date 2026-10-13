@@ -334,7 +334,7 @@ flowchart LR
 
   Drivers start from `current`, so driver, worker and gate changes reach the next run without a restart. The supervisor's start loads only the bookkeeping modules (`cli`, `supervisor`, `runs`, `batches`, `plans`, `store`, `lease`, `gitops`, `procs` and their basics); it imports the `Driver` lazily, only for cancel and park recovery. So a release that changes the driver, worker or gates does not drain. A drain admits nothing until every live run reaches an attempt boundary. It is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, uncounted, with its work kept (§2.4). Runs record which release made each commit.
 - **Retention.** Hourly, the supervisor removes what a finished batch left on disk once it has been shipped or cancelled for 7 days: its ilk2-made worktree (the branch stays), its diagnostic worktrees, and its runs' temp dirs (logs stay). A root another unfinished batch uses is left alone.
-- **Both hosts** install the same release with `ilk2 upgrade`. `ilk2 doctor --hosts` compares versions over ssh.
+- **Both hosts** run the same release. `ilk2 release push --host rezmac` bundles `main` (the hosts share no remote), copies it into the other host's `~/.ilk2/src`, then builds and upgrades the same version there. `ilk2 doctor --hosts rezmac` compares each host's `current` with this one's over ssh.
 
 ## 2.8 Consumer interface
 

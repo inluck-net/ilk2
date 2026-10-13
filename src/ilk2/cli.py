@@ -248,10 +248,12 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--length", type=float)
 
     rl = sub.add_parser("release")
-    rl.add_argument("op", choices=["build", "install", "upgrade", "uninstall"])
+    rl.add_argument("op", choices=["build", "install", "upgrade", "uninstall", "push"])
+    rl.add_argument("--host", action="append", default=[], help="push: the other host(s), by ssh name")
     rl.add_argument("--version")
     rl.add_argument("--repo", default=".")
-    sub.add_parser("doctor")
+    dc = sub.add_parser("doctor")
+    dc.add_argument("--hosts", default="", help="other hosts (comma-separated ssh names) to compare releases with")
     sub.add_parser("xbar")
 
     rp = sub.add_parser("report")
@@ -282,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(release.install(a.version), indent=2))
         elif a.op == "upgrade":
             print(json.dumps(release.upgrade(a.version), indent=2))
+        elif a.op == "push":
+            v = a.version or os.path.basename(os.path.realpath(release.current()))
+            out = [release.push(h, Path(a.repo).resolve(), v) for h in a.host]
+            print(json.dumps(out, indent=2))
+            return 0 if out and all(x["ok"] for x in out) else 1
         else:
             release.uninstall()
         return 0
@@ -290,7 +297,16 @@ def main(argv: list[str] | None = None) -> int:
               "requested": a.api_version}, True)
         return 2
     if a.cmd == "doctor":
-        return doctor()
+        rc = doctor()
+        if a.hosts:
+            from . import release
+            here = os.path.basename(os.path.realpath(release.current()))
+            for h in [x for x in a.hosts.split(",") if x]:
+                there = release.host_version(h)
+                same = "same" if there == here else ("UNREACHABLE" if there is None else "DIFFERENT")
+                print(f"host {h}: {there or '-'} ({same} as here: {here})")
+                rc = rc or (0 if there == here else 1)
+        return rc
     if a.cmd == "xbar":
         from . import xbar
         return xbar.main()

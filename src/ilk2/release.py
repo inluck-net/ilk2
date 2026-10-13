@@ -184,3 +184,43 @@ def uninstall() -> None:
     for label in (SUPERVISOR, HEALTH):
         subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
         (AGENTS / f"{label}.plist").unlink(missing_ok=True)
+
+
+# -- other hosts (docs/02 §2.7: both hosts run the same release) ---------------------------------
+
+def _ssh() -> list[str]:
+    return (os.environ.get("ILK2_SSH") or "ssh").split()
+
+
+def _scp() -> list[str]:
+    return (os.environ.get("ILK2_SCP") or "scp").split()
+
+
+REMOTE_ENV = 'export PATH="$HOME/.local/bin:$PATH"; '
+
+
+def host_version(host: str) -> str | None:
+    """The release `current` points at on another host, or None if unreachable."""
+    p = subprocess.run([*_ssh(), host, REMOTE_ENV + "readlink ~/.ilk2/current"],
+                       capture_output=True, text=True, timeout=60)
+    return Path(p.stdout.strip()).name if p.returncode == 0 and p.stdout.strip() else None
+
+
+def push(host: str, repo: Path, version: str) -> dict:
+    """Ship this repo's main to another host and build and upgrade the same release there:
+    a git bundle (the hosts share no remote), fetched into ~/.ilk2/src, built, upgraded."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        bundle = Path(d) / "ilk2.bundle"
+        subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "main"],
+                       check=True, capture_output=True)
+        subprocess.run([*_scp(), "-q", str(bundle), f"{host}:/tmp/ilk2.bundle"], check=True,
+                       capture_output=True, timeout=300)
+    script = (REMOTE_ENV + "set -e; cd ~/.ilk2/src && git fetch -q /tmp/ilk2.bundle main && "
+              "git reset -q --hard FETCH_HEAD && uv run -q ilk2 release build --repo . >/dev/null && "
+              f"uv run -q ilk2 release upgrade --version {version} >/dev/null && "
+              "readlink ~/.ilk2/current")
+    p = subprocess.run([*_ssh(), host, script], capture_output=True, text=True, timeout=900)
+    now = Path(p.stdout.strip().splitlines()[-1]).name if p.stdout.strip() else None
+    return {"host": host, "ok": p.returncode == 0 and now == version, "current": now,
+            "error": p.stderr.strip()[-500:] if p.returncode else None}
