@@ -213,3 +213,21 @@ def test_v1_ceremony_steps_merge_into_one(ilk):
     assert [g.name for g in s.gates] == ["a", "n"] and s.must_pass == ["tests/test_a.py"]
     assert s.expect_red == []
     assert len(spec.plans[1].steps) == 2  # a verification plan is left alone
+
+
+def test_ceremony_merge_drops_gates_that_need_the_folded_pins_commit():
+    # gh-resolve P5 batch, Oct 13: the implement step's gate looked up the pins commit
+    # (plan:<slug>#step-0). Merged, that commit is the step itself, made after its gates pass.
+    from ilk2 import plans as P
+    g_a = {"name": "a", "adapter": "pytest", "command": ["python3", "-m", "pytest", "-q", "tests/test_a.py"]}
+    pins = {"name": "pins", "command": ["bash", "-c", 'b=$(git log -1 --format=%H --grep="plan:work#step-0"); '
+                                        'test -n "$b"; python3 scripts/pins_only_lose_xfail.py "$b" tests/test_a.py']}
+    other = {"name": "o", "command": ["bash", "-c", 'git log --grep="plan:work#step-01"; true']}
+    spec = P.from_dict({"plans": [{"slug": "work", "steps": [
+        {"title": "Red-first pins", "instructions": "pins", "gates": [g_a]},
+        {"title": "Implement", "instructions": "impl", "gates": [g_a, pins, other]},
+        {"title": "Remove every xfail", "instructions": "rest", "gates": [g_a, pins]}]}]})
+    P.merge_v1_ceremony(spec)
+    s0, s1 = spec.plans[0].steps
+    assert [g.name for g in s0.gates] == ["a", "o"]
+    assert [g.name for g in s1.gates] == ["a", "pins"]  # a later step checks the merged commit

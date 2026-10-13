@@ -291,7 +291,14 @@ def merge_v1_ceremony(spec: BatchSpec) -> BatchSpec:
         while i < len(steps):
             s = steps[i]
             if s.title.lower().startswith("red-first") and i + 1 < len(steps):
-                out.append(_merge(s, steps[i + 1], keep_reds=False))
+                merged = _merge(s, steps[i + 1], keep_reds=False)
+                # The next step's gates may check the pins commit ("git log --grep
+                # plan:<slug>#step-<i>" then pins_only_lose_xfail.py). Merged, that commit is the
+                # step itself, made only after its gates pass: such a gate can never pass
+                # (gh-resolve P5 batch, Oct 13). The red-first check covers what it guarded.
+                own = re.compile(rf"plan:{re.escape(plan.slug)}#step-{i}(?!\d)")
+                merged.gates = [g for g in merged.gates if not own.search(" ".join(g.command))]
+                out.append(merged)
                 i += 2
                 continue
             if s.title.lower().startswith("neighbour gate") and out:
