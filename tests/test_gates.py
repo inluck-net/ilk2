@@ -257,3 +257,21 @@ def test_script_env_assignments_reach_the_gate(tmp_path):
     # probes keep it: a re-run of one test id runs with the same assignments
     assert gates.rerun_alone(g, root, env, gates.spec_version(g, root, env), tmp_path / "w",
                              "tests/test_tz.py::test_tz")
+
+
+def test_fingerprint_ignores_ilk2_run_dirs_and_the_measurement_root():
+    # gh-resolve P5 batch, Oct 13: a base failure's message carried the gate's TMPDIR under
+    # ~/.ilk2/data/runs/<run>/tmp, so every later run fingerprinted it as a new failure.
+    from ilk2.gates.fingerprint import fingerprint
+    msg = ("AssertionError: got 'failed' error=\"Refusing to write plans from a temp-dir repo "
+           "PosixPath('/Users/u/.ilk2/data/runs/{run}/tmp/pytest-of-u/pytest-0/clone0/wt') into "
+           "the real ilk data home.\"")
+    a = fingerprint("AssertionError", msg.format(run="r-aaaa"), [])
+    b = fingerprint("AssertionError", msg.format(run="r-bbbb"), [])
+    assert a == b
+    base = fingerprint("E", "no such file /Users/u/.ilk2/data/diag/b-1/abc/tests/x.json", [],
+                       "/Users/u/.ilk2/data/diag/b-1/abc")
+    step = fingerprint("E", "no such file /Users/u/.ilk2/data/worktrees/b-1/tests/x.json", [],
+                       "/Users/u/.ilk2/data/worktrees/b-1")
+    assert base == step
+    assert fingerprint("E", "expected 1, got 2", []) != fingerprint("E", "expected 3, got 4", [])

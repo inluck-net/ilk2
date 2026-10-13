@@ -71,6 +71,9 @@ class Plan:
 @dataclass
 class BatchSpec:
     plans: list[Plan]
+    # The planner's documents the steps refer to (V1: the MASTER and its sub-plans), by name.
+    # The driver gives each attempt a readable copy; workers cannot read the planner's dirs.
+    documents: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -110,7 +113,7 @@ def from_dict(d: dict) -> BatchSpec:
                  for j, s in enumerate(p["steps"])]
         plans.append(Plan(slug=p["slug"], steps=steps, depends_on=list(p.get("depends_on", [])),
                           verification=bool(p.get("verification", False))))
-    return BatchSpec(plans=plans)
+    return BatchSpec(plans=plans, documents=dict(d.get("documents") or {}))
 
 
 def load_json(path: Path) -> BatchSpec:
@@ -234,7 +237,24 @@ def parse_v1_master(master: Path) -> BatchSpec:
         sub = master.parent / name
         if sub.exists():
             plans.append(parse_v1_subplan(sub.read_text()))
-    return BatchSpec(plans=plans)
+    return BatchSpec(plans=plans, documents=v1_documents(master))
+
+
+def v1_documents(master: Path) -> dict[str, str]:
+    """A V1 MASTER and the sub-plans it links, by the names the plans use to refer to each
+    other (a claimed master keeps its original name). gh-resolve P5 batch, Oct 13: every
+    attempt spent 1-2 minutes searching the disk for the MASTER its sub-plan says to read."""
+    master = Path(master)
+    try:
+        text = master.read_text()
+    except OSError:
+        return {}
+    docs = {master.name.split(".md")[0] + ".md": text}
+    for name in re.findall(r"\]\(\./?([^)\s]+\.md)\)", text):
+        sub = master.parent / name
+        if name not in docs and sub.is_file():
+            docs[name] = sub.read_text()
+    return docs
 
 
 # -- submit checks (§2.11.2) --------------------------------------------------------------

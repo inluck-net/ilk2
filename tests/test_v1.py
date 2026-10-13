@@ -104,6 +104,12 @@ def test_supervisor_claims_a_queued_v1_master_and_ships_it(ilk, v1data, monkeypa
     assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 1
     from test_stall import until
     assert until(sp, lambda: ilk.s.get("batches", b["id"])["status"] == "shipped", timeout=60)
+    # The plan documents travel with the batch: the worker reads them from a named copy, since
+    # its sandbox cannot read V1's plans dir (gh-resolve P5 batch, Oct 13).
+    docs = json.loads(b["snapshot"])["documents"]
+    assert set(docs) == {"MASTER-2026-10-13.md", "2026-10-13-add.md"}
+    prompt = ilk.stub_prompts()[0]
+    assert "Plan documents" in prompt and "/plan/MASTER-2026-10-13.md`" in prompt
 
 
 def test_claim_waits_while_a_v1_runner_is_alive(ilk, v1data):

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..plans import Gate
 from . import vitest
-from .fingerprint import fingerprint, is_timeout_class, normalize_message
+from .fingerprint import FINGERPRINT_VERSION, fingerprint, is_timeout_class, normalize_message
 
 PLUGIN_DIR = Path(__file__).parent
 KILL_GRACE_S = 30
@@ -66,6 +66,7 @@ class GateRun:
 
 def spec_version(gate: Gate, root: Path, env: dict[str, str]) -> str:
     h = hashlib.sha256()
+    h.update(f"fingerprint-v{FINGERPRINT_VERSION}".encode())
     h.update(json.dumps([gate.adapter, gate.command, gate.cwd, gate.cap_s, gate.script,
                          gate.script_entry] + ([gate.env] if gate.env else [])).encode())
     stable_env = {k: v for k, v in env.items() if k not in ("HOME", "TMPDIR")}

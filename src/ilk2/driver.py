@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import batches, bounds, clock, faults, gates, gitops, lease, paths, procs, worker
 from .gates.env import pinned_env
-from .plans import Gate
+from .plans import Gate, v1_documents
 from .store import Conflict, Store, StoreBusy, dumps, new_id
 
 LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lock.yaml",
@@ -460,6 +460,23 @@ class Driver:
 
     # -- dispatch -----------------------------------------------------------------------
 
+    def write_documents(self, files) -> list[str]:
+        """The batch's plan documents, copied where the sandboxed worker can read them. Batches
+        submitted before documents were snapshotted read them from the claimed V1 master."""
+        b = self.s.get("batches", self.batch_id)
+        docs = json.loads(b["snapshot"]).get("documents") or {}
+        if not docs:
+            master = json.loads(b["originals"] or "{}").get("v1_master")
+            docs = v1_documents(Path(master)) if master else {}
+        out = []
+        d = files.tmp / "plan"
+        for name, text in docs.items():
+            p = d / Path(name).name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+            out.append(str(p))
+        return out
+
     def dispatch(self, step, aid: str, n: int, gate_list: list[Gate], evidence: str | None,
                  session: str | None) -> tuple[str, dict, str | None]:
         cfg = worker.WorkerConfig(claude_bin=self.cfg.claude_bin, max_turns=self.cfg.max_turns,
@@ -482,13 +499,15 @@ class Driver:
             files = worker.AttemptFiles(self.dir / aid)
         worker.prepare(cfg, files, self.root, [g.command for g in gate_list],
                        fresh_config=resume is None)
+        docs = self.write_documents(files)
         if carried:
             prompt = ("The previous step of this plan is accepted and committed. Continue in this "
                       "session with the next step, same rules as before; you already have the "
                       "context you read.\n\n" + worker.brief(
                           step["title"], step["instructions"],
                           [" ".join(g.command) for g in gate_list], evidence, preload=None,
-                          scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope))
+                          scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope,
+                          documents=docs))
         elif resume:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
@@ -501,7 +520,7 @@ class Driver:
             prompt = worker.brief(step["title"], step["instructions"],
                                   [" ".join(g.command) for g in gate_list], evidence, preload=pre,
                                   scope=json.loads(step["scope"]),
-                                  scope_enforced=self.cfg.enforce_scope)
+                                  scope_enforced=self.cfg.enforce_scope, documents=docs)
         with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume),
                         carried=carried):
             d = worker.dispatch(cfg, files, self.root, prompt, resume=resume)

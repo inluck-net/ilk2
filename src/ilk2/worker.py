@@ -336,10 +336,20 @@ no longer applies). Paths the project denies are still refused.
 """
 
 
+DOCUMENTS = """
+Plan documents (the MASTER and sub-plans this step refers to; a relative link such as
+`./MASTER-x.md` means the file of that name here). Read them here; do not search for them:
+{paths}
+"""
+
+
 def brief(title: str, instructions: str, gate_lines: list[str], evidence: str | None = None,
-          preload: str | None = None, scope: list[str] = (), scope_enforced: bool = True) -> str:
+          preload: str | None = None, scope: list[str] = (), scope_enforced: bool = True,
+          documents: list[str] = ()) -> str:
     b = BRIEF.format(title=title, instructions=instructions,
                      gates="\n".join(f"- `{g}`" for g in gate_lines) or "- (none)")
+    if documents:
+        b += DOCUMENTS.format(paths="\n".join(f"- `{p}`" for p in documents))
     if scope:
         b += (SCOPE_HARD.format(paths="\n".join(f"- `{p}`" for p in scope)) if scope_enforced
               else SCOPE_ADVICE.format(paths=", ".join(f"`{p}`" for p in scope)))
