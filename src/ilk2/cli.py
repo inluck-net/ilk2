@@ -198,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     rl.add_argument("--version")
     rl.add_argument("--repo", default=".")
     sub.add_parser("doctor")
+    sub.add_parser("xbar")
 
     rp = sub.add_parser("report")
     rp.add_argument("--json", action="store_true")
@@ -228,6 +229,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "doctor":
         return doctor()
+    if a.cmd == "xbar":
+        from . import xbar
+        return xbar.main()
 
     from . import batches, bounds, gitops, lease, plans
     from .store import Conflict
