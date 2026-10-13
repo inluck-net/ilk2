@@ -126,3 +126,19 @@ def test_every_block_of_a_batch_emits_batch_blocked(s):
     ev = [e for e in s.events_since(0) if e["kind"] == "batch.blocked"]
     assert len(ev) == 1 and ev[0]["batch_id"] == "b"
     assert ev[0]["payload"]["reason"] == "base-unmeasured" and ev[0]["consumer_ref"] == "issue-7"
+
+
+def test_events_are_kept_30_days_and_an_old_cursor_is_expired(s):
+    # docs/02 §2.8: a consumer polling `ilk2 events --since <cursor>` with a cursor older than
+    # the retention gets cursor-expired and re-reads status, instead of silently missing events.
+    import time as _t
+    first = s.event("old", {}, batch_id="b")
+    s.event("old2", {}, batch_id="b")
+    with s.tx() as c:
+        c.execute("UPDATE events SET at = at - ? WHERE cursor <= ?", (31 * 86400, first + 1))
+    keep = s.event("new", {}, batch_id="b")
+    assert s.prune_events(30 * 86400) == 2
+    assert [e["kind"] for e in s.events_since(0)] == ["new"]
+    with pytest.raises(st.CursorExpired):
+        s.events_since(first)  # the consumer's cursor points at pruned history
+    assert [e["cursor"] for e in s.events_since(first + 1)] == [keep]  # the newest pruned: fine

@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 
 from . import batches, bounds, clock, faults, lease, paths, procs
-from .driver import counts_as_restart, fenced, finish_cancel, has_unfinished_cancel
+from .driver import (counts_as_restart, fenced, finish_cancel, has_unfinished_cancel,
+                     root_in_use_by_other)
 from .store import Conflict, Store, new_id
 
 HOST_BUDGET = 2  # Q15: ilk2 runs per host, an experiment guarded by load admission
@@ -98,6 +99,11 @@ class Supervisor:
                                     f"ilk2 lease recover --root {root}",
                                     batch_id=b["id"] if b else None)
         self.check_waits()
+        if now_w - getattr(self, "_pruned_at", 0) > 3600:  # hourly is plenty for a 30-day bound
+            self._pruned_at = now_w
+            n = self.s.prune_events(self.b.events_keep)
+            if n:
+                self.s.event("events.pruned", {"count": n})
         if self.drain():
             return
         self.admit()
@@ -302,7 +308,8 @@ class Supervisor:
         b = self.s.get("batches", batch_id)
         root = b["execution_root"]
         row = lease.get(self.s, root)
-        if row and row["holder"] == "driver" and not fenced(self.s, batch_id, Path(root)):
+        if row and row["holder"] == "driver" and not fenced(self.s, batch_id, Path(root)) \
+                and not root_in_use_by_other(self.s, batch_id):
             from . import gitops
             lease.driver_release(self.s, root, gitops.branch_head(Path(root), b["branch"]))
 
@@ -371,6 +378,11 @@ class Supervisor:
                 return False
             if r["reason"] == "quota" and now - r["opened_at"] < self.b.quota_probe:
                 return False
+            if r["reason"] == "root-lease":
+                b = self.s.get("batches", batch_id)
+                row = lease.get(self.s, b["execution_root"])
+                if row and row["holder"] in ("consumer", "consumer-expired"):
+                    return False
             if r["reason"] == "crash-backoff":
                 step = self.current_step(batch_id)
                 second = step is not None and step["restart_count"] > bounds.RESTARTS_PER_STEP
@@ -419,9 +431,19 @@ class Supervisor:
                 self.s.refuse(b["id"], "project-limit", f"{per_project} of {limit} runs in use",
                               "a run of this project ends", "supervisor")
                 continue
-            if len(live) >= self.host_budget:
-                self.s.refuse(b["id"], "host-budget", f"{len(live)} of {self.host_budget} runs in use",
-                              "a run ends", "supervisor")
+            busy_root = self.s.one(
+                "SELECT r.batch_id FROM runs r JOIN batches o ON o.id = r.batch_id WHERE r.status IN "
+                "('starting', 'running') AND o.execution_root = ? AND o.id != ?",
+                b["execution_root"], b["id"])
+            if busy_root:  # R4: one batch at a time on a root
+                self.s.refuse(b["id"], "root-busy", f"batch {busy_root['batch_id']} runs on the same root",
+                              "that run ends", "supervisor")
+                continue
+            reserved = self.reserved_for_others(b["project_id"])
+            if len(live) + reserved >= self.host_budget:
+                why = f"{len(live)} of {self.host_budget} runs in use" + (
+                    f", {reserved} reserved for other projects (R5)" if reserved else "")
+                self.s.refuse(b["id"], "host-budget", why, "a run ends", "supervisor")
                 continue
             if not load_checked:
                 load, load_checked = self.load_refusal(), True
@@ -429,10 +451,22 @@ class Supervisor:
                 self.s.refuse(b["id"], "host-load", load, "host load falls", "supervisor")
                 continue
             for reason in ("project-limit", "host-budget", "host-load", "waiting-api", "quota",
-                           "crash-backoff"):
+                           "crash-backoff", "root-lease", "root-busy"):
                 self.s.clear_refusal(b["id"], reason)
             self.spawn(b)
             live.add(b["id"])
+
+    def reserved_for_others(self, project_id: str) -> int:
+        """Runs other projects reserve and are not using now (R5)."""
+        total = 0
+        for p in self.s.all("SELECT id FROM projects WHERE id != ?", project_id):
+            want = batches.project_config(self.s, p["id"]).reserve
+            if want:
+                used = self.s.one("SELECT COUNT(*) n FROM runs r JOIN batches b ON b.id = r.batch_id "
+                                  "WHERE r.status IN ('starting', 'running') AND b.project_id = ?",
+                                  p["id"])["n"]
+                total += max(0, want - used)
+        return total
 
     def spawn(self, b) -> str:
         if b["status"] == "queued":

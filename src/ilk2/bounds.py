@@ -44,6 +44,7 @@ class Bounds:
     # Self-resolution (docs/06): a crash loop backs off before it asks a human. Judgment call:
     # 15 min then 1 h; wrong if crash loops are nearly always deterministic (they then reach
     # the human 75 min later than before).
+    events_keep: float = 30 * 24 * 60 * 60  # §2.8: events are kept 30 days
     crash_backoff_first: float = 15 * 60
     crash_backoff_second: float = 60 * 60
 

@@ -28,7 +28,7 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
 # Run endings that are not a failure of the run: they never consume a restart (§2.10).
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
-NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api"}
+NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api", "waiting-lease"}
 
 
 def counts_as_restart(reason: str | None) -> bool:
@@ -88,6 +88,7 @@ class Driver:
                               fields={"pid": os.getpid(), "pgid": os.getpgid(0),
                                       "proc_start": procs.start_time(os.getpid()),
                                       "boot_time": clock.boot_time()})
+            self.take_root()
             with self.phase("recover"):
                 self.recover_accepting()
             self.activate()
@@ -114,6 +115,24 @@ class Driver:
         except Exception:  # noqa: BLE001 - the supervisor reconciles a run left open
             pass
         return reason
+
+    def take_root(self) -> None:
+        """Hold the root's lease and stand on this batch's branch (R4). A root a consumer
+        holds is waited for behind a refusal row that the supervisor clears on release."""
+        row = lease.get(self.s, str(self.root))
+        if row and row["holder"] in ("consumer", "consumer-expired"):
+            self.s.refuse(self.batch_id, "root-lease", f"root {self.root} is held by "
+                          f"{row['holder']} {row['owner']}", "cleared by the supervisor once the "
+                          "consumer releases the root", "supervisor")
+            raise Stop("waiting-lease")
+        if row and row["holder"] == "released":
+            lease.driver_acquire(self.s, str(self.root), row["generation"])
+        cur = gitops.git(self.root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
+        if cur != self.branch:
+            if gitops.branch_head(self.root, self.branch) is None:
+                gitops.git(self.root, "checkout", "-q", "-b", self.branch, self.base)
+            else:
+                gitops.git(self.root, "checkout", "-q", self.branch)
 
     # -- activation: setup and base measurement (§2.5.3, §2.11.2) -------------------------
 
@@ -703,7 +722,7 @@ class Driver:
                                 "('pending', 'active', 'blocked')", self.batch_id):
                 self.s.transition("plans", p["id"], "cancelled", actor="driver", reason="batch cancelled")
         row = lease.get(self.s, str(self.root))
-        if row and row["holder"] == "driver":
+        if row and row["holder"] == "driver" and not root_in_use_by_other(self.s, self.batch_id):
             lease.driver_release(self.s, str(self.root), gitops.branch_head(self.root, self.branch))
         self.s.clear_needs_human(self.batch_id)
         return True
@@ -719,6 +738,14 @@ def fenced(s: Store, batch_id: str, root: Path) -> bool:
     return bool(found)
 
 
+def root_in_use_by_other(s: Store, batch_id: str) -> bool:
+    """Another queued or active batch works on this batch's root: the root's lease is not this
+    batch's to release (R4, shared resolver-<issue> roots)."""
+    b = s.get("batches", batch_id)
+    return s.one("SELECT 1 FROM batches WHERE execution_root = ? AND id != ? AND status IN "
+                 "('queued', 'active')", b["execution_root"], batch_id) is not None
+
+
 def has_unfinished_cancel(s: Store, batch_id: str) -> bool:
     """A cancelled batch with anything left to end: a live child row or a held root."""
     if s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status IN ('pending', 'accepting', "
@@ -729,7 +756,7 @@ def has_unfinished_cancel(s: Store, batch_id: str) -> bool:
         return True
     b = s.get("batches", batch_id)
     row = lease.get(s, b["execution_root"])
-    return bool(row and row["holder"] == "driver")
+    return bool(row and row["holder"] == "driver") and not root_in_use_by_other(s, batch_id)
 
 
 def finish_cancel(s: Store, batch_id: str, b: bounds.Bounds | None = None) -> bool:

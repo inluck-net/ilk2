@@ -138,6 +138,10 @@ class Conflict(StoreError):
     """A compare-and-set lost: the row's version or state was not the expected one."""
 
 
+class CursorExpired(StoreError):
+    """An events cursor older than the retention: the consumer re-reads status (§2.8)."""
+
+
 class StoreBusy(StoreError):
     """The store stayed locked past the busy timeout and retries (§2.11.1)."""
 
@@ -292,7 +296,25 @@ class Store:
                 c.execute("UPDATE runs SET last_event_mono = ? WHERE id = ?", (clock.mono(), run_id))
             return cur.lastrowid
 
+    def prune_events(self, keep_s: float) -> int:
+        """Delete events older than keep_s and remember the newest pruned cursor (§2.8)."""
+        with self.tx() as c:
+            row = c.execute("SELECT MAX(cursor) m, COUNT(*) n FROM events WHERE at < ?",
+                            (clock.wall() - keep_s,)).fetchone()
+            if not row["n"]:
+                return 0
+            c.execute("DELETE FROM events WHERE cursor <= ?", (row["m"],))
+            c.execute("INSERT INTO meta(key, value) VALUES ('events_pruned_through', ?) "
+                      "ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value)",
+                      (str(row["m"]),))
+            return row["n"]
+
     def events_since(self, cursor: int, batch_id: str | None = None, limit: int = 1000) -> list[dict]:
+        if cursor:
+            pruned = self.one("SELECT value FROM meta WHERE key = 'events_pruned_through'")
+            if pruned and cursor < int(pruned["value"]):
+                raise CursorExpired(f"cursor {cursor} is older than the retained events "
+                                    f"(pruned through {pruned['value']}); re-read `ilk2 status`")
         sql = "SELECT * FROM events WHERE cursor > ?"
         args: list = [cursor]
         if batch_id:

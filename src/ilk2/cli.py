@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         return xbar.main()
 
     from . import batches, bounds, gitops, lease, plans
-    from .store import Conflict
+    from .store import Conflict, CursorExpired
     s = _store()
     try:
         if a.cmd == "project":
@@ -330,6 +330,9 @@ def main(argv: list[str] | None = None) -> int:
     except Conflict as e:
         _out({"error": "conflict", "detail": str(e)}, True)
         return 3
+    except CursorExpired as e:
+        _out({"error": "cursor-expired", "detail": str(e)}, True)
+        return 4
     except batches.SubmitRejected as e:
         _out({"error": "rejected", "problems": e.problems}, True)
         return 2

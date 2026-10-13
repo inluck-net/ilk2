@@ -57,8 +57,22 @@ def driver_acquire(s: Store, root: str, generation: int) -> int:
     return _cas(s, root, generation, {"released"}, "driver", "ilk2", expiry_wall=None)
 
 
+def _max_lease(s: Store, root: str) -> float | None:
+    from . import batches
+    b = s.one("SELECT project_id FROM batches WHERE execution_root = ? ORDER BY created_at DESC "
+              "LIMIT 1", root)
+    return batches.project_config(s, b["project_id"]).max_lease_s if b else None
+
+
+def _check_length(s: Store, root: str, length_s: float) -> None:
+    cap = _max_lease(s, root)
+    if cap is not None and length_s > cap:
+        raise Conflict(f"lease length {length_s:.0f}s exceeds the project's max_lease_s {cap:.0f}s (R2)")
+
+
 def consumer_acquire(s: Store, root: str, generation: int, expected_head: str, owner: str,
                      actual_head: str, length_s: float) -> int:
+    _check_length(s, root, length_s)
     if expected_head != actual_head:
         raise Conflict(f"root head is {actual_head[:12]}, not the expected {expected_head[:12]}")
     return _cas(s, root, generation, {"released"}, "consumer", owner,
@@ -66,6 +80,7 @@ def consumer_acquire(s: Store, root: str, generation: int, expected_head: str, o
 
 
 def consumer_renew(s: Store, root: str, generation: int, length_s: float) -> int:
+    _check_length(s, root, length_s)
     row = get(s, root)
     return _cas(s, root, generation, {"consumer"}, "consumer", row["owner"],
                 expiry_wall=clock.wall() + length_s)
@@ -92,6 +107,13 @@ def expire_due(s: Store) -> list[str]:
 
 
 def recover(s: Store, root: str, generation: int, new_head: str) -> int:
+    """R1: after the consumer's own reap crashed holding the lease. Accepted only when no process
+    has its working directory inside the root."""
+    from pathlib import Path
+    from . import procs
+    found = procs.strays(Path(root))
+    if found:
+        raise Conflict(f"processes are still inside {root}: {found} (R1)")
     return _cas(s, root, generation, {"consumer-expired"}, "released", None,
                 expected_head=new_head, expiry_wall=None)
 

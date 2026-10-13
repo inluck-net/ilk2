@@ -40,6 +40,11 @@ class ProjectConfig:
     # The V1 data dir key of a project taken over from V1: queued masters /ilk-plan writes
     # there are claimed and submitted by the supervisor (docs/04 §4.3, ilk2/v1.py).
     v1_key: str | None = None
+    # P5 contract (docs/06 R2, R5). max_lease_s: the longest consumer lease on this project's
+    # roots; None leaves it uncapped (judgment call: keeps today's callers working; gh-resolve
+    # sets about 3600). reserve: host runs kept free for this project even while it is idle.
+    max_lease_s: float | None = None
+    reserve: int = 0
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":
@@ -153,9 +158,9 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if root is None:
         root = gitops.add_worktree(repo, paths.worktrees() / bid, base_sha, branch=branch)
     else:
+        # An existing root may be held by a consumer or another batch: nothing is written to it
+        # here. The driver checks out this batch's branch once it holds the lease (R4).
         root = root.resolve()
-        if gitops.branch_head(root, branch) is None:
-            gitops.git(root, "checkout", "-q", "-b", branch, base_sha)
     snapshot = spec.to_dict()
     with s.tx():
         s.insert("batches", {"id": bid, "project_id": project_id, "base_commit": base_sha,
