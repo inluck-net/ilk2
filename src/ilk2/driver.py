@@ -49,6 +49,13 @@ KEPT_NOTE = ("The worktree still holds the previous attempt's changes (the drive
              "evidence above and finish the step rather than starting over.")
 
 
+VERIFY_NOTE = ("This is a verification step. The driver has already run its gates (the full suite) "
+               "at the batch head; the failures it found are in the evidence below, compared with the "
+               "batch base. There is no separate verification record or recorder to read: V1's "
+               "verification records and scripts are not part of this run. Fix what the evidence "
+               "names, or change nothing if it names nothing.\n\n")
+
+
 class Driver:
     def __init__(self, s: Store, run_id: str, b: bounds.Bounds | None = None):
         self.s = s
@@ -568,6 +575,8 @@ class Driver:
                                   [" ".join(g.command) for g in gate_list], evidence, preload=pre,
                                   scope=json.loads(step["scope"]),
                                   scope_enforced=self.cfg.enforce_scope, documents=docs)
+        if self.s.get("plans", step["plan_id"])["verification"] and not resume:
+            prompt = VERIFY_NOTE + prompt
         with self.phase("dispatch", step=step["id"], attempt=aid, n=n, resume=bool(resume),
                         carried=carried):
             d = worker.dispatch(cfg, files, self.root, prompt, resume=resume)

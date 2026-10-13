@@ -737,3 +737,29 @@ def test_a_green_verification_step_needs_no_worker(ilk):
     v = ilk.s.one("SELECT a.outcome, a.reason FROM attempts a JOIN steps st ON st.id = a.step_id "
                   "WHERE st.plan_id LIKE '%verify'")
     assert v["outcome"] == "accepted" and "no worker" in v["reason"]
+
+
+def test_a_red_verification_step_briefs_the_worker_on_the_gate_it_already_ran(ilk):
+    # gh-resolve P5 batch, Oct 14: the worker followed V1's batch-verify instructions and went
+    # looking for V1's verification record, which does not exist under ilk2.
+    from dataclasses import asdict
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.verify_command = ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"]
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test", reason="x")
+    spec = _verify_spec()
+    spec["plans"] = spec["plans"][1:]                 # the verify plan alone, at a red head
+    spec["plans"][0]["depends_on"] = []
+    bad = {"write": "tests/test_extra.py", "text": "def test_x():\n    assert False\n"}
+    ilk.script([{"write": "tests/test_extra.py", "text": "def test_x():\n    assert True\n"}])
+    bid = ilk.submit(spec)
+    b = ilk.s.get("batches", bid)
+    from pathlib import Path as _P
+    (_P(b["execution_root"]) / "tests" / "test_extra.py").write_text(bad["text"])
+    ilk.git(b["execution_root"], "add", "-A")
+    ilk.git(b["execution_root"], "commit", "-qm", "red head")
+    ilk.drive_inprocess(bid)
+    prompts = ilk.stub_prompts()
+    assert prompts and prompts[0].startswith("This is a verification step.")
