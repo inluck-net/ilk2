@@ -131,6 +131,21 @@ def doctor() -> int:
     return 0 if ok else 1
 
 
+def shadow_problem(clone: str, of: str) -> str | None:
+    """A shadow project must be a separate clone whose push URL cannot push (docs/04 §4.2)."""
+    import re
+    import subprocess
+    if os.path.realpath(clone) == os.path.realpath(of):
+        return "a shadow project needs its own clone, not the repo it shadows"
+    urls = subprocess.run(["git", "-C", clone, "remote", "-v"], capture_output=True, text=True).stdout
+    for line in urls.splitlines():
+        name, url, kind = (line.split() + ["", "", ""])[:3]
+        if kind == "(push)" and re.match(r"(https?|ssh|git|file)://|[\w.-]+@[\w.-]+:|/", url):
+            return (f"remote {name} can push to {url}; set it to nowhere first: "
+                    f"git -C {clone} remote set-url --push {name} DISABLED-ilk2-shadow")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ilk2")
     ap.add_argument("--version", action="version", version=f"ilk2 {__version__}")
@@ -147,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("repo")
     pa.add_argument("--config", default="{}", help="JSON, or @file")
     pa.add_argument("--default-branch", default="main")
+    pa.add_argument("--shadow-of", help="the repo this separate, push-disabled clone shadows (P5)")
     pa.add_argument("--take-over", action="store_true",
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
@@ -258,7 +274,13 @@ def main(argv: list[str] | None = None) -> int:
             cfg = batches.ProjectConfig.from_json(
                 Path(a.config[1:]).read_text() if a.config.startswith("@") else a.config)
             root = os.path.realpath(a.repo)
-            if root in v1.registry_roots() and not a.take_over:
+            if a.shadow_of:
+                why = shadow_problem(root, a.shadow_of)
+                if why:
+                    print(f"refused: {why}", file=sys.stderr)
+                    return 2
+                cfg.shadow_of = os.path.realpath(a.shadow_of)
+            elif root in v1.registry_roots() and not a.take_over:
                 print(f"refused: V1 still owns {root} (~/.ilk-data/projects.json). One owner per "
                       "repo (docs/04 §4.2): add --take-over to hand it to ilk2.", file=sys.stderr)
                 return 2

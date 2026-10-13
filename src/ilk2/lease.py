@@ -72,6 +72,11 @@ def _check_length(s: Store, root: str, length_s: float) -> None:
 
 def consumer_acquire(s: Store, root: str, generation: int, expected_head: str, owner: str,
                      actual_head: str, length_s: float) -> int:
+    from . import batches
+    b = s.one("SELECT project_id FROM batches WHERE execution_root = ? ORDER BY created_at DESC "
+              "LIMIT 1", root)
+    if b and batches.project_config(s, b["project_id"]).shadow_of:
+        raise Conflict(f"{root} belongs to a shadow project: never leased to a consumer (§4.2)")
     _check_length(s, root, length_s)
     if expected_head != actual_head:
         raise Conflict(f"root head is {actual_head[:12]}, not the expected {expected_head[:12]}")

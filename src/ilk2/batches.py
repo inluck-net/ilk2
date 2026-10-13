@@ -45,6 +45,10 @@ class ProjectConfig:
     # sets about 3600). reserve: host runs kept free for this project even while it is idle.
     max_lease_s: float | None = None
     reserve: int = 0
+    # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same
+    # work as the repo it shadows, with no outward effect. Its roots are never leased to a
+    # consumer, and its events carry shadow: true.
+    shadow_of: str | None = None
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":

@@ -286,8 +286,11 @@ class Store:
         with self.tx() as c:
             ref = None
             if batch_id:
-                r = c.execute("SELECT consumer_ref FROM batches WHERE id = ?", (batch_id,)).fetchone()
+                r = c.execute("SELECT b.consumer_ref, p.config FROM batches b JOIN projects p ON "
+                              "p.id = b.project_id WHERE b.id = ?", (batch_id,)).fetchone()
                 ref = r["consumer_ref"] if r else None
+                if r and '"shadow_of": "' in (r["config"] or ""):  # docs/04 §4.2: marked shadow
+                    payload = {**(payload or {}), "shadow": True}
             cur = c.execute("INSERT INTO events(batch_id, run_id, kind, payload, consumer_ref, at, "
                             "mono) VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (batch_id, run_id, kind, dumps(payload or {}), ref, clock.wall(),

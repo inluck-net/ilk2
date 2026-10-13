@@ -119,3 +119,41 @@ def test_claim_waits_while_a_v1_runner_is_alive(ilk, v1data):
         p.kill()
         p.wait()
     assert len(v1.claim(key)) == 1
+
+
+# -- shadow projects (docs/04 §4.2, P5) ---------------------------------------------------------
+
+def _clone(ilk, tmp_path, push_url):
+    c = tmp_path / "shadow"
+    subprocess.run(["git", "clone", "-q", str(ilk.repo), str(c)], check=True)
+    subprocess.run(["git", "-C", str(c), "remote", "set-url", "--push", "origin", push_url], check=True)
+    return c
+
+
+def test_shadow_project_must_be_a_separate_clone_that_cannot_push(ilk, tmp_path):
+    from ilk2 import cli
+    ilk.make_repo()
+    assert cli.main(["project", "add", "sh", str(ilk.repo), "--shadow-of", str(ilk.repo)]) == 2
+    pushes = _clone(ilk, tmp_path, "https://github.com/x/y.git")
+    assert cli.main(["project", "add", "sh", str(pushes), "--shadow-of", str(ilk.repo)]) == 2
+    subprocess.run(["git", "-C", str(pushes), "remote", "set-url", "--push", "origin",
+                    "DISABLED-ilk2-shadow"], check=True)
+    assert cli.main(["project", "add", "sh", str(pushes), "--shadow-of", str(ilk.repo)]) == 0
+    assert batches.project_config(ilk.s, "sh").shadow_of == str(ilk.repo.resolve())
+
+
+def test_shadow_root_is_never_leased_and_its_events_say_shadow(ilk, tmp_path):
+    from conftest import one_step
+    from ilk2 import lease
+    from ilk2.store import Conflict
+    ilk.make_repo()
+    c = _clone(ilk, tmp_path, "DISABLED-ilk2-shadow")
+    ilk.repo = c
+    ilk.project(shadow_of=str(tmp_path / "consumer"))
+    bid = ilk.submit(one_step())
+    root = ilk.s.get("batches", bid)["execution_root"]
+    head = ilk.git(root, "rev-parse", "HEAD")
+    g = lease.driver_release(ilk.s, root, head)
+    with pytest.raises(Conflict, match="shadow"):
+        lease.consumer_acquire(ilk.s, root, g, head, "gh-resolve", head, 60)
+    assert all(e["payload"].get("shadow") is True for e in ilk.s.events_since(0, bid))
