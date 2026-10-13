@@ -1,4 +1,6 @@
 import json
+
+import pytest
 from pathlib import Path
 
 from conftest import gate, one_step
@@ -620,7 +622,8 @@ def test_advisory_scope_records_but_never_reds(ilk):
     assert ev and "notes/extra.txt" in ev[0]["payload"]["outside"]
 
 
-def test_a_new_run_keeps_the_steps_own_leftover_work(ilk):
+@pytest.mark.parametrize("last_outcome", ["interrupted", "red", "timeout", "crashed"])
+def test_a_new_run_keeps_the_steps_own_leftover_work(ilk, last_outcome):
     # gh-resolve P5 batch, Oct 13: an upgrade drain started a new run, whose prepare reset the
     # worktree and discarded a red attempt's 554-line diff. The step's own work is kept.
     from ilk2 import clock
@@ -631,7 +634,7 @@ def test_a_new_run_keeps_the_steps_own_leftover_work(ilk):
     step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
     rid = ilk.new_run(bid)
     ilk.s.insert("attempts", {"id": "a-old", "run_id": rid, "step_id": step["id"], "n": 1,
-                              "status": "done", "outcome": "interrupted", "parent_commit": "x",
+                              "status": "done", "outcome": last_outcome, "parent_commit": "x",
                               "created_at": clock.wall()})
     ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test",
                  reason="drained")
@@ -700,3 +703,18 @@ def test_red_first_checks_pins_from_an_earlier_step_against_the_plan_start(ilk):
                        "a.step_id WHERE st.idx = 1 ORDER BY a.n")
     assert second and second[0]["outcome"] == "red"
     assert "without your change" in second[0]["evidence"]
+
+
+def test_an_attempt_killed_at_its_bound_mid_edit_does_not_strand_the_step(ilk, monkeypatch):
+    # gh-resolve-e1, Oct 13 (V1 incident, kira #8604/#8585): an attempt killed at the time bound
+    # left uncommitted edits, and every relaunch was refused at entry, forever. In ilk2 the edits
+    # stay in the worktree, the next attempt runs on them, and nothing checks the entry state.
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"attempt_cap": 3, "term_grace": 1, "kill_grace": 1}))
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD, {"hang": True}], [])         # edit, then hang past the cap; then nothing new
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT outcome, evidence FROM attempts ORDER BY n")
+    assert [a["outcome"] for a in atts] == ["red", "accepted"]
+    assert "did not finish" in atts[0]["evidence"] and "kept in the worktree" in atts[0]["evidence"]

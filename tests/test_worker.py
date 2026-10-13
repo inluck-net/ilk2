@@ -286,3 +286,12 @@ def test_preload_puts_the_named_ranges_first_and_caps_identifier_windows(tmp_pat
     assert text.index("1502: line_1502") < text.index("## a.py")
     assert "def test_x" in text                                  # the gate's test file
     assert "[preload truncated]" not in text
+
+
+def test_private_dirs_hide_data_not_v1_code(monkeypatch, tmp_path):
+    # gh-resolve P5 batch, Oct 13: tests that load V1 skills via ~/.claude/skills -> ~/.ilk/current
+    # failed in the worker's sandbox once ~/.ilk was hidden. ~/.ilk holds code releases only.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    hidden = worker.private_dirs()
+    assert os.path.realpath(tmp_path / ".ilk-data") in hidden
+    assert os.path.realpath(tmp_path / ".ilk") not in hidden

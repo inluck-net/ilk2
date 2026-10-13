@@ -71,9 +71,10 @@ def private_dirs() -> list[str]:
     """What a worker never reads: the engine's store and run dirs (project configs, other
     attempts' transcripts), the worker template, and V1's data and worker homes. gh-resolve P5
     batch, Oct 13: a worker spent 21 of 25 minutes querying state.db and reading ilk2's source to
-    work out why earlier attempts were refused, instead of doing the step."""
+    work out why earlier attempts were refused, instead of doing the step. V1's code releases
+    (~/.ilk) stay readable: consumer tests load V1 skills through ~/.claude/skills links."""
     home = Path.home()
-    dirs = [paths.data(), paths.home() / "worker-template", home / ".ilk-data", home / ".ilk"]
+    dirs = [paths.data(), paths.home() / "worker-template", home / ".ilk-data"]
     dirs += sorted(home.glob(".claude-worker*")) + [home / ".claude-manager"]
     return [os.path.realpath(p) for p in dirs]
 
