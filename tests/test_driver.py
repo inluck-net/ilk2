@@ -763,3 +763,22 @@ def test_a_red_verification_step_briefs_the_worker_on_the_gate_it_already_ran(il
     ilk.drive_inprocess(bid)
     prompts = ilk.stub_prompts()
     assert prompts and prompts[0].startswith("This is a verification step.")
+
+
+def test_status_by_consumer_ref_returns_the_batch_meta(ilk, capsys):
+    # option (c), gh-resolve-e1's ask (Oct 14): look batches up by the consumer's own ref, and
+    # keep the consumer's per-batch record (issue, run id, rework context) with the batch.
+    from ilk2 import batches, cli, plans
+    ilk.make_repo()
+    ilk.project()
+    a = batches.submit(ilk.s, "proj", plans.from_dict(one_step()), consumer_ref="issue-1",
+                       meta={"issue": 1, "run_id": "r1"})
+    b = batches.submit(ilk.s, "proj", plans.from_dict(one_step()), consumer_ref="issue-2")
+    assert cli.main(["status", "--consumer-ref", "issue-1", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [x["id"] for x in out["batches"]] == [a]
+    assert out["batches"][0]["meta"] == {"issue": 1, "run_id": "r1"}
+    assert cli.main(["status", "--batch", b, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["batches"][0]["meta"] is None
+    with pytest.raises(batches.SubmitRejected):
+        batches.submit(ilk.s, "proj", plans.from_dict(one_step()), meta=["not", "an", "object"])

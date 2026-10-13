@@ -44,10 +44,24 @@ def _human(obj) -> str:
     return "\n".join(lines) or "(nothing)"
 
 
-def status(s, batch_id: str | None) -> dict:
+def _meta(arg: str | None) -> dict | None:
+    if arg is None:
+        return None
+    try:
+        return json.loads(Path(arg[1:]).read_text() if arg.startswith("@") else arg)
+    except (OSError, ValueError) as e:
+        raise batches.SubmitRejected([f"--meta is not readable JSON: {e}"])
+
+
+def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
     from . import lease
-    sql = "SELECT * FROM batches" + (" WHERE id = ?" if batch_id else " ORDER BY created_at DESC LIMIT 50")
-    rows = s.all(sql, *([batch_id] if batch_id else []))
+    if batch_id:
+        rows = s.all("SELECT * FROM batches WHERE id = ?", batch_id)
+    elif consumer_ref:  # every batch a consumer submitted under one ref, newest first
+        rows = s.all("SELECT * FROM batches WHERE consumer_ref = ? ORDER BY created_at DESC",
+                     consumer_ref)
+    else:
+        rows = s.all("SELECT * FROM batches ORDER BY created_at DESC LIMIT 50")
     out = []
     for b in rows:
         plans = []
@@ -75,8 +89,12 @@ def status(s, batch_id: str | None) -> dict:
                     "execution_root": b["execution_root"],
                     "root_lease": dict(lr) if lr else None,
                     "accepted_head": lr["accepted_head"] if lr else None, "plans": plans,
-                    "refusals": [dict(r) for r in s.open_refusals(b["id"])]})
-    nh = [dict(r) for r in s.open_human_rows(batch_id)]
+                    "refusals": [dict(r) for r in s.open_refusals(b["id"])],
+                    "meta": json.loads(b["snapshot"]).get("meta")})
+    if consumer_ref and not batch_id:
+        nh = [dict(r) for b in rows for r in s.open_human_rows(b["id"])]
+    else:
+        nh = [dict(r) for r in s.open_human_rows(batch_id)]
     draining = s.one("SELECT 1 FROM meta WHERE key = 'draining' AND value = '1'") is not None
     return {"batches": out, "needs_human": nh, "draining": draining}  # B4: upgrade in progress
 
@@ -165,10 +183,13 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--deny-path", action="append", default=[],
                     help="a path or glob no step may change, for this batch only (repeatable; adds "
                          "to the project's deny_paths)")
+    sm.add_argument("--meta", help="a JSON object (or @file) the consumer keeps with the batch; "
+                    "status returns it unchanged")
     sm.add_argument("--json", action="store_true")
 
     st = sub.add_parser("status")
     st.add_argument("--batch")
+    st.add_argument("--consumer-ref", help="every batch submitted with this --consumer-ref")
     st.add_argument("--json", action="store_true")
 
     ev = sub.add_parser("events")
@@ -302,13 +323,13 @@ def main(argv: list[str] | None = None) -> int:
                                      consumer_ref=a.consumer_ref,
                                      root=Path(a.root) if a.root else None,
                                      originals={f.name: f.read_text()}, branch=a.branch,
-                                     deny_paths=a.deny_path)
+                                     deny_paths=a.deny_path, meta=_meta(a.meta))
             except batches.SubmitRejected as e:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
             _out({"batch": bid}, a.json) if a.json else print(bid)
         elif a.cmd == "status":
-            _out(status(s, a.batch), a.json)
+            _out(status(s, a.batch, a.consumer_ref), a.json)
         elif a.cmd == "events":
             evs = s.events_since(a.since, a.batch)
             if a.json:

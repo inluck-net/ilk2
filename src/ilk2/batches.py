@@ -15,6 +15,7 @@ from . import clock, gitops, lease, paths, plans, procs
 from .store import Conflict, Store, dumps, new_id
 
 DEFAULT_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+META_MAX = 16_384
 
 
 @dataclass
@@ -212,7 +213,7 @@ class SubmitRejected(ValueError):
 def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None = None,
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
            originals: dict | None = None, branch: str | None = None,
-           deny_paths: list[str] | None = None) -> str:
+           deny_paths: list[str] | None = None, meta: dict | None = None) -> str:
     proj = s.get("projects", project_id)
     cfg = ProjectConfig.from_json(proj["config"])
     repo = Path(proj["repo_root"])
@@ -271,6 +272,12 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     snapshot = spec.to_dict()
     if deny_paths:
         snapshot["deny_paths"] = list(deny_paths)  # submit --deny-path: this batch only, additive
+    if meta is not None:
+        # The consumer's own record of the batch (gh-resolve: issue, run id, rework context),
+        # returned unchanged by status; ilk2 never reads it (option (c), Oct 14).
+        if not isinstance(meta, dict) or len(json.dumps(meta)) > META_MAX:
+            raise SubmitRejected([f"--meta must be a JSON object of at most {META_MAX} bytes"])
+        snapshot["meta"] = meta
     with s.tx():
         s.insert("batches", {"id": bid, "project_id": project_id, "base_commit": base_sha,
                              "branch": branch, "execution_root": str(root), "priority": priority,
