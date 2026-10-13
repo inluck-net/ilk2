@@ -81,25 +81,6 @@ def status(s, batch_id: str | None) -> dict:
     return {"batches": out, "needs_human": nh, "draining": draining}  # B4: upgrade in progress
 
 
-def report(s) -> dict:
-    acc = s.all("SELECT st.id, (SELECT SUM(a.ended_at - a.created_at) FROM attempts a WHERE "
-                "a.step_id = st.id) AS secs FROM steps st WHERE st.status = 'accepted'")
-    secs = [r["secs"] or 0 for r in acc]
-    atts = s.all("SELECT outcome, timings FROM attempts WHERE status = 'done'")
-    nothing = sum(1 for a in atts if a["outcome"] in ("red", "timeout", "crashed")
-                  and json.loads(a["timings"] or "{}").get("tool_counts", {}).get("Edit", 0) == 0)
-    firsts = [json.loads(a["timings"] or "{}").get("timings", {}).get("first_edit_s") for a in atts]
-    firsts = [f for f in firsts if f is not None]
-    humans = s.one("SELECT COUNT(*) n FROM transitions WHERE actor = 'human'")["n"]
-    nb = s.one("SELECT COUNT(*) n FROM batches")["n"] or 1
-    return {"minutes_per_accepted_step": round(sum(secs) / 60 / len(secs), 2) if secs else None,
-            "accepted_steps": len(secs),
-            "share_attempts_producing_nothing": round(nothing / len(atts), 3) if atts else None,
-            "human_transitions_per_batch": round(humans / nb, 2),
-            "refused_hours": {k: round(v, 2) for k, v in s.refused_hours().items()},
-            "minutes_to_first_edit_median": round(sorted(firsts)[len(firsts) // 2] / 60, 2) if firsts else None}
-
-
 def doctor() -> int:
     """Checks a human can read: release, launchd jobs, supervisor tick, worker template keys."""
     import os
@@ -231,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:
 
     rp = sub.add_parser("report")
     rp.add_argument("--json", action="store_true")
+    rp.add_argument("--project", help="one project (the §4.5 targets compare a project with its V1 baseline)")
+    rp.add_argument("--v1-baseline", action="store_true",
+                    help="with --project: also V1's numbers for the same repo, by the same method")
 
     a = ap.parse_args(argv)
     if a.cmd is None:
@@ -360,7 +344,14 @@ def main(argv: list[str] | None = None) -> int:
                 g = lease.recover(s, a.root, a.generation, a.new_head or head)
             _out({"generation": g}, True)
         elif a.cmd == "report":
-            _out(report(s), a.json)
+            from . import report as report_mod
+            out = report_mod.build(s, project=a.project)
+            if a.v1_baseline and a.project:
+                from . import v1
+                key = batches.project_config(s, a.project).v1_key or v1.find_key(
+                    s.get("projects", a.project)["repo_root"])
+                out["v1_baseline"] = v1.baseline(key) if key else None
+            _out(out, a.json)
     except Conflict as e:
         _out({"error": "conflict", "detail": str(e)}, True)
         return 3

@@ -154,3 +154,51 @@ def claim(key: str) -> list[Path]:
             continue
         out.append(dest)
     return out
+
+
+def baseline(key: str) -> dict:
+    """V1's minutes per accepted step for one project, by ilk2's definition (docs/04 §4.5): total
+    iteration minutes over steps advanced, from V1's close records. A record holds each plan's
+    state after its iteration, so steps advanced are the per-plan increase between records; the
+    first record has no prior state and counts 0 (it understates V1 by at most one iteration)."""
+    log = data_root() / "projects" / key / "logs" / ".ilk-loop.log"
+    recs = []
+    for line in log.read_text().splitlines() if log.exists() else []:
+        if '"record_phase": "close"' not in line:
+            continue
+        try:
+            recs.append(json.loads(line[line.index("{"):]))
+        except ValueError:
+            continue
+    recs.sort(key=lambda d: d.get("timestamp", ""))
+
+    def pos(v: dict) -> int:
+        try:
+            s = int(v.get("step") or 0)
+        except ValueError:
+            s = 0
+        if v.get("status") == "shipped":
+            try:
+                s = max(s, int(v.get("estimated_steps") or s))
+            except ValueError:
+                pass
+        return s
+    last: dict[str, int] = {}
+    steps = secs = zero = 0
+    for d in recs:
+        adv = 0
+        for plan, v in ((d.get("execution") or {}).get("step_to") or {}).items():
+            if isinstance(v, dict):
+                p = pos(v)
+                if plan in last:
+                    adv += max(0, p - last[plan])
+                last[plan] = p
+        steps += adv
+        secs += d.get("duration_sec") or 0
+        zero += adv == 0
+    return {"key": key, "iterations": len(recs),
+            "from": recs[0].get("timestamp") if recs else None,
+            "to": recs[-1].get("timestamp") if recs else None,
+            "iteration_minutes": round(secs / 60), "steps_advanced": steps,
+            "iterations_without_a_step": zero,
+            "minutes_per_accepted_step": round(secs / 60 / steps, 1) if steps else None}

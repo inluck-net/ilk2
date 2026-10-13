@@ -156,6 +156,17 @@ These items only matter once gh-resolve's resolver runs on ilk2. They stay open 
 
 Also fixed with these: an attempt closed because its run had already ended now ends when the run ended, not when it was found. `ilk2 report` had counted 294.6 and 291.4 min for two attempts that ran 0.7 and 0.2 min.
 
+## P4 evidence (gh-resolve on ilk2)
+
+`ilk2 report --project gh-resolve --v1-baseline --json` gives both sides by one method (§4.5 row 1: iteration or attempt minutes per accepted step).
+
+| | Sample | Minutes per accepted step | Note |
+|---|---|---|---|
+| V1, gh-resolve | 14 close records, Oct 12 10:06-23:07 (`logs/.ilk-loop.log`), 669 min, 9 steps advanced, 5 iterations advancing nothing | 74.4 | the resolver-speed batch 2026-10-10c and neighbours |
+| ilk2, gh-resolve | 1 batch, 2 steps (D-523, D-469), Oct 13 | 10.2 | test-only fixes: smaller steps than V1's sample |
+
+**Not a verdict yet:** n=2 against n=14, and step sizes differ. §4.6's kill criterion asks for 2 weeks on the same project. gh-resolve's development now runs on ilk2 (P4 handover done Oct 13), so the evidence accumulates from real `/ilk-plan` batches, measured by this command.
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |
