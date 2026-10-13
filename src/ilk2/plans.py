@@ -121,7 +121,11 @@ def load_json(path: Path) -> BatchSpec:
 
 _FRONT = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _STEP = re.compile(r"(?m)^### Step (\d+)\s*[—:-]+\s*(.*)$")
-_CMD = re.compile(r'-\s*command:\s*"((?:[^"\\]|\\.)*)"(?:\s*\n\s*timeout:\s*(\d+))?')
+# A local_checks entry: `- command: <scalar>` with an optional `timeout:` line. The scalar is
+# double-quoted, single-quoted or plain (to the end of the line): gh-resolve's plans use all three.
+_CMD = re.compile(r"""-\s*command:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\n]+?))[ \t]*$"""
+                  r"""(?:\s*\n\s*timeout:\s*(\d+))?""", re.M)
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _frontmatter(text: str) -> dict:
@@ -152,21 +156,58 @@ def _frontmatter(text: str) -> dict:
     return out
 
 
+def _block_gates(block: str) -> list[Gate] | None:
+    """Gates of one local_checks block, or None if any command does not split (bad quoting)."""
+    gates = []
+    for j, (dq, sq, plain, tmo) in enumerate(_CMD.findall(block)):
+        c = dq.replace('\\"', '"').replace("\\\\", "\\") if dq else sq.replace("''", "'") if sq else plain
+        try:
+            cmd = shlex.split(c)
+        except ValueError:
+            return None
+        env = {}
+        while cmd and _ASSIGN.match(cmd[0]):  # leading VAR=value: the gate's env, not argv[0]
+            k, _, v = cmd.pop(0).partition("=")
+            env[k] = v
+        if not cmd:
+            return None
+        adapter = adapter_for(cmd)
+        # A V1 local check that is not a test runner is an exit-code acceptance check
+        gates.append(Gate(name=f"local-check-{j + 1}", adapter=adapter, command=cmd,
+                          cap_s=int(tmo) if tmo else DEFAULT_GATE_CAP_S,
+                          declares_tests=adapter != "shell", env=env))
+    return gates
+
+
+def _local_checks(sec: str) -> list[Gate]:
+    """A step's gates from its last local_checks block whose commands all parse. Some V1 plans
+    keep a broken block (unescaped quotes) followed by a corrected copy (gh-resolve 2026-10-02f);
+    the importer must neither crash on the first nor run both."""
+    blocks = re.split(r"(?m)^\s*local_checks:\s*$", sec)[1:]
+    good = [g for g in (_block_gates(b.split("```")[0]) for b in blocks) if g is not None]
+    return good[-1] if good else []
+
+
 def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
     """A V1 sub-plan: frontmatter, then '### Step N — title' sections with local_checks."""
     fm = _frontmatter(text)
     slug = slug or fm.get("plan") or "plan"
     body = _FRONT.sub("", text, count=1)
-    heads = list(_STEP.finditer(body))
+    # Steps live in the '## Steps' section. Workers append '### Step N' notes under later
+    # sections ('## Findings'); those are not steps (real gh-resolve masters, Oct 13).
+    m = re.search(r"(?m)^## Steps\s*$", body)
+    if m:
+        end = re.search(r"(?m)^## ", body[m.end():])
+        steps_end = m.end() + end.start() if end else len(body)
+        heads = [h for h in _STEP.finditer(body) if m.end() <= h.start() < steps_end]
+    else:
+        heads = list(_STEP.finditer(body))
     preamble = body[: heads[0].start()] if heads else body
     steps = []
     for i, h in enumerate(heads):
         sec = body[h.end(): heads[i + 1].start() if i + 1 < len(heads) else len(body)]
         sec = re.split(r"(?m)^## ", sec)[0]
-        gates = [Gate(name=f"local-check-{j + 1}", adapter=adapter_for(shlex.split(c)),
-                      command=shlex.split(c.replace('\\"', '"')),
-                      cap_s=int(t) if t else DEFAULT_GATE_CAP_S)
-                 for j, (c, t) in enumerate(_CMD.findall(sec))]
+        gates = _local_checks(sec)
         # "Remove every xfail" (all of the pinned file's tests must now pass) -> must_pass on the
         # first local_checks path. A partial "Remove AC-1's xfail" needs ids; left to the author.
         must = []

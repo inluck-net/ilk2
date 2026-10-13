@@ -37,6 +37,9 @@ class ProjectConfig:
     # Paths no batch may change (docs/06 R8), e.g. gh-resolve's write-target denylist
     # ["convex/migrations/"]: a directory prefix or a glob. Checked on every attempt.
     deny_paths: list[str] = field(default_factory=list)
+    # The V1 data dir key of a project taken over from V1: queued masters /ilk-plan writes
+    # there are claimed and submitted by the supervisor (docs/04 §4.3, ilk2/v1.py).
+    v1_key: str | None = None
 
     @staticmethod
     def from_json(text: str) -> "ProjectConfig":

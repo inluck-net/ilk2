@@ -87,6 +87,7 @@ class Supervisor:
         with self.s.tx() as c:
             c.execute("UPDATE supervisor SET tick_wall = ?, tick_mono = ? WHERE id = 1", (now_w, now_m))
         self.reap()
+        self.claim_v1()
         self.close_orphan_attempts()
         self.check_stalls()
         self.handle_cancels()
@@ -133,6 +134,27 @@ class Supervisor:
                 # The driver ended its own run with a failure (error, store-busy, ...): that
                 # is a restart like a crash, or it would respawn forever (Codex M1 review #3).
                 self.after_run_ended(run, run["terminal_reason"])
+
+    def claim_v1(self) -> None:
+        """Submit the queued V1 masters of projects taken over from V1 (docs/04 §4.3)."""
+        from . import plans as plans_mod, v1
+        for p in self.s.all("SELECT id FROM projects"):
+            key = batches.project_config(self.s, p["id"]).v1_key
+            if not key:
+                continue
+            for path in v1.claim(key):
+                ref = "v1:" + path.name.split(".md")[0]
+                try:
+                    spec = plans_mod.parse_v1_master(path)
+                    bid = batches.submit(self.s, p["id"], spec, consumer_ref=ref,
+                                         originals={"v1_master": str(path)})
+                    self.s.event("v1.claimed", {"master": path.name, "batch": bid}, batch_id=bid)
+                except Exception as e:  # noqa: BLE001 - a bad plan is a planner's job, not a crash
+                    self.s.event("v1.claim-rejected", {"master": path.name, "error": str(e)[:500]})
+                    self.s.open_needs_human("plan-rejected", f"{ref}: {str(e)[:1500]}",
+                                            f"fix the plan, rename {path.name} back to "
+                                            f"{path.name.replace(v1.CLAIMED, '')} to resubmit",
+                                            project_id=p["id"])
 
     def close_orphan_attempts(self) -> None:
         """An attempt still `running` under an ended run can never finish: close it (I11)."""

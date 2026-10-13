@@ -318,17 +318,28 @@ def test_shell_gate_runs_green_at_base(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
 
 
-def test_shell_gate_red_at_base_blocks_the_batch(ilk):
+def test_shell_gate_is_judged_absolutely_red_at_base_is_allowed(ilk):
+    # V1 local checks are acceptance checks, often red at the base by design ("no xfail left").
+    # A shell gate must exit 0 after its step; an unchanged red is never a pass (B5).
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD], [GOOD, {"write": "done.txt", "text": "y"}])
+    check = {"name": "accept", "adapter": "shell", "declares_tests": False,
+             "command": ["python", "-c", "import os; raise SystemExit(0 if os.path.exists('done.txt') else 1)"]}
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py"), check]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    outs = [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts ORDER BY n")]
+    assert outs == ["red", "accepted"]  # attempt 1 left the check red: not accepted
+
+
+def test_commits_carry_the_v1_plan_trailer(ilk):
     ilk.make_repo()
     ilk.project()
     ilk.script([GOOD])
-    lint = {"name": "lint", "adapter": "shell", "declares_tests": False,
-            "command": ["python", "-c", "raise SystemExit(1)"]}
-    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py"), lint]))
-    assert ilk.drive_inprocess(bid) == "blocked (base-unmeasured)"
-    assert ilk.stub_calls() == 0
-    row = ilk.s.open_human_rows(bid)[0]
-    assert "red at the base" in row["detail"]
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    assert "[plan:p#step-0]" in ilk.git(b["execution_root"], "log", "-1", "--format=%B", b["branch"])
 
 
 def test_s21_timeout_class_rerun_costs_no_attempt(ilk):

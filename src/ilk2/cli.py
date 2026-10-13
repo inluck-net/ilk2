@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from ilk2 import __version__
@@ -139,11 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--stop-after", type=float)
     sub.add_parser("health")
 
-    pa = sub.add_parser("project").add_subparsers(dest="pcmd").add_parser("add")
+    psub = sub.add_parser("project").add_subparsers(dest="pcmd")
+    pa = psub.add_parser("add")
     pa.add_argument("project_id")
     pa.add_argument("repo")
     pa.add_argument("--config", default="{}", help="JSON, or @file")
     pa.add_argument("--default-branch", default="main")
+    pa.add_argument("--take-over", action="store_true",
+                    help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
+    psub.add_parser("take-over").add_argument("project_id")
 
     sm = sub.add_parser("submit")
     sm.add_argument("file")
@@ -238,9 +244,28 @@ def main(argv: list[str] | None = None) -> int:
     s = _store()
     try:
         if a.cmd == "project":
-            cfg = Path(a.config[1:]).read_text() if a.config.startswith("@") else a.config
-            batches.project_add(s, a.project_id, Path(a.repo), batches.ProjectConfig.from_json(cfg),
-                                a.default_branch)
+            from . import v1
+            if a.pcmd == "take-over":
+                proj = s.get("projects", a.project_id)
+                key = v1.find_key(proj["repo_root"])
+                done = v1.take_over(proj["repo_root"], key)
+                cfg = batches.project_config(s, a.project_id)
+                cfg.v1_key = key
+                s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))},
+                         actor="human", reason="take over from V1")
+                print(json.dumps(done))
+                return 0
+            cfg = batches.ProjectConfig.from_json(
+                Path(a.config[1:]).read_text() if a.config.startswith("@") else a.config)
+            root = os.path.realpath(a.repo)
+            if root in v1.registry_roots() and not a.take_over:
+                print(f"refused: V1 still owns {root} (~/.ilk-data/projects.json). One owner per "
+                      "repo (docs/04 §4.2): add --take-over to hand it to ilk2.", file=sys.stderr)
+                return 2
+            if a.take_over:
+                cfg.v1_key = v1.find_key(root)
+                print(json.dumps(v1.take_over(root, cfg.v1_key)), file=sys.stderr)
+            batches.project_add(s, a.project_id, Path(a.repo), cfg, a.default_branch)
             print(a.project_id)
         elif a.cmd == "submit":
             f = Path(a.file)

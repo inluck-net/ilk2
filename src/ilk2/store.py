@@ -41,6 +41,8 @@ NEEDS_HUMAN_REASONS = {
     # Not in the design's list (§2.11.3): a step gate that becomes permanently unmeasured
     # after the base measured fine (S4 when the runner disappears mid-batch).
     "unmeasured",
+    # A V1 master claimed for an ilk2-owned project that ilk2 cannot accept (docs/04 §4.3).
+    "plan-rejected",
 }
 
 SCHEMA = """

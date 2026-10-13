@@ -167,12 +167,8 @@ class Driver:
             self.block_batch("base-unmeasured",
                              f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
                              f"fix the gate, then: ilk2 resume {self.batch_id}")
-        if gate.adapter == "shell" and r.outcome == "fail":
-            # §2.5.1: a shell check has no test ids to exclude, so red at the base could never
-            # turn green through base comparison; it must be green before the batch starts.
-            self.block_batch("base-unmeasured",
-                             f"shell gate {gate.name} is red at the base {commit[:12]} ({r.reason}): "
-                             f"{r.tail[-500:]}", f"fix the check, then: ilk2 resume {self.batch_id}")
+        # A shell gate red at the base is recorded, not blocking: it is judged absolutely after
+        # its step (run_gates), never against this base (§2.5.1, revised Oct 13).
         failures = r.failure_map()
         self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
                                             "spec_version": spec, "commit_sha": commit,
@@ -480,6 +476,10 @@ class Driver:
                 self.event("gate.timeout", gate=gate.name)
             base = self.base_for(gate, spec)
             runs.append(r)
+            if gate.adapter == "shell":
+                # Absolute: exit 0 after the step. Comparing with the base would let an
+                # unchanged red (same exit, same output) pass vacuously (B5).
+                base = {}
             v = gates.judge(r, base, expect_red, obligations=False)
             if r.missing_paths and gate.declares_tests and v.outcome != "unmeasured":
                 # At the base an absent path is 0 tests; after a step it is a missing test
@@ -610,7 +610,10 @@ class Driver:
         faults.hit("after-intent")
         sha = gitops.find_trailer_commit(self.root, self.branch, aid)
         if sha is None:
-            msg = f"{step['title']}\n\nilk2 batch {self.batch_id}, step {step['id']}"
+            plan = self.s.get("plans", step["plan_id"])
+            # V1's trailer too, so V1-style checks ("step 0 is committed") keep working
+            msg = (f"{step['title']} [plan:{plan['slug']}#step-{step['idx']}]\n\n"
+                   f"ilk2 batch {self.batch_id}, step {step['id']}")
             sha = gitops.commit_tree(self.root, tree, parent, msg, aid)
             gitops.move_branch(self.root, self.branch, sha, parent)
         faults.hit("after-commit")

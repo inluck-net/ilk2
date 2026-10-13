@@ -112,3 +112,77 @@ def test_submit_preflight_rejects_a_gate_that_cannot_run(ilk, tmp_path):
                     "gates": [{"name": "unit", "adapter": "pytest",
                                "command": ["python", "-m", "pytest", "-q", "tests"]}]}]}]})
     assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
+
+
+SUBPLAN_WITH_FINDINGS = """---
+plan: waits
+---
+
+# Sub-plan: Waits
+
+## Steps
+
+### Step 0 — Add the regression
+```yaml
+local_checks:
+  - command: "python3 -m pytest -q tests/test_a.py"
+    timeout: 600
+  - command: "bash -c '! grep -nE mark.xfail tests/test_a.py'"
+```
+
+### Step 1 — Prove the path
+```yaml
+local_checks:
+  - command: "python3 -m pytest -q tests/test_b.py"
+```
+
+## Findings
+
+### Step 0 — old-code reproduction (base `abc`)
+
+notes a worker appended after running step 0
+
+### Step 1 — production path (commit `93de960e`)
+
+more notes
+"""
+
+
+def test_v1_subplan_steps_come_only_from_the_steps_section():
+    # Real gh-resolve masters (Oct 13): workers append '### Step N' notes under '## Findings';
+    # they were imported as gate-less steps, and 4 of the 5 latest masters were rejected.
+    p = plans.parse_v1_subplan(SUBPLAN_WITH_FINDINGS)
+    assert [s.title for s in p.steps] == ["Add the regression", "Prove the path"]
+    shell = [g for g in p.steps[0].gates if g.adapter == "shell"]
+    assert len(shell) == 1 and shell[0].declares_tests is False  # an exit-code check
+    assert plans.check(plans.BatchSpec(plans=[p])) == []
+
+
+def test_v1_step_uses_its_last_parseable_local_checks_block():
+    # gh-resolve 2026-10-02f: a step carries a broken block (unescaped quotes) and then a
+    # corrected copy. Both HEAD and V1-import crashed on the first; use the last good block.
+    text = (
+        "---\nplan: up\n---\n\n## Steps\n\n### Step 0: pins\n"
+        '```yaml\nlocal_checks:\n  - command: "python3 -c "import sys""\n```\n'
+        "Corrected:\n"
+        '```yaml\nlocal_checks:\n  - command: "python3 -c \\"import sys\\""\n    timeout: 120\n```\n')
+    p = plans.parse_v1_subplan(text)
+    assert [g.command for g in p.steps[0].gates] == [["python3", "-c", "import sys"]]
+    assert p.steps[0].gates[0].cap_s == 120
+
+
+def test_v1_local_checks_in_every_yaml_scalar_style_with_env_assignments():
+    # 748 of gh-resolve's gate-less steps used unquoted YAML commands with a leading
+    # PYTHONPATH=tools; an assignment as argv[0] would not even execute.
+    text = (
+        "---\nplan: s\n---\n\n## Steps\n\n### Step 0 — skeleton\n"
+        "```yaml\nlocal_checks:\n"
+        "  - command: PYTHONPATH=tools python3 -m pytest -q tests/test_config.py\n    timeout: 120\n"
+        "  - command: bash -o pipefail -c 'jq -e \"length >= 5\" f.json'\n"
+        "  - command: 'python3 -c \"print(1)\"'\n"
+        "```\n")
+    g = plans.parse_v1_subplan(text).steps[0].gates
+    assert g[0].adapter == "pytest" and g[0].command == ["python3", "-m", "pytest", "-q", "tests/test_config.py"]
+    assert g[0].env == {"PYTHONPATH": "tools"} and g[0].cap_s == 120
+    assert g[1].adapter == "shell" and g[1].command[:4] == ["bash", "-o", "pipefail", "-c"]
+    assert g[2].command == ["python3", "-c", 'print(1)']
