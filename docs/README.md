@@ -13,6 +13,7 @@ First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by
 | 5 | [Open questions](05-open-questions.md) | What still needs a decision before code |
 | 6 | [Open items after design close](06-open-items.md) | What is still open, and at which phase it gets resolved |
 | E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
+| E2 | [Evidence: what the full suite costs](evidence/2026-10-13-full-suite-cost.md) | Where do full-suite runs cost time in V1's repos, and would splitting into component repos help? |
 
 **Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
 - invariant I10, refusal accounting;
