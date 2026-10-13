@@ -405,3 +405,11 @@ def test_escalation_round_gets_all_the_evidence_in_a_fresh_session(ilk):
     prompt = ilk.stub_prompts()[3]
     assert all(f"Attempt {k}" in prompt for k in (1, 2, 3)) and "test_add" in prompt
     assert ilk.s.open_human_rows(bid) == []
+
+
+def test_deny_paths_allow_a_broader_scope_that_contains_them(ilk):
+    # kira-shadow, Oct 13: scope ['convex/'] with deny ['convex/migrations/'] was rejected.
+    # Edits under the denied path are still red at attempt time (the test above).
+    ilk.make_repo()
+    ilk.project(deny_paths=["tests/fixtures/"])
+    ilk.submit(one_step(scope=["tests/", "calc.py"]))

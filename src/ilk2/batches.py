@@ -148,8 +148,9 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)
     for p in spec.plans:
         for i, st in enumerate(p.steps):
-            bad = [x for x in st.scope if path_matches(x, cfg.deny_paths)
-                   or any(path_matches(d, [x]) for d in cfg.deny_paths)]
+            # a scope entry inside a denied path; a broader scope is fine, since the attempt-time
+            # check turns any edit under a denied path red
+            bad = [x for x in st.scope if path_matches(x, cfg.deny_paths)]
             if bad:
                 problems.append(f"plan {p.slug} step {i}: scope names denied paths {bad} "
                                 f"(project deny_paths {cfg.deny_paths})")
