@@ -167,6 +167,22 @@ Also fixed with these: an attempt closed because its run had already ended now e
 
 **Not a verdict yet:** n=2 against n=14, and step sizes differ. §4.6's kill criterion asks for 2 weeks on the same project. gh-resolve's development now runs on ilk2 (P4 handover done Oct 13), so the evidence accumulates from real `/ilk-plan` batches, measured by this command.
 
+### Batch speed, gh-resolve P5 batch `b-ffcd5f4a03e9` (Oct 13)
+
+An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; gates took seconds. What it was spent on, and what changed (each with a test that fails without it):
+
+| Found | Fix |
+|---|---|
+| A step's V1 `scope_paths` was enforced, but its gate needed a file outside it; 3 attempts red. V1 reads `scope_paths` only in `plan_lint` and the ship report | Scope is advice for projects taken over from V1 (`enforce_scope`); the brief states the scope either way |
+| A worker spent 21 of 25 min querying `state.db` and reading ilk2's source to work out why it had been refused | The sandbox hides the store, run dirs, worker template, `~/.ilk-data` and V1 worker homes (contents only) |
+| Every attempt spent 1-2 min searching the disk for the MASTER its sub-plan says to read | Plan documents are snapshotted at claim and copied into each attempt; the brief names them |
+| Two tests failing at the base read as new in every later run: the gate's `TMPDIR` under `~/.ilk2/data/runs/<run>` kept the run id in the fingerprint | Paths under `~/.ilk2` and the measurement root are volatile; the fingerprint version is part of `spec_version` |
+| A new run (resume, upgrade drain) reset the worktree; a 554-line diff red only on those inherited failures was lost | A new run keeps the step's own leftover work (`worktree.kept`) |
+| Preload: 150k characters of identifier windows from 3 files, truncated before the gate's test files; the sub-plan's 8 `file:line` ranges absent | Named ranges first; windows capped at 25k per file (judgment call) |
+| Imported before the ceremony merge: 18 steps | `amend` op `merge_ceremony`: 13 |
+
+After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |
