@@ -1106,3 +1106,24 @@ def test_ilk2_apply_leaves_a_conflict_with_kept_work_to_the_worker_once(ilk, cap
     (d.root / "calc.py").write_text("def add(a, b):\n    return a + b  # resolved\n")
     assert d.apply_requested(step, kept=True) == ([], [])  # not applied over the resolution
     assert "resolved" in (d.root / "calc.py").read_text()
+
+
+def test_a_projects_batches_on_one_base_share_its_measurement(ilk):
+    # F5 (docs/06): batches on the same base re-measured it; a rezmac base suite costs a median
+    # 710 s (E2). Same project, spec and commit: reused, never older than a day.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD], [GOOD], [GOOD])
+    first = ilk.submit(one_step())
+    assert ilk.drive_inprocess(first) == "shipped"
+    second = ilk.submit(one_step())
+    assert ilk.drive_inprocess(second) == "shipped"
+    reused = [e["payload"] for e in ilk.s.events_since(0, second) if e["kind"] == "base.reused"]
+    assert [r["from_batch"] for r in reused] == [first]
+    rows = ilk.s.all("SELECT batch_id, at FROM base_measurements WHERE batch_id IN (?, ?)", first, second)
+    assert len({r["at"] for r in rows}) == 1                   # the original time, not extended
+    with ilk.s.tx() as c:
+        c.execute("UPDATE base_measurements SET at = at - 90000")  # older than a day
+    third = ilk.submit(one_step())
+    assert ilk.drive_inprocess(third) == "shipped"
+    assert not [e for e in ilk.s.events_since(0, third) if e["kind"] == "base.reused"]

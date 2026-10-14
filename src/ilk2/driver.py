@@ -31,6 +31,7 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
 # Run endings that are not a failure of the run: they never consume a restart (§2.10).
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
+BASE_REUSE_S = 86_400  # F5: a project's base measurement serves its other batches this long
 SETUP_DONE = ".ilk2-setup-done"  # in a diagnostic worktree: its setup hook completed
 KEPT_NOTE = ("The worktree still holds the previous attempt's changes (the driver restarted "
              "between attempts and kept them). Start from them: check what they do against the "
@@ -348,6 +349,26 @@ class Driver:
                          "spec_version = ? AND commit_sha = ?", self.batch_id, gate.name, spec, commit)
         if row:
             return json.loads(row["failures"])
+        # F5 (docs/06): another batch of this project measured the same spec at the same commit.
+        # The spec version hashes the command, its config files and the pinned environment, so
+        # the result is the same measurement; a rezmac base suite costs a median 710 s (E2).
+        # Judgment call: reuse for BASE_REUSE_S (24 h) and keep the original time, so reuse
+        # never extends a measurement's life; wrong if bases go stale within a day through
+        # wall-clock-dependent tests.
+        prior = self.s.one(
+            "SELECT bm.* FROM base_measurements bm JOIN batches b ON b.id = bm.batch_id "
+            "WHERE b.project_id = ? AND bm.batch_id != ? AND bm.spec_version = ? AND "
+            "bm.commit_sha = ? AND bm.outcome != 'unmeasured' AND bm.at > ? "
+            "ORDER BY bm.at DESC LIMIT 1", self.project_id, self.batch_id, spec, commit,
+            clock.wall() - BASE_REUSE_S)
+        if prior:
+            self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
+                                                "spec_version": spec, "commit_sha": commit,
+                                                "outcome": prior["outcome"],
+                                                "failures": prior["failures"], "at": prior["at"]})
+            self.event("base.reused", gate=gate.name, commit=commit, from_batch=prior["batch_id"],
+                       age_s=round(clock.wall() - prior["at"]))
+            return json.loads(prior["failures"])
         r = gates.measure(gate, where, env, self.dir / "gates", spec)
         if r.outcome == "unmeasured":
             self.block_batch("base-unmeasured",
