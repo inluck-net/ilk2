@@ -123,8 +123,8 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 | P3 first real consumer | Oct 13 | gh-triage (not todo-triage, Chad): 2 batches, 4 of 4 steps first-attempt, merged |
 | P4 gh-resolve dev | Oct 13 | handover of gh-resolve's development; attribution A1-A10; the P5 adapter batch (15 steps) shipped Oct 14 05:37 and was merged (gh-resolve 2510bb8f). Baseline: [evidence](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) |
 | ilk-skills dev | Oct 14 00:30 | taken over on chad-mbp (Chad's go), earlier than planned; V1's scheduler then switched off on chad-mbp (00:40) |
-| P5/P6 resolver | in progress | rezmac first (Chad, Oct 14): shadow mode on (`kira-shadow`); the clone taken over as `kira-live`; P6 live adapter being built in gh-resolve; no shadow-agreement gate (Chad) |
-| P7 retire | half | chad-mbp done (Oct 14 00:40); rezmac after the resolver's engine is ilk2 and V1's in-flight runs drain |
+| P5/P6 resolver | Oct 14 ~20:40 | rezmac first (Chad): shadow mode on (`kira-shadow`), the clone taken over as `kira-live`, no shadow-agreement gate. The P6 live-adapter batch (12 of 12 steps, the first with parallel lanes) shipped 16:08, and gh-resolve merged it as v0.108.0. The resolver engine has been `ilk2` on rezmac since about 20:40. The first two live dispatches were rejected on V1-import gaps (bare step headings, frontmatter `local_checks`, script gates that are not test runners), fixed by 21:10; `ilk2 submit --check` now catches such gaps before go-live |
+| P7 retire | half | chad-mbp done (Oct 14 00:40). rezmac: the resolver engine is ilk2, and V1's two in-flight masters (#8716, #8718) are blocked with their worktrees gone. `ilk2 v1 status` lists only 8 stale per-run registrations. `ilk2 v1 off --apply` on rezmac waits for Chad's go |
 
 ## 4.5 Acceptance targets (versus V1, same measurement method)
 
