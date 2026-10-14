@@ -201,3 +201,18 @@ def test_the_supervisor_runs_rsi_tick_only_when_opted_in_and_never_twice_at_once
     sp._rsi.wait()
     sp.rsi_tick(1_000_000.0 + sp.RSI_EVERY_S + 3)             # too soon after the last
     assert marker.read_text().splitlines() == ["t", "t"]
+
+
+def test_one_plan_at_a_time(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    rsi.record(ilk.s, rsi.find(ilk.s))
+    (c,) = rsi.candidates(ilk.s)
+    ilk.s.update("rsi_candidates", c["id"], {"status": "planning", "planned_at": clock.wall()},
+                 actor="t", reason="another tick is planning")
+    assert rsi.tick(ilk.s)["why"] == "a plan is in progress"
+    ilk.s.update("rsi_candidates", c["id"], {"planned_at": clock.wall() - 2 * rsi.PLAN_CAP_S - 1},
+                 actor="t", reason="that tick died")
+    ilk.script(spec_write({"already_fixed": "x"}))
+    assert rsi.tick(ilk.s)["did"] == "done"                  # the stale plan was reopened

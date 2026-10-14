@@ -291,6 +291,10 @@ def tick(s, now: float | None = None) -> dict:
         # a tick that died mid-plan: the candidate goes back to open, never stuck
         s.update("rsi_candidates", r["id"], {"status": "open"}, actor="rsi", reason="stale planning")
     rec = record(s, find(s, repo, now), now)
+    if s.one("SELECT 1 FROM rsi_candidates WHERE status = 'planning'"):
+        # one plan at a time: a manual tick and the supervisor's would plan two candidates at
+        # once (Oct 14, the first live tick); a stale one was reopened above
+        return {"did": "nothing", "why": "a plan is in progress", **rec}
     if s.one("SELECT 1 FROM batches WHERE project_id = ? AND status IN ('queued', 'active', "
              "'parked', 'blocked')", PROJECT):
         return {"did": "nothing", "why": "an ilk2 batch is in flight", **rec}
