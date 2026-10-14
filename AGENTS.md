@@ -4,7 +4,7 @@ ilk2 is the second version of the ilk loop engine (V1 is `inluck-net/ilk-skills`
 
 ## Standing rules (Chad, Oct 12-13, 2026)
 
-- **Built by hand.** A Claude Code session writes ilk2 and Chad reviews it. The ilk loop (V1) never edits this repo: no `/ilk-plan`, no loop batches and no self-improve against it. The auto-plan routing rule in host instructions does not apply here.
+- **Built by hand, and by reviewed RSI** (Chad, Oct 14: "Reviewed RSI first"). A Claude Code session writes ilk2, and ilk2 may also improve itself: batches on its own repo (ilk2 project `ilk2`) whose shipped branches the build session reviews, merges and releases by hand. Nothing an RSI batch ships reaches `main` or a release unreviewed. RSI batches cannot edit the protected kernel (the project's `deny_paths`: this file, `CLAUDE.md`, `docs/rsi/**`, `.github/**`). Moving to unattended RSI is Chad's call, after about 5 clean reviewed batches (docs/06 "RSI"). The ilk loop (V1) still never edits this repo: no `/ilk-plan`, no V1 loop batches and no V1 self-improve against it. The auto-plan routing rule in host instructions does not apply here.
 - **Mac only.** chad-mbp and rezmac. Python 3.12 managed by uv (`uv sync`, `uv run pytest`; a full local run is `uv run pytest -n 4`, about 2 min instead of 6.5-9). No shell orchestration in the core.
 - **Credentials.**
   - Never print worker settings, tokens, full plists, environment dumps or full process arguments.

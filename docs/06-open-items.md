@@ -265,6 +265,24 @@ Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the st
 
 Fix: any step entered with kept work runs its gates first, as verification steps already did, so the brief carries the current failures. The run isn't counted and is never accepted, because the session was interrupted (`test_kept_work_is_gated_before_the_worker_so_its_brief_is_current`, failing before). §2.4. Owed paths no longer reach a fresh brief, because they are not failures.
 
+## RSI: ilk2 improves itself (Chad, Oct 14: "Reviewed RSI first")
+
+**What it is.** ilk2 runs batches on its own repository, as the ilk2 project `ilk2` on chad-mbp. A batch's step gates are ilk2's full suite (`pytest -n 4`, about 2 min), with red-first checks on the step's new tests. A setup hook (`uv sync --locked`) builds each worktree's virtualenv from the shared uv cache.
+
+**Reviewed stage (now).**
+- The build session writes each batch from the RSI inputs below.
+- The build session reviews each shipped branch: the diff, the tests that pin the change, and the docs. It merges to `main` and releases by hand, as for any change. A rejected branch is recorded here with why.
+- Nothing reaches `main` or a release unreviewed.
+
+**Inputs, ranked:** Chad's requirements and steers outrank everything. Then open items in this document. Then defects ilk2 records about itself: needs_human rows, refusals, red attempts with an ilk2 cause, `report` numbers off target.
+
+**Protected kernel.** RSI batches cannot edit `AGENTS.md`, `CLAUDE.md`, `docs/rsi/**` or `.github/**` (the project's `deny_paths`; edits there are red on every attempt). That is the rail that stops a batch loosening its own rules or CI. Tests stay editable, because batches add tests; review is what catches a weakened test in this stage.
+
+**Going unattended (Chad's call).** Proposed bar: 5 consecutive reviewed RSI batches merged without a change of substance at review, and none later reverted. Then a shipped batch could merge and release itself on chad-mbp as a canary. It would roll back automatically (`ilk2 release upgrade --version <previous>`) if the next full suite or `ilk2 health` regresses, and push to rezmac after a clean day. Judgment call: 5 batches; wrong if the first batches are too small to show what review catches.
+
+| # | Batch | Shipped | Review |
+|---|---|---|---|
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |
