@@ -282,6 +282,7 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 
 | # | Batch | Shipped | Review |
 |---|---|---|---|
+| RSI-1 | `b-550a27b0c929`: `ilk2 report --batch` breaks time down by phase | Oct 14 22:29, 1 step, accepted on attempt 1 (about 13 min from admission; base 3 min) | **Merged as is** (2589c71, fast-forward). The spec was met: per-run pairing, unclosed phases closed by the next start or the run's end, and a test with exact arithmetic for both cases (re-checked by hand). Not a defect: nested phases would be counted twice, but the driver's phases are sequential. On P6 it shows dispatch 438.9 min, gates 25.0, base 17.6 |
 
 ## P5 shadow evidence
 
