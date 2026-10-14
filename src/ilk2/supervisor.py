@@ -48,6 +48,9 @@ class Supervisor:
         self.s = s
         self.b = b or bounds.load()
         self.drive_cmd = drive_cmd or [sys.executable, "-m", "ilk2", "drive"]
+        self.rsi_cmd = [sys.executable, "-m", "ilk2", "rsi", "tick"]
+        self._rsi: subprocess.Popen | None = None
+        self._rsi_at = 0.0
         self.host_budget = host_budget
         self.load_check = load_check
         self.children: dict[str, subprocess.Popen] = {}
@@ -113,6 +116,29 @@ class Supervisor:
         if self.drain():
             return
         self.admit()
+        self.rsi_tick(now_w)
+
+    RSI_EVERY_S = 30 * 60  # judgment call: candidates change slowly; wrong if reviews idle on it
+
+    def rsi_tick(self, now_w: float) -> None:
+        """RSI (docs/06): when the ilk2 project opts in (rsi_auto), run `ilk2 rsi tick` as its own
+        process every RSI_EVERY_S, never two at once. A planning session takes up to 30 min, so
+        the supervisor never waits for it."""
+        if self._rsi is not None and self._rsi.poll() is None:
+            return
+        if now_w - self._rsi_at < self.RSI_EVERY_S:
+            return
+        row = self.s.one("SELECT config FROM projects WHERE id = 'ilk2'")
+        if not row or not json.loads(row["config"] or "{}").get("rsi_auto"):
+            return
+        self._rsi_at = now_w
+        paths.logs().mkdir(parents=True, exist_ok=True)
+        with (paths.logs() / "rsi.log").open("a") as out:
+            self._rsi = subprocess.Popen(self.rsi_cmd, stdout=out, stderr=subprocess.STDOUT,
+                                         start_new_session=True,
+                                         env=procs.host_env() | {k: v for k, v in os.environ.items()
+                                                                 if k.startswith("ILK2_")})
+        self.s.event("rsi.tick", {"pid": self._rsi.pid})
 
     def drain(self) -> bool:
         """Upgrade drain (§2.7): admit nothing; when no run is left, or the bound passes,

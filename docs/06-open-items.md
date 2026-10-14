@@ -269,6 +269,8 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 
 **What it is.** ilk2 runs batches on its own repository, as the ilk2 project `ilk2` on chad-mbp. A batch's step gates are ilk2's full suite (`pytest -n 4`, about 2 min), with red-first checks on the step's new tests. A setup hook (`uv sync --locked`) builds each worktree's virtualenv from the shared uv cache.
 
+**Unattended triggering (built Oct 14, Chad: "go ahead"):** ilk2 finds, plans and submits its own RSI batches (docs/02 §2.11a). Review, merge and release are still by hand.
+
 **Reviewed stage (now).**
 - The build session writes each batch from the RSI inputs below.
 - The build session reviews each shipped branch: the diff, the tests that pin the change, and the docs. It merges to `main` and releases by hand, as for any change. A rejected branch is recorded here with why.
@@ -284,6 +286,7 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 |---|---|---|---|
 | RSI-1 | `b-550a27b0c929`: `ilk2 report --batch` breaks time down by phase | Oct 14 22:29, 1 step, accepted on attempt 1 (about 13 min from admission; base 3 min) | **Merged as is** (2589c71, fast-forward). The spec was met: per-run pairing, unclosed phases closed by the next start or the run's end, and a test with exact arithmetic for both cases (re-checked by hand). Not a defect: nested phases would be counted twice, but the driver's phases are sequential. On P6 it shows dispatch 438.9 min, gates 25.0, base 17.6 |
 | RSI-2 | `b-5f2f5a57bedc`: a phase that ends by an exception still records `phase.end` (`interrupted`, `error`, `reason`) | Oct 14 22:47, 1 step, accepted on attempt 1 (about 16 min) | **Merged as is** (2bd5324, fast-forward). The worker improved on the brief: it raised from `worker.dispatch` inside the phase, because `Driver.dispatch` holds the phase itself, so patching it as the brief suggested would have tested nothing. Checked: a store failure inside the `finally` could hide the original exception; the store-busy stall test passed in the gate |
+| RSI-3 | `b-30636fcf3cb9`: every base measurement records its cost (`base.measured`: seconds, cap hits, re-run) | Oct 14 23:08, 1 step, accepted on attempt 1; its base was reused from RSI-2 (F5's first live use) | **Merged as is** (0c0675c, a merge commit, because main had moved). Minimal: one event, a `reruns` field on GateRun, and a test that forces a capped re-run. It answers #8718's 1,794 s question for the next base |
 
 ## P5 shadow evidence
 

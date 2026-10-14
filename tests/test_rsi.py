@@ -88,3 +88,116 @@ def test_rsi_cli_finds_and_lists(ilk, capsys):
     assert cli.main(["rsi", "candidates"]) == 0
     (c,) = json.loads(capsys.readouterr().out)["candidates"]
     assert (c["source"], c["hits"], c["status"]) == ("stall", 1, "open")
+
+
+# -- planner and trigger ---------------------------------------------------------------------
+
+def ilk2_project(ilk, **cfg):
+    from conftest import PY_BIN, STUB, gate
+    from ilk2 import batches
+    c = batches.ProjectConfig(claude_bin=STUB, sandbox_allow=[str(ilk.tmp)],
+                              path_prelude=[PY_BIN, "/usr/bin", "/bin"], rsi_auto=True,
+                              deny_paths=["AGENTS.md", "docs/rsi/**"],
+                              rsi_gate=gate("tests/test_calc.py", name="suite"), **cfg)
+    batches.project_add(ilk.s, "ilk2", ilk.repo, c)
+
+
+PLAN = {"title": "runs that end lost are retried", "scope": ["calc.py", "tests/test_calc.py"],
+        "must_pass": ["tests/test_calc.py::test_add"],
+        "instructions": "Make add() add. " * 30}
+
+
+def spec_write(obj):
+    return [{"write": ".rsi-spec.json", "text": json.dumps(obj)}]
+
+
+def lost_run(ilk):
+    ilk.project()
+    bid = ilk.submit(one_step())
+    ended_run(ilk, bid, "lost")
+
+
+def test_tick_plans_the_top_candidate_and_submits_it_with_ilk2s_gate(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write(PLAN))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "submitted", out
+    b = ilk.s.get("batches", out["batch"])
+    assert b["project_id"] == "ilk2" and b["consumer_ref"] == "rsi-auto-1"
+    st = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", b["id"])
+    assert [g["name"] for g in json.loads(st["gates"])] == ["suite"]   # the planner chose none
+    assert json.loads(st["must_pass"]) == PLAN["must_pass"]
+    (c,) = rsi.candidates(ilk.s, None)
+    assert (c["status"], c["batch_id"]) == ("submitted", b["id"])
+    assert "stall" in ilk.stub_prompts()[0] or "lost" in ilk.stub_prompts()[0]
+
+
+def test_a_plan_that_touches_the_kernel_or_edits_files_is_shelved(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write({**PLAN, "scope": ["calc.py", "AGENTS.md"]}))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "shelved" and "protected kernel" in out["note"]
+    ilk.s.update("rsi_candidates", out["candidate"], {"status": "open"}, actor="t", reason="t")
+    ilk.script(spec_write(PLAN) + [{"write": "calc.py", "text": "x = 1\n"}])
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "shelved" and "changed files" in out["note"]
+    assert not ilk.s.one("SELECT 1 FROM batches WHERE project_id = 'ilk2'")
+
+
+def test_an_already_fixed_candidate_is_closed_without_a_batch(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write({"already_fixed": "b7ed8b5 runs.py:ready_plans"}))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "done" and "b7ed8b5" in out["note"]
+    assert rsi.candidates(ilk.s) == []                       # done is not reopened by the finder
+    rsi.record(ilk.s, rsi.find(ilk.s))
+    assert rsi.candidates(ilk.s) == []
+
+
+def test_the_trigger_waits_for_a_batch_in_flight_reviews_and_the_daily_cap(ilk, monkeypatch):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write(PLAN))
+    first = rsi.tick(ilk.s)
+    assert first["did"] == "submitted"
+    assert rsi.tick(ilk.s)["why"] == "an ilk2 batch is in flight"
+    ilk.s.transition("batches", first["batch"], "cancelled", actor="t", reason="t")
+    monkeypatch.setattr(rsi, "pending", lambda s: [1, 2])
+    assert rsi.tick(ilk.s)["why"] == "2 RSI branches wait for review"
+    monkeypatch.setattr(rsi, "pending", lambda s: [])
+    monkeypatch.setattr(rsi, "DAILY_CAP", 1)
+    assert rsi.tick(ilk.s)["why"] == "daily cap 1 reached"
+
+
+def test_the_trigger_is_off_unless_the_project_says_so(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    cfg = json.loads(ilk.s.get("projects", "ilk2")["config"])
+    cfg["rsi_auto"] = False
+    ilk.s.update("projects", "ilk2", {"config": json.dumps(cfg)}, actor="t", reason="t")
+    assert rsi.tick(ilk.s)["why"] == "rsi_auto is off for the ilk2 project"
+
+
+def test_the_supervisor_runs_rsi_tick_only_when_opted_in_and_never_twice_at_once(ilk, tmp_path):
+    from ilk2.supervisor import Supervisor
+    ilk.make_repo()
+    sp = Supervisor(ilk.s, load_check=False)
+    marker = tmp_path / "ticks"
+    sp.rsi_cmd = ["/bin/sh", "-c", f"echo t >> {marker}; sleep 2"]
+    sp.rsi_tick(1_000_000.0)
+    assert not marker.exists()                                # no ilk2 project: off
+    ilk2_project(ilk)
+    sp.rsi_tick(1_000_000.0)
+    sp.rsi_tick(1_000_000.0 + sp.RSI_EVERY_S + 1)             # the first is still running
+    sp._rsi.wait()
+    sp.rsi_tick(1_000_000.0 + sp.RSI_EVERY_S + 2)             # done, and the interval passed
+    sp._rsi.wait()
+    sp.rsi_tick(1_000_000.0 + sp.RSI_EVERY_S + 3)             # too soon after the last
+    assert marker.read_text().splitlines() == ["t", "t"]

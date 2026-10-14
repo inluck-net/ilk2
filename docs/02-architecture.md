@@ -529,6 +529,41 @@ Each needs data from P2 and is revisited at M1.
 - **Host-load admission: 5-minute load above core count, under 2 GB free, or 3 or more ilk2 gate timeouts in the last 30 minutes.** Basis: gate timeouts under load were the measured symptom (gh-resolve review F6); a time window cannot latch. Wrong if it refuses runs on a host whose gates are not slowing.
 - **Kill and requeue on supervisor restart instead of adopting** (Chad, Oct 13: "go ahead"). Basis: I4 holds with no lease or IPC code; supervisor restarts should be rare. Cost: the attempt in flight. Wrong if supervisor restarts become frequent (more than one a day); then add a driver lease and a handshake.
 
+## 2.11a RSI: ilk2 improving itself
+
+Chad, Oct 14: "Reviewed RSI first". ilk2 finds its own improvements, plans them and runs them as batches on its own repository (the ilk2 project `ilk2`), unattended. **Merging and releasing stay reviewed:** the build session reviews every shipped RSI branch, then merges and releases it by hand. Nothing an RSI batch ships reaches `main` or a release unreviewed (AGENTS.md; docs/06 "RSI" holds the review log and the bar for going further).
+
+```mermaid
+flowchart LR
+  Rec[("ilk2's own records<br/>runs, needs_human,<br/>refusals, phase minutes")] --> Find
+  Req[("docs/rsi/requests.json<br/>Chad's requests,<br/>protected kernel")] --> Find
+  Find["rsi.find<br/>one candidate per fingerprint,<br/>ranked by source and hits"] --> Cand[("rsi_candidates")]
+  Tick{"supervisor, every 30 min:<br/>rsi_auto on; no ilk2 batch in flight;<br/>under 2 branches awaiting review;<br/>under 3 RSI batches today"} --> Plan
+  Cand --> Plan["rsi.plan<br/>a worker session in a read-only checkout<br/>writes .rsi-spec.json"]
+  Plan -->|already fixed / not a defect| Done[("candidate done")]
+  Plan -->|no file, edits, kernel in scope,<br/>no test, check fails| Shelf[("candidate shelved,<br/>reopens on 2+ new hits")]
+  Plan -->|one step + must_pass| Submit["submit to project ilk2<br/>gate: the full suite (set by ilk2)"]
+  Submit --> Batch["batch runs as any other:<br/>red-first, gates, accept"]
+  Batch --> Review{"build session reviews<br/>the shipped branch"}
+  Review -->|merge + release| Main[("main, both hosts")]
+  Review -->|reject| Log[("docs/06 RSI log")]
+```
+
+- **Finding** (`ilk2 rsi find`, `ilk2 rsi candidates`) is plain code and idempotent. Sources by weight:
+  - Chad's requests (100);
+  - driver errors (50);
+  - stalled or lost runs (40);
+  - needs_human reasons other than a step's own red attempts (30);
+  - refusals that recur, other than capacity and leases (20);
+  - shipped batches whose base phase outlasted their workers (10).
+
+  Messages are normalised (paths, ids, numbers), so a recurring defect is one candidate with growing hits. A broken requests file stops the finder rather than reading as "no requests".
+- **Planning** is one worker session (claude, sandboxed, the ilk2 project's worker settings) in a fresh read-only checkout of `main`. It may only write `.rsi-spec.json`.
+  - **Outcomes:** the session either closes the candidate (`already_fixed`, `not_a_defect`, with its evidence), or writes one step: title, self-contained instructions, scope, and a `must_pass` test that fails first.
+  - **Gate:** ilk2 sets the gate (the project's `rsi_gate`, by default the full suite with `-n 4`); a planner never chooses or weakens one.
+  - **Shelving:** a session that writes no file, edits other files, puts the protected kernel in scope, omits a test, or fails `submit --check` shelves the candidate with its reason.
+- **The trigger** (`ilk2 rsi tick`, spawned by the supervisor every 30 min as its own process, never two at once) runs only when the ilk2 project has `rsi_auto`, no ilk2 batch is in flight, fewer than 2 shipped RSI branches await review (`ilk2 rsi pending`), and fewer than 3 RSI batches were submitted in the last 24 hours. Every no-op says why. Judgment calls: 30 min, 2 and 3; the review queue is the real limit.
+
 ## 2.12 Code layout and size
 
 | Module | Purpose | Seed from V1 (lines at `d17ffdcd`) |

@@ -55,6 +55,10 @@ class ProjectConfig:
     # Opt-in (judgment call): wrong for files whose order or uniqueness matters, which a union
     # garbles without a conflict to show it; the re-gate still runs.
     union_merge: list[str] = field(default_factory=list)
+    # RSI (docs/06 "RSI"): the ilk2 project's trigger plans and submits ilk2's own improvements
+    # when idle (ilk2 rsi tick). Off unless set; shipped RSI branches are still reviewed by hand.
+    rsi_auto: bool = False
+    rsi_gate: dict | None = None   # the gate every RSI step gets (default: rsi.SUITE_GATE)
     # `ilk2 project remove`: no new batches, no V1 claims; the row and its history stay.
     retired: bool = False
     # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same

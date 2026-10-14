@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS supervisor (
 CREATE TABLE IF NOT EXISTS rsi_candidates (
   id TEXT PRIMARY KEY, source TEXT NOT NULL, title TEXT NOT NULL, evidence TEXT NOT NULL,
   hits INTEGER NOT NULL, score REAL NOT NULL, status TEXT NOT NULL, batch_id TEXT, note TEXT,
-  first_seen REAL NOT NULL, last_seen REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+  first_seen REAL NOT NULL, last_seen REAL NOT NULL, planned_at REAL,
+  version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
