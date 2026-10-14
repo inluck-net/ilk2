@@ -333,3 +333,24 @@ def test_a_v1_script_gate_that_is_not_a_test_runner_is_an_exit_code_check(ilk):
     g = spec.plans[0].steps[0].gates[1]
     assert (g.adapter, g.command, g.declares_tests) == ("shell", ["bun", "run", "typecheck"], False)
     assert plans.check(spec) == []
+
+
+def test_submit_check_validates_and_creates_nothing(ilk, capsys, tmp_path):
+    # Oct 14: two live gh-resolve dispatches on rezmac were rejected one after the other; a
+    # consumer can now validate its rendered plans first.
+    import json as _json
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project()
+    good = tmp_path / "MASTER-ok.md"
+    sub = tmp_path / "sub.md"
+    sub.write_text(GHR_LIVE_WORK.replace("bash scripts/consistency-regression.sh", "true"))
+    good.write_text("- [sub](./sub.md)\n")
+    capsys.readouterr()
+    assert cli.main(["submit", str(good), "--project", "proj", "--check"]) == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert (out["ok"], out["plans"], out["steps"]) == (True, 1, 1)
+    assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
+    sub.write_text(GHR_LIVE_WORK.replace("### Step 0", "no steps here"))
+    assert cli.main(["submit", str(good), "--project", "proj", "--check"]) == 2
+    assert "no steps" in capsys.readouterr().out

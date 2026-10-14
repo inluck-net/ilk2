@@ -214,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
                          "to the project's deny_paths)")
     sm.add_argument("--meta", help="a JSON object (or @file) the consumer keeps with the batch; "
                     "status returns it unchanged")
+    sm.add_argument("--check", action="store_true",
+                    help="validate exactly as a submit would, and create nothing")
     sm.add_argument("--json", action="store_true")
 
     st = sub.add_parser("status")
@@ -409,11 +411,16 @@ def main(argv: list[str] | None = None) -> int:
                                      consumer_ref=a.consumer_ref,
                                      root=Path(a.root) if a.root else None,
                                      originals={f.name: f.read_text()}, branch=a.branch,
-                                     deny_paths=a.deny_path, meta=_meta(a.meta))
+                                     deny_paths=a.deny_path, meta=_meta(a.meta),
+                                     check_only=a.check)
             except batches.SubmitRejected as e:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
-            _out({"batch": bid}, a.json) if a.json else print(bid)
+            if a.check:
+                _out({"ok": True, "plans": len(spec.plans),
+                      "steps": sum(len(p.steps) for p in spec.plans)}, True)
+            else:
+                _out({"batch": bid}, a.json) if a.json else print(bid)
         elif a.cmd == "status":
             _out(status(s, a.batch, a.consumer_ref), a.json)
         elif a.cmd == "events":

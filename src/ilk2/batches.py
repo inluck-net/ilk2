@@ -232,7 +232,11 @@ class SubmitRejected(ValueError):
 def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None = None,
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
            originals: dict | None = None, branch: str | None = None,
-           deny_paths: list[str] | None = None, meta: dict | None = None) -> str:
+           deny_paths: list[str] | None = None, meta: dict | None = None,
+           check_only: bool = False) -> str:
+    """Validate and create a batch. check_only validates exactly as a submit would and creates
+    nothing: a consumer can test its rendered plans before it goes live (gh-resolve on rezmac,
+    Oct 14: two live dispatches were rejected one after the other)."""
     proj = s.get("projects", project_id)
     cfg = ProjectConfig.from_json(proj["config"])
     if cfg.retired:
@@ -279,6 +283,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         problems += preflight(spec, repo, base_sha, cfg)
     if problems:
         raise SubmitRejected(problems)
+    if check_only:
+        return ""
     bid = new_id("b")
     branch = branch or f"ilk2/{bid}"
     if root is None and existing:
