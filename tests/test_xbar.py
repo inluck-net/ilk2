@@ -107,3 +107,47 @@ def test_a_batch_with_lanes_shows_them_and_marks_each_lanes_step():
     line = next(x for x in out.splitlines() if x.startswith("b-5"))
     assert "2 lanes" in line
     assert sum(1 for x in out.splitlines() if x.startswith("--▶")) == 2
+
+
+def test_a_pending_rsi_branch_needs_attention():
+    st = {"batches": [], "needs_human": [],
+          "rsi": {"pending": [{"batch": "b-9", "branch": "ilk2/b-9", "ref": "rsi-auto-1"}],
+                  "open": 0, "planning": None}}
+    out = xbar.render(st, tick_age=5, stale=180)
+    assert title(out).startswith("ilk2 ⚠ 1")
+    lines = out.splitlines()
+    start = next(i for i, x in enumerate(lines) if x.startswith("⚠ needs you"))
+    end = next(i for i, x in enumerate(lines) if x.startswith("▶ running"))
+    section = lines[start:end]
+    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 awaits review" in section
+    assert any(x.startswith("--review: git log main..ilk2/b-9") and "Menlo" in x for x in section)
+
+
+def test_the_rsi_section_shows_candidates_and_planning():
+    st = {"batches": [], "needs_human": [], "rsi": {"pending": [], "open": 3, "planning": "x"}}
+    lines = xbar.render(st, tick_age=5, stale=180).splitlines()
+    assert "3 open candidates · planning: x" in lines
+    assert lines.index("RSI") > next(i for i, x in enumerate(lines) if x.startswith("▶ running"))
+    bare = xbar.render({"batches": [], "needs_human": []}, tick_age=5, stale=180)
+    assert "RSI" not in bare.splitlines() and "open candidates" not in bare
+
+
+def test_main_carries_the_rsi_state_and_keeps_rendering_when_rsi_fails(ilk, capsys, monkeypatch):
+    from ilk2 import rsi
+    monkeypatch.setattr(rsi, "pending", lambda s: [{"id": "b-9", "branch": "ilk2/b-9",
+                                                   "consumer_ref": "rsi-auto-1"}])
+    monkeypatch.setattr(rsi, "candidates", lambda s: [])
+    ilk.s.insert("rsi_candidates", {"id": "c-1", "source": "driver-error", "title": "planning one",
+                                    "evidence": "[]", "hits": 1, "score": 50, "status": "planning",
+                                    "first_seen": 1.0, "last_seen": 1.0})
+    assert xbar.main() == 0
+    out = capsys.readouterr().out
+    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 awaits review" in out
+    assert "0 open candidates · planning: planning one" in out
+
+    def boom(s):
+        raise RuntimeError("no rsi_candidates")  # a store without the table, or any rsi error
+    monkeypatch.setattr(rsi, "pending", boom)
+    assert xbar.main() == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("ilk2 ") and "open candidates" not in out
