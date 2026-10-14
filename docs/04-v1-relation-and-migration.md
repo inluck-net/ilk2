@@ -155,7 +155,7 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 | gh-resolve's own development | chad-mbp | **moved to ilk2** (P4 handover; V1 resolves no repo for it) | done |
 | ilk-skills' own development | chad-mbp | **moved to ilk2** (Oct 14, Chad's go): registry entry removed (backup `projects.json.bak-ilk2-1791908405`), `last-launch.json` renamed aside; 5 unshipped masters, none runnable, stay in V1's dir and are claimed if released | done |
 | gh-resolve's resolver, fleet b (kira masters in V1's kira dir) | chad-mbp | 2 drafts, 1 blocked; no live runner | gh-resolve's `engine: ilk2` live on chad-mbp (P5). **Oct 14:** the P5 adapter is merged in gh-resolve (2510bb8f); shadow mode is not yet on, pending Chad's choice of host and time |
-| gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6) |
+| gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6). **Oct 14 ~09:30:** the clone is taken over as ilk2 project `kira-live` (backup `projects.json.bak-ilk2-1791939434`; the 6 per-run V1 keys keep running and drain); shadow mode on (`kira-shadow`); P6 live adapter in progress in gh-resolve, no shadow-agreement gate (Chad) |
 
 **The switch-off, per host, once its rows are retired:**
 1. `ilk2 report` shows the host's ilk2 projects meeting §4.5, and `ilk2 v1 status` lists nothing that still needs V1 (a registered repo ilk2 does not own, a queued or active master, a live runner).
