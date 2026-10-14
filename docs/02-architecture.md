@@ -169,7 +169,7 @@ What this removes from V1:
 Git and SQLite cannot share a transaction, so acceptance has three phases. Each one can be retried safely.
 
 1. **Intent (store transaction):** the step moves `pending → accepting`, recording the attempt id, the parent commit and the expected tree hash (the gated worktree's tree).
-2. **Commit (git):** the driver creates the commit with an `ilk2-attempt: <attempt id>` trailer. It does not commit if a commit with that trailer already exists on the branch with the expected tree and parent.
+2. **Commit (git):** the driver creates the commit with an `ilk2-attempt: <attempt id>` trailer. Its author and committer are the repository's configured git user (local or global `user.name`/`user.email`), as V1's workers committed, and `ilk2 <ilk2@localhost>` only when none is set. Lane merges use the same identity. (gh-resolve on rezmac, Oct 14: its foreign-commit guard declined a publish of ilk2@localhost commits.) It does not commit if a commit with that trailer already exists on the branch with the expected tree and parent.
 3. **Finalize (store transaction):** the step moves `accepting → accepted` with the commit SHA. If it is the plan's last step, the plan ships in the same transaction.
 
 **Recovery**, run by the next driver before it prepares anything, for any step left `accepting`:
