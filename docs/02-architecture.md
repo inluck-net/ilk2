@@ -554,6 +554,7 @@ flowchart LR
   - driver errors (50);
   - stalled or lost runs (40);
   - needs_human reasons other than a step's own red attempts (30);
+  - a gate whose full run keeps hitting its time cap (25), so the suite runs twice per gate run;
   - refusals that recur, other than capacity and leases (20);
   - shipped batches whose base phase outlasted their workers (10).
 
