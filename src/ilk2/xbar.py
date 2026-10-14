@@ -2,7 +2,7 @@
 
 Title, by what needs attention first:
   ilk2 ✗    the supervisor is not ticking (or never ticked)
-  ilk2 ⚠ N  N batches need you: an open needs_human row, or blocked
+  ilk2 ⚠ N  N need you: an open needs_human row, blocked, or an RSI branch awaiting review
   ilk2 ▶ N  N batches running
   ilk2 ok   nothing running, nothing waiting
 Pages stay opt-in (Q12); this item is the passive view (docs/06 "Self-resolution").
@@ -66,7 +66,9 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     attention = [b for b in batches if b["status"] == "blocked" or b["id"] in by_batch]
     hostwide = by_batch.get(None, [])
     running = [b for b in batches if b["status"] in LIVE and b["id"] not in by_batch]
-    n_need = len(attention) + len(hostwide)
+    rsi_st = st.get("rsi") or {}
+    pending = rsi_st.get("pending") or []
+    n_need = len(attention) + len(hostwide) + len(pending)
 
     if tick_age is None or tick_age > stale:
         title = "ilk2 ✗ | color=red"
@@ -105,6 +107,9 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     for r in hostwide:
         out.append(f"host: {r['reason']}: {_trunc(r['detail'], 60)}")
         out += clear_lines(r)
+    for p in pending:
+        out.append(f"{p['batch']} [{p.get('ref') or ''}] ilk2: RSI branch {p['branch']} awaits review")
+        out.append(f"--review: git log main..{p['branch']} | font=Menlo size=11")
 
     out += ["---", f"▶ running ({len(running)})" + ("" if running else "  — none")]
     for b in running:
@@ -139,6 +144,12 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
             commit = f"  ({st_['commit'][:7]})" if st_.get("commit") else ""
             out.append(f"--{mark} {_trunc(st_['title'], 70)}{commit}")
 
+    if "rsi" in st:
+        line = f"{rsi_st.get('open', 0)} open candidates"
+        if rsi_st.get("planning"):
+            line += f" · planning: {_trunc(rsi_st['planning'], 60)}"
+        out += ["---", "RSI", line]
+
     done = [b for b in batches if b["status"] in ("shipped", "cancelled")][:3]
     if done:
         out += ["---", "recent"]
@@ -167,6 +178,15 @@ def main() -> int:
             if row and row["tick_wall"] is not None:
                 same_boot = row["boot_time"] == clock.boot_time()
                 tick_age = (clock.mono() - row["tick_mono"]) if same_boot else (clock.wall() - row["tick_wall"])
+            try:
+                from . import rsi
+                planning = s.one("SELECT title FROM rsi_candidates WHERE status = 'planning'")
+                st["rsi"] = {"pending": [{"batch": b["id"], "branch": b["branch"],
+                                          "ref": b["consumer_ref"]} for b in rsi.pending(s)],
+                             "open": len(rsi.candidates(s)),
+                             "planning": planning["title"] if planning else None}
+            except Exception:  # noqa: BLE001 - no rsi_candidates table, or an rsi error: render without it
+                st.pop("rsi", None)
         finally:
             s.close()
         print(render(st, tick_age, bounds.load().supervisor_stale), end="")
