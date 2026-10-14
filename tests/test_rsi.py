@@ -60,6 +60,24 @@ def test_a_broken_requests_file_stops_the_finder(ilk, tmp_path):
         rsi.find(ilk.s, tmp_path)                               # fails closed, never "none"
 
 
+def test_the_finder_reports_a_gate_that_keeps_hitting_its_cap(ilk):
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    for _ in range(2):
+        ilk.s.event("gate.timeout", {"gate": "convex"}, batch_id=bid)
+    ilk.s.event("gate.timeout", {"gate": "typing"}, batch_id=bid)   # one hit: noise, no candidate
+    ilk.s.event("base.measured", {"gate": "convex", "timeouts": 1}, batch_id=bid)
+    got = [c for c in rsi.find(ilk.s) if c.source == "gate-cap"]
+    assert len(got) == 1                                         # exactly one, for convex
+    (c,) = got
+    assert c.title == "proj: gate convex hits its time cap"
+    assert len(c.evidence) == 3                                  # 2 gate.timeout + 1 base.measured
+    assert all(e["gate"] == "convex" and e["batch"] == bid for e in c.evidence)
+    assert {e["kind"] for e in c.evidence} == {"gate.timeout", "base.measured"}
+    assert all(set(e) == {"batch", "gate", "at", "kind"} for e in c.evidence)
+
+
 def test_recording_upserts_and_a_shelved_candidate_reopens_on_new_hits(ilk):
     ilk.make_repo()
     ilk.project()

@@ -7,6 +7,7 @@ fingerprint, so a recurring defect is one candidate whose hits grow. Sources, by
   engine-error  a driver that ended in an error (driver-error.txt)                    50
   stall         a run the supervisor called stalled or lost                           40
   needs-human   a needs_human reason other than a step's own red attempts             30
+  gate-cap      a gate whose full run keeps hitting its time cap                      25
   refusal       a refusal reason that recurs (3+), other than capacity and leases     20
   report        a shipped batch whose base phase took longer than its workers         10
 
@@ -25,8 +26,8 @@ from pathlib import Path
 from . import clock, paths
 
 WINDOW_S = 7 * 24 * 3600   # judgment call: a week of records; wrong if defects recur more slowly
-WEIGHTS = {"request": 100, "engine-error": 50, "stall": 40, "needs-human": 30, "refusal": 20,
-           "report": 10}
+WEIGHTS = {"request": 100, "engine-error": 50, "stall": 40, "needs-human": 30, "gate-cap": 25,
+           "refusal": 20, "report": 10}
 # A step's own red attempts are the consumer's work, not ilk2's; capacity and leases are the
 # host's state, not defects.
 NOT_DEFECTS_NH = {"attempts"}
@@ -104,6 +105,26 @@ def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidat
             continue
         add("needs-human", r["reason"], f"needs_human: {r['reason']}",
             {"batch": r["batch_id"], "at": r["created_at"], "detail": r["detail"][:300]})
+    # A gate whose full run hits its cap costs a second full run (gates.measure's transient
+    # re-run) every time: on Oct 14 a kira convex suite ran near its 900 s cap twice over.
+    hits: dict[tuple[str, str], list] = {}
+    for r in s.all("SELECT e.batch_id, e.kind, e.payload, e.at, b.project_id FROM events e "
+                   "JOIN batches b ON b.id = e.batch_id WHERE e.at > ? AND e.kind IN "
+                   "('gate.timeout', 'base.measured') ORDER BY e.cursor", since):
+        payload = json.loads(r["payload"] or "{}")
+        name = payload.get("gate")
+        if not name:
+            continue
+        if r["kind"] == "base.measured" and (payload.get("timeouts") or 0) < 1:
+            continue  # a measurement that ran once within its cap is not a cap problem
+        hits.setdefault((r["project_id"], name), []).append(
+            {"batch": r["batch_id"], "gate": name, "at": r["at"], "kind": r["kind"]})
+    for (project, name), evs in hits.items():
+        if len(evs) < 2:
+            continue  # judgment call: one capped run is noise; two is a pattern
+        for ev in evs:
+            add("gate-cap", f"{project}:{name}",
+                f"{project}: gate {name} hits its time cap", ev)
     by_reason: dict[str, list] = {}
     for r in s.all("SELECT * FROM refusals WHERE opened_at > ?", since):
         if r["reason"] not in NOT_DEFECTS_REFUSAL:
