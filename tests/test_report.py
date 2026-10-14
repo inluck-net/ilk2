@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 from conftest import one_step
@@ -82,3 +83,40 @@ def test_steps_report_per_batch(ilk):
     row = r["steps"][0]
     assert row["kind"] == "work" and row["attempts"] == 2 and row["red"] == 1
     assert row["minutes"] >= 0 and "| 1 |" in report.steps_table(r)
+
+
+def test_batch_report_sums_phase_minutes(ilk):
+    # The per-step table only shows worker time, so measuring the base is invisible (Oct 14: a
+    # live kira batch spent 37 min in `base` before its first attempt).
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    r1, r2 = ilk.new_run(bid), ilk.new_run(bid)
+    t0 = 1_728_000_000.0
+
+    def ev(rid, kind, phase, at):
+        ilk.s.insert("events", {"batch_id": bid, "run_id": rid, "kind": kind,
+                                "payload": json.dumps({"phase": phase}),
+                                "at": t0 + at, "mono": at})
+
+    for rid, end in ((r1, 3000.0), (r2, 3804.0)):  # r2's unmatched recover stops at ended_at
+        ilk.s.update("runs", rid, {"ended_at": t0 + end}, actor="test", reason="ended")
+
+    # run 1: every phase paired with its own end
+    for kind, phase, at in [("phase.start", "base", 0), ("phase.end", "base", 1800),
+                            ("phase.start", "dispatch", 1800), ("phase.end", "dispatch", 2400),
+                            ("phase.start", "gates", 2400), ("phase.end", "gates", 2460),
+                            ("phase.start", "scope", 2460), ("phase.end", "scope", 2462)]:
+        ev(r1, kind, phase, at)
+    # run 2: dispatch is interrupted (no end), so it lasts until the next phase.start; recover
+    # is never closed either, and has no next start, so it lasts until the run's ended_at
+    for kind, phase, at in [("phase.start", "base", 3000), ("phase.end", "base", 3420),
+                            ("phase.start", "dispatch", 3420), ("phase.start", "gates", 3558),
+                            ("phase.end", "gates", 3564), ("phase.start", "recover", 3564)]:
+        ev(r2, kind, phase, at)
+
+    r = report.steps(ilk.s, bid)
+    assert r["phase_minutes"] == {"base": 37.0, "dispatch": 12.3, "recover": 4.0,
+                                  "gates": 1.1, "scope": 0.0}
+    lines = [ln for ln in report.steps_table(r).splitlines() if ln.startswith("Phases (min):")]
+    assert lines == ["Phases (min): base 37.0, dispatch 12.3, recover 4.0, gates 1.1"]

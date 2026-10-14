@@ -114,6 +114,41 @@ def build(s, project: str | None = None) -> dict:
     }
 
 
+def phase_minutes(s, batch_id: str) -> dict[str, float]:
+    """Minutes the batch spent in each driver phase, summed over its runs (§2.9). Events pair
+    per run in cursor order: a phase lasts from its `phase.start` to the next `phase.end` of the
+    same phase in that run. A start the driver never closed (an exception emits no `phase.end`)
+    lasts until the next `phase.start` in that run, else the run's ended_at, else now."""
+    evs = s.all("SELECT run_id, kind, payload, at FROM events WHERE batch_id = ? AND kind IN "
+                "('phase.start', 'phase.end') ORDER BY cursor", batch_id)
+    ended = {r["id"]: r["ended_at"] for r in
+             s.all("SELECT id, ended_at FROM runs WHERE batch_id = ?", batch_id)}
+    per_run: dict[str | None, list] = {}
+    for e in evs:
+        per_run.setdefault(e["run_id"], []).append(e)
+    secs: dict[str, float] = {}
+    for rid, items in per_run.items():
+        open_: dict[str, list] = {}      # phase name -> [(start at, index in items)], unmatched
+        spans: list[tuple[str, float, float]] = []
+        for i, e in enumerate(items):
+            name = json.loads(e["payload"] or "{}").get("phase") or ""
+            if e["kind"] == "phase.start":
+                open_.setdefault(name, []).append((e["at"], i))
+            elif open_.get(name):
+                start, _ = open_[name].pop(0)          # the next end of the same phase
+                spans.append((name, start, e["at"]))
+        for name, queue in open_.items():
+            for start, i in queue:
+                close = next((x["at"] for x in items[i + 1:]
+                              if x["kind"] == "phase.start"), None)
+                spans.append((name, start, close if close is not None
+                              else ended.get(rid) if ended.get(rid) is not None else clock.wall()))
+        for name, start, close in spans:
+            secs[name] = secs.get(name, 0.0) + (close - start)
+    mins = {k: v / 60 for k, v in secs.items()}
+    return {k: round(v, 1) for k, v in sorted(mins.items(), key=lambda kv: (-kv[1], kv[0]))}
+
+
 def steps(s, batch_id: str) -> dict:
     """Per-step numbers for one batch, the baseline table later batches compare against
     (docs/evidence/2026-10-14-gh-resolve-p5-batch-baseline.md was this, by hand). Minutes are
@@ -149,7 +184,10 @@ def steps(s, batch_id: str) -> dict:
     return {"batch": batch_id, "steps": rows,
             "accepted": len(done), "of": len(rows),
             "minutes_per_accepted_step": round(sum(r["minutes"] for r in done) / len(done), 1) if done else None,
-            "first_attempt_share": round(len(first_try) / len(done), 2) if done else None}
+            "first_attempt_share": round(len(first_try) / len(done), 2) if done else None,
+            # Driver phases, so time before the first worker is not invisible (Oct 14: a kira
+            # batch spent 37 min measuring its base before attempt 1)
+            "phase_minutes": phase_minutes(s, batch_id)}
 
 
 def steps_table(r: dict) -> str:
@@ -164,4 +202,8 @@ def steps_table(r: dict) -> str:
                    f"{'yes' if x['carried'] else ''} | {x.get('peak_context_k') or ''} |")
     out.append(f"\n{r['accepted']} of {r['of']} steps accepted; {r['minutes_per_accepted_step']} min per "
                f"accepted step; first-attempt share {r['first_attempt_share']}.")
+    phases = sorted(((k, v) for k, v in (r.get("phase_minutes") or {}).items() if v >= 0.05),
+                    key=lambda kv: (-kv[1], kv[0]))
+    if phases:
+        out.append("Phases (min): " + ", ".join(f"{k} {v}" for k, v in phases))
     return "\n".join(out)
