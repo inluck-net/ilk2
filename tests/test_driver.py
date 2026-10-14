@@ -1127,3 +1127,22 @@ def test_a_projects_batches_on_one_base_share_its_measurement(ilk):
     third = ilk.submit(one_step())
     assert ilk.drive_inprocess(third) == "shipped"
     assert not [e for e in ilk.s.events_since(0, third) if e["kind"] == "base.reused"]
+
+
+def test_a_gate_path_another_plan_creates_is_owed_by_that_plan(ilk):
+    # gh-resolve P6, Oct 14: V1 plans' gates list every sibling's new test file. A plan that
+    # runs before (or beside) the plan that creates tests/test_two.py is not red for its absence.
+    ilk.make_repo()
+    ilk.project()
+    both = gate("tests/test_calc.py", "tests/test_two.py")
+    bid = ilk.submit({"plans": [
+        {"slug": "p1", "steps": [{"title": "fix add", "instructions": "x", "gates": [both],
+                                  "scope": ["calc.py"]}]},
+        {"slug": "p2", "steps": [{"title": "add test two", "instructions": "y", "gates": [both],
+                                  "scope": ["tests/test_two.py"]}]}]})
+    ilk.script([GOOD], [{"write": "tests/test_two.py", "text": "def test_two():\n    assert True\n"}])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    outs = [a["outcome"] for a in ilk.s.all("SELECT outcome FROM attempts ORDER BY created_at")]
+    assert outs == ["accepted", "accepted"]
+    owed = [e["payload"]["owed"] for e in ilk.s.events_since(0, bid) if e["kind"] == "gate.path-owed"]
+    assert owed == [{"tests/test_two.py": "p2"}]

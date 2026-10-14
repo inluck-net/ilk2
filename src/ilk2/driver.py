@@ -885,6 +885,39 @@ class Driver:
             return []
         return [p for p in gitops.changed_paths(self.root) if not batches.path_matches(p, scope)]
 
+    def owed_elsewhere(self, step, paths: list[str]) -> dict[str, str]:
+        """Declared-but-absent gate paths that another plan of this batch creates: outside this
+        step's scope, inside the scope of a plan this plan does not depend on (directly or
+        not). path -> that plan's slug. gh-resolve P6, Oct 14: V1 plans' gates list every
+        sibling's new test file; the-run-lifecycle-cancels-ilk2 ran beside reap-follows-ilk2
+        and went red on test_50b, which only reap creates. Its own plan's gate, the merge
+        re-gate and the verification plan still run it."""
+        plans = {p["id"]: p for p in self.s.all("SELECT * FROM plans WHERE batch_id = ?", self.batch_id)}
+        by_slug = {p["slug"]: p["id"] for p in plans.values()}
+        mine, todo, closure = step["plan_id"], [step["plan_id"]], set()
+        while todo:
+            for d in json.loads(plans[todo.pop()]["depends_on"]):
+                pid = by_slug.get(d)
+                if pid and pid not in closure:
+                    closure.add(pid)
+                    todo.append(pid)
+        scope = json.loads(step["scope"])
+        out = {}
+        for path in paths:
+            if scope and batches.path_matches(path, scope):
+                continue
+            for pid, p in plans.items():
+                if pid == mine or pid in closure:
+                    continue
+                for st in self.s.all("SELECT scope FROM steps WHERE plan_id = ?", pid):
+                    sc = json.loads(st["scope"])
+                    if sc and batches.path_matches(path, sc):
+                        out[path] = p["slug"]
+                        break
+                if path in out:
+                    break
+        return out
+
     def run_gates(self, step, aid: str, gate_list: list[Gate], expect_red: list[str],
                   parent: str, must_pass: list[str] = ()) -> tuple[str | None, dict]:
         changed = set(gitops.changed_paths(self.root))
@@ -904,11 +937,16 @@ class Driver:
                 # unchanged red (same exit, same output) pass vacuously (B5).
                 base = {}
             v = gates.judge(r, base, expect_red, obligations=False)
-            if r.missing_paths and gate.declares_tests and v.outcome != "unmeasured":
+            missing = r.missing_paths
+            owed = self.owed_elsewhere(step, missing) if missing else {}
+            if owed:
+                self.event("gate.path-owed", gate=gate.name, step=step["id"], owed=owed)
+                missing = [p for p in missing if p not in owed]
+            if missing and gate.declares_tests and v.outcome != "unmeasured":
                 # At the base an absent path is 0 tests; after a step it is a missing test
                 # file the gate declares, never a silent pass (docs/06 B5).
                 v.outcome = "fail"
-                v.new_failures += [f"{p} (declared, absent after the step)" for p in r.missing_paths]
+                v.new_failures += [f"{p} (declared, absent after the step)" for p in missing]
             inherited = []
             if v.outcome == "fail" and parent != self.base and v.new_failures:
                 inherited = self.parent_probe(gate, parent, v.new_failures)
