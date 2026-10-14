@@ -216,3 +216,42 @@ def test_one_plan_at_a_time(ilk):
                  actor="t", reason="that tick died")
     ilk.script(spec_write({"already_fixed": "x"}))
     assert rsi.tick(ilk.s)["did"] == "done"                  # the stale plan was reopened
+
+
+def test_another_hosts_candidates_are_kept_here_tagged_with_the_host(ilk, monkeypatch, tmp_path):
+    # Oct 14: kira-live runs on rezmac, RSI plans on chad-mbp; rezmac's records must reach it.
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    ilk2_project(ilk)
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_hosts": ["rezmac"]}))
+    remote_rows = {"candidates": [
+        {"id": "gate-cap:abc", "source": "needs-human", "title": "needs_human: base-unmeasured",
+         "hits": 7, "score": 45.0, "status": "open", "batch_id": None,
+         "evidence": [{"batch": "b-1", "detail": "kira gate"}]},
+        {"id": "x:1", "source": "unknown-source", "title": "from a newer release", "hits": 1,
+         "score": 1, "status": "open", "batch_id": None, "evidence": []}]}
+    ssh = tmp_path / "ssh"
+    ssh.write_text(f"#!/bin/sh\ncat <<'J'\n{json.dumps(remote_rows)}\nJ\n")
+    ssh.chmod(0o755)
+    monkeypatch.setenv("ILK2_SSH", str(ssh))
+    monkeypatch.setattr(rsi, "plan", lambda *a, **k: {"done": "test: not planned"})
+    rsi.tick(ilk.s)
+    rows = {r["id"]: r for r in rsi.candidates(ilk.s, None)}
+    r = rows["rezmac/gate-cap:abc"]
+    assert r["title"] == "[rezmac] needs_human: base-unmeasured" and r["hits"] == 7
+    assert json.loads(r["evidence"])[0]["host"] == "rezmac"
+    assert "rezmac/x:1" not in rows                          # an unknown source is not kept
+
+
+def test_an_unreachable_host_is_reported_not_fatal(ilk, monkeypatch, tmp_path):
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    ilk2_project(ilk)
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_hosts": ["rezmac"]}))
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/bin/sh\necho 'connection refused' >&2\nexit 255\n")
+    ssh.chmod(0o755)
+    monkeypatch.setenv("ILK2_SSH", str(ssh))
+    out = rsi.tick(ilk.s)
+    assert out["why"] == "no open candidate"
+    assert any(e["kind"] == "rsi.remote-failed" for e in ilk.s.events_since(0))

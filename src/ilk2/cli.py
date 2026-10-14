@@ -202,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--repo", help="the ilk2 repo, for Chad's docs/rsi/requests.json "
                     "(default: the 'ilk2' project's repo)")
     rs.add_argument("--all", action="store_true", help="candidates: every status, not only open")
+    rs.add_argument("--evidence", action="store_true", help="candidates: include each one's evidence")
     v1p = sub.add_parser("v1", help="V1's scheduler on this host (docs/04 §4.9, P7)")
     v1p.add_argument("op", choices=["status", "off", "on"])
     v1p.add_argument("--apply", action="store_true", help="act; without it, report only")
@@ -510,8 +511,10 @@ def main(argv: list[str] | None = None) -> int:
                                   for b in rsi.pending(s)]}, True)
             else:
                 rows = rsi.candidates(s, None if a.all else rsi.OPEN)
-                _out({"candidates": [{k: r[k] for k in ("id", "source", "title", "hits", "score",
-                                                         "status", "batch_id")} for r in rows]}, True)
+                _out({"candidates": [{**{k: r[k] for k in ("id", "source", "title", "hits", "score",
+                                                            "status", "batch_id")},
+                                      **({"evidence": json.loads(r["evidence"])} if a.evidence else {})}
+                                     for r in rows]}, True)
         elif a.cmd == "v1":
             from . import v1
             owned = {os.path.realpath(r["repo_root"]) for r in s.all("SELECT repo_root FROM projects")}

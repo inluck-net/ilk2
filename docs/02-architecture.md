@@ -562,6 +562,7 @@ flowchart LR
   - **Outcomes:** the session either closes the candidate (`already_fixed`, `not_a_defect`, with its evidence), or writes one step: title, self-contained instructions, scope, and a `must_pass` test that fails first.
   - **Gate:** ilk2 sets the gate (the project's `rsi_gate`, by default the full suite with `-n 4`); a planner never chooses or weakens one.
   - **Shelving:** a session that writes no file, edits other files, puts the protected kernel in scope, omits a test, or fails `submit --check` shelves the candidate with its reason.
+- **Other hosts' records** feed the same loop: host.json `rsi_hosts` (chad-mbp: `["rezmac"]`) makes each tick run the other host's finder over ssh and keep its candidates here, titled `[host] …`, with their status owned here. An unreachable host is an `rsi.remote-failed` event, never a failed tick. (Oct 14: kira-live runs on rezmac, and RSI plans and builds on chad-mbp.)
 - **The trigger** (`ilk2 rsi tick`, spawned by the supervisor every 30 min as its own process, never two at once) runs only when the ilk2 project has `rsi_auto`, no ilk2 batch is in flight, fewer than 2 shipped RSI branches await review (`ilk2 rsi pending`), and fewer than 3 RSI batches were submitted in the last 24 hours. Every no-op says why. Judgment calls: 30 min, 2 and 3; the review queue is the real limit.
 
 ## 2.12 Code layout and size

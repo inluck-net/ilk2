@@ -42,6 +42,10 @@ class Candidate:
     source: str
     title: str
     evidence: list[dict] = field(default_factory=list)
+    hits: int | None = None     # when evidence is a sample (another host's): the full count
+
+    def count(self) -> int:
+        return self.hits if self.hits is not None else len(self.evidence)
 
 
 def normalize(text: str) -> str:
@@ -136,7 +140,7 @@ def record(s, cands: list[Candidate], now: float | None = None) -> dict[str, int
     new = reopened = 0
     for c in cands:
         row = s.one("SELECT * FROM rsi_candidates WHERE id = ?", c.id)
-        hits = len(c.evidence)
+        hits = c.count()
         ev = json.dumps(c.evidence[-20:])
         if row is None:
             s.insert("rsi_candidates", {"id": c.id, "source": c.source, "title": c.title,
@@ -152,6 +156,31 @@ def record(s, cands: list[Candidate], now: float | None = None) -> dict[str, int
             reopened += 1
         s.update("rsi_candidates", c.id, fields, actor="rsi", reason="found")
     return {"found": len(cands), "new": new, "reopened": reopened}
+
+
+def hosts() -> list[str]:
+    """Other hosts whose records feed this host's RSI: host.json "rsi_hosts" (Oct 14: kira-live
+    runs on rezmac, while RSI plans and builds on chad-mbp)."""
+    from .supervisor import host_config
+    try:
+        return list(host_config().get("rsi_hosts") or [])
+    except (OSError, ValueError):
+        return []
+
+
+def remote(host: str) -> list[Candidate]:
+    """Another host's candidates: it runs its own finder over its own store, and this host
+    keeps them, tagged with the host. Their status is this host's: the other host only finds."""
+    import subprocess
+    from .release import REMOTE_ENV, _ssh
+    cmd = (REMOTE_ENV + "I=~/.ilk2/current/venv/bin/ilk2; $I rsi find >/dev/null && "
+           "$I rsi candidates --all --evidence")
+    p = subprocess.run([*_ssh(), host, cmd], capture_output=True, text=True, timeout=180)
+    if p.returncode != 0:
+        raise RuntimeError(f"{host}: {p.stderr.strip()[-300:]}")
+    return [Candidate(f"{host}/{r['id']}", r["source"], f"[{host}] {r['title']}",
+                      [{**e, "host": host} for e in r.get("evidence") or []], hits=r["hits"])
+            for r in json.loads(p.stdout)["candidates"] if r["source"] in WEIGHTS]
 
 
 def candidates(s, status: tuple[str, ...] | None = OPEN) -> list:
@@ -291,6 +320,12 @@ def tick(s, now: float | None = None) -> dict:
         # a tick that died mid-plan: the candidate goes back to open, never stuck
         s.update("rsi_candidates", r["id"], {"status": "open"}, actor="rsi", reason="stale planning")
     rec = record(s, find(s, repo, now), now)
+    for host in hosts():
+        try:
+            got = record(s, remote(host), now)
+            rec = {k: rec.get(k, 0) + got.get(k, 0) for k in rec}
+        except Exception as e:  # noqa: BLE001 - an unreachable host is reported, never fatal
+            s.event("rsi.remote-failed", {"host": host, "error": str(e)[:300]})
     if s.one("SELECT 1 FROM rsi_candidates WHERE status = 'planning'"):
         # one plan at a time: a manual tick and the supervisor's would plan two candidates at
         # once (Oct 14, the first live tick); a stale one was reopened above
