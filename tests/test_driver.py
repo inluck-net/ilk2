@@ -1129,6 +1129,35 @@ def test_a_projects_batches_on_one_base_share_its_measurement(ilk):
     assert not [e for e in ilk.s.events_since(0, third) if e["kind"] == "base.reused"]
 
 
+def test_a_base_measurement_records_its_cost(ilk):
+    # A live kira base measurement took 1,794 s against a 900 s cap (Oct 14) and nothing could
+    # tell whether that was one slow run or a capped run plus the re-run gates.measure makes for
+    # a transient (capped) result. Every measurement that actually runs records its cost.
+    ilk.make_repo({"calc.py": "def add(a, b):\n    return a + b\n",
+                   "tests/conftest.py": "import sys, os\n"
+                   "sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"})
+    ilk.project()
+    ilk.script([{"write": "note.md", "text": "done\n"}])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    ev = [e["payload"] for e in ilk.s.events_since(0, bid) if e["kind"] == "base.measured"]
+    assert len(ev) == 1  # exactly one per gate, and only for a measurement that ran
+    p = ev[0]
+    assert p["gate"] == "unit" and len(p["commit"]) == 12
+    assert p["outcome"] == "pass" and p["failures"] == 0
+    assert p["seconds"] >= 0 and p["timeouts"] == 0 and p["reran"] is False
+    # A gate that outlives its cap is a transient unmeasured, so measure() runs it again; the
+    # cost event is written even though the batch then blocks as base-unmeasured.
+    slow = {"name": "slow", "adapter": "shell", "declares_tests": False,
+            "command": ["sleep", "3"], "cap_s": 1}
+    bid = ilk.submit(one_step(gates_=[slow]))
+    ilk.drive_inprocess(bid)  # blocks as base-unmeasured: assert the event, not the outcome
+    ev = [e["payload"] for e in ilk.s.events_since(0, bid) if e["kind"] == "base.measured"]
+    assert len(ev) == 1
+    assert ev[0]["timeouts"] >= 1 and ev[0]["reran"] is True
+
+
 def test_a_gate_path_another_plan_creates_is_owed_by_that_plan(ilk):
     # gh-resolve P6, Oct 14: V1 plans' gates list every sibling's new test file. A plan that
     # runs before (or beside) the plan that creates tests/test_two.py is not red for its absence.

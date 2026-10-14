@@ -52,6 +52,7 @@ class GateRun:
     missing_paths: list[str] = field(default_factory=list)
     tail: str = ""
     timeouts: int = 0                # gate-cap hits, for host-load admission (§2.11.1)
+    reruns: int = 0                  # extra runs measure() made after a transient unmeasured
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -323,6 +324,7 @@ def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
             r2.transient = False
             r2.reason = f"{r2.reason} (twice)"
         r = r2
+        r.reruns = 1  # measure() ran the gate twice: the caller's cost includes both
     r.timeouts = timeouts
     for tid, f in list(r.failures.items()):
         if f.timeout_class and rerun_alone(gate, root, env, spec, workdir, tid):

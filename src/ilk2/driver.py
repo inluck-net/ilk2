@@ -390,7 +390,14 @@ class Driver:
             self.event("base.reused", gate=gate.name, commit=commit, from_batch=prior["batch_id"],
                        age_s=round(clock.wall() - prior["at"]))
             return json.loads(prior["failures"])
+        t0 = time.monotonic()
         r = gates.measure(gate, where, env, self.dir / "gates", spec)
+        # What the measurement cost, including the re-run measure() makes for a transient
+        # (capped) first result: on Oct 14 a kira base suite took 1,794 s against a 900 s cap
+        # and nothing could say whether that was one slow run or a capped run plus its re-run.
+        self.event("base.measured", gate=gate.name, commit=commit[:12], outcome=r.outcome,
+                   failures=len(r.failures), seconds=round(time.monotonic() - t0, 1),
+                   timeouts=r.timeouts, reran=bool(r.reruns))
         if r.outcome == "unmeasured":
             self.block_batch("base-unmeasured",
                              f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
