@@ -494,7 +494,8 @@ def main(argv: list[str] | None = None) -> int:
             from . import v1
             owned = {os.path.realpath(r["repo_root"]) for r in s.all("SELECT repo_root FROM projects")}
             if a.op == "status":
-                out = {"needs_v1": v1.needs_v1(owned), **v1.scheduler_state()}
+                out = {"needs_v1": v1.needs_v1(owned), "stale": v1.stale_registrations(owned),
+                       **v1.scheduler_state()}
             elif a.op == "off":
                 out = v1.switch_off(owned, a.apply)
             else:

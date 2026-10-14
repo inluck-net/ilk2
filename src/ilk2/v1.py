@@ -227,7 +227,8 @@ def launchctl() -> str:
 def needs_v1(owned_roots: set[str]) -> list[str]:
     """What on this host still needs V1's scheduler (§4.9): a registered repo ilk2 does not own,
     a queued or active master, or a live V1 runner, for any key."""
-    out = [f"registered in V1, not owned by ilk2: {r}" for r in sorted(registry_roots() - owned_roots)]
+    out = [f"registered in V1, not owned by ilk2: {r}" for r in sorted(registry_roots() - owned_roots)
+           if Path(r).exists()]
     projects = data_root() / "projects"
     for d in sorted(projects.iterdir()) if projects.is_dir() else []:
         runnable = [m for m in unshipped(d.name) if m.endswith((": queued", ": active"))]
@@ -236,6 +237,13 @@ def needs_v1(owned_roots: set[str]) -> list[str]:
         if pid:
             out.append(f"{d.name}: V1 runner alive, pid {pid}")
     return out
+
+
+def stale_registrations(owned_roots: set[str]) -> list[str]:
+    """Registered repos whose path is gone: V1's scheduler skips them (`skip-missing-path`), so
+    they need nothing. rezmac, Oct 14: 5 of 8 per-run resolver registrations pointed at
+    worktrees that gh-resolve's release had disposed."""
+    return sorted(r for r in registry_roots() - owned_roots if not Path(r).exists())
 
 
 def scheduler_state() -> dict:

@@ -183,7 +183,7 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 | gh-resolve's resolver (`kira-cloudflare-resolver`) | rezmac | V1-registered; main key 20 blocked, 3 paused; last close Oct 12 20:29 | gh-resolve's `engine: ilk2` live on rezmac (P6). **Oct 14 ~09:30:** the clone is taken over as ilk2 project `kira-live` (backup `projects.json.bak-ilk2-1791939434`; the 6 per-run V1 keys keep running and drain); shadow mode on (`kira-shadow`); P6 live adapter in progress in gh-resolve, no shadow-agreement gate (Chad) |
 
 **The switch-off, per host, once its rows are retired:**
-1. `ilk2 report` shows the host's ilk2 projects meeting §4.5, and `ilk2 v1 status` lists nothing that still needs V1 (a registered repo ilk2 does not own, a queued or active master, a live runner).
+1. `ilk2 report` shows the host's ilk2 projects meeting §4.5, and `ilk2 v1 status` lists nothing that still needs V1 (a registered repo ilk2 does not own, a queued or active master, a live runner). A registered path that no longer exists is reported under `stale`, not as a blocker: V1's scheduler skips it (`skip-missing-path`). On rezmac, Oct 14, 5 of 8 per-run resolver registrations were like that.
 2. Disable, do not delete: `ilk2 v1 off --apply` (refused while `status` lists anything) boots out `net.inluck.ilk.scheduler` and moves its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. `ilk2 v1 on --apply` moves it back and bootstraps it.
 3. V1's data (`~/.ilk-data`) and releases (`~/.ilk`) stay as they are: history, baselines (`ilk2 report --v1-baseline`) and rollback.
 4. V1's planning skills (`/ilk-plan`, `ilk-spec`, inbox and lark tickets) keep working: they write masters into V1's plans dir, and ilk2 claims the queued ones of the projects it owns.

@@ -300,3 +300,14 @@ def test_two_rejected_masters_open_two_needs_human_rows(ilk, v1data):
     sp.claim_v1()
     rows = ilk.s.all("SELECT consumer_ref FROM needs_human WHERE reason = 'plan-rejected' AND state = 'open'")
     assert sorted(r["consumer_ref"] for r in rows) == ["v1:MASTER-a", "v1:MASTER-b"]
+
+
+def test_a_registration_whose_path_is_gone_is_stale_not_a_blocker(ilk, v1data, agents, tmp_path):
+    # rezmac, Oct 14: 5 of 8 per-run resolver registrations pointed at disposed worktrees; V1's
+    # scheduler skips them (skip-missing-path), so they must not hold the switch-off.
+    d, key = v1data
+    gone = tmp_path / "resolver-gone"
+    (d / "projects.json").write_text(json.dumps({"projects": [{"path": str(gone)}]}))
+    assert v1.needs_v1(set()) == []
+    assert v1.stale_registrations(set()) == [str(gone)]
+    assert v1.switch_off(set(), apply=False)["blockers"] == []
