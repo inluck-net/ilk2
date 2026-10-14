@@ -242,3 +242,77 @@ def test_a_json_gate_command_with_a_leading_assignment_gets_it_as_env():
     g1, g2 = spec.plans[0].steps[0].gates
     assert g1.command == ["bun", "run", "test:cli"] and g1.env == {"TZ": "UTC", "NODE_ENV": "test"}
     assert g2.command == ["bun", "test"] and g2.env == {"TZ": "Asia/Singapore"}  # explicit env wins
+
+
+GHR_LIVE_WORK = """---
+plan: issue-1-work-abc
+status: pending
+depends_on: []
+local_checks: 
+  - command: bash scripts/consistency-regression.sh
+    timeout: 600
+  - command: python -m pytest tests/test_a.py
+    timeout: 900
+scope_paths:
+  - "src/a.py"
+---
+
+# Sub-plan
+
+## Steps
+
+### Step 0
+
+resolve issue #1.
+
+## Gate
+
+- `bash scripts/consistency-regression.sh`
+"""
+
+GHR_LIVE_VERIFY = """---
+plan: issue-1-batch-verification-abc
+status: pending
+batch_verification: true
+depends_on: []
+local_checks:
+  - command: python -m pytest tests/test_a.py
+scope_paths:
+  - "src/a.py"
+---
+
+## Steps
+
+### Step 0 — run the batch suite
+
+Run it.
+
+### Step 1 — re-run the failures at base, and attribute from the result
+
+Rerun.
+"""
+
+
+def test_gh_resolve_live_render_bare_steps_and_frontmatter_gates():
+    # gh-resolve's first live dispatch to ilk2 (rezmac, Oct 14, run 00e65dcf) was rejected:
+    # "no steps" for a bare '### Step 0', and "declares no gate (vacuous)" for steps whose gates
+    # are the sub-plan frontmatter's local_checks. V1 accepts both.
+    work = plans.parse_v1_subplan(GHR_LIVE_WORK)
+    assert [s.title for s in work.steps] == ["Step 0"] and not work.verification
+    g = work.steps[0].gates
+    assert [(x.adapter, x.command, x.cap_s) for x in g] == [
+        ("shell", ["bash", "scripts/consistency-regression.sh"], 600),
+        ("pytest", ["python", "-m", "pytest", "tests/test_a.py"], 900)]
+    verify = plans.parse_v1_subplan(GHR_LIVE_VERIFY)
+    assert verify.verification                              # batch_verification: true
+    assert [s.title for s in verify.steps] == ["run the batch suite",
+                                               "re-run the failures at base, and attribute from the result"]
+    assert all(s.gates and s.gates[0].command[-1] == "tests/test_a.py" for s in verify.steps)
+    assert plans.check(plans.BatchSpec(plans=[work, verify])) == []
+
+
+def test_a_steps_own_local_checks_win_over_the_frontmatters():
+    text = GHR_LIVE_WORK.replace("resolve issue #1.", "resolve issue #1.\n\n```yaml\nlocal_checks:\n"
+                                 "  - command: python -m pytest tests/test_b.py\n```\n")
+    step = plans.parse_v1_subplan(text).steps[0]
+    assert [x.command[-1] for x in step.gates] == ["tests/test_b.py"]

@@ -129,7 +129,8 @@ def load_json(path: Path) -> BatchSpec:
 # -- V1 Markdown import -------------------------------------------------------------------
 
 _FRONT = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-_STEP = re.compile(r"(?m)^### Step (\d+)\s*[—:-]+\s*(.*)$")
+# '### Step N — title', or a bare '### Step N' (gh-resolve's live render, Oct 14; V1 accepts it).
+_STEP = re.compile(r"(?m)^### Step (\d+)(?:[ \t]*[—:-]+[ \t]*(.*?))?[ \t]*$")
 # A local_checks entry: `- command: <scalar>` with an optional `timeout:` line. The scalar is
 # double-quoted, single-quoted or plain (to the end of the line): gh-resolve's plans use all three.
 _CMD = re.compile(r"""-\s*command:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\n]+?))[ \t]*$"""
@@ -197,6 +198,21 @@ def _local_checks(sec: str) -> list[Gate]:
     return good[-1] if good else []
 
 
+def _frontmatter_checks(text: str) -> list[Gate]:
+    """The sub-plan's own `local_checks:` in its frontmatter. In V1 they apply to every step
+    that declares none of its own (gh-resolve's live plans put all gates there, Oct 14)."""
+    m = _FRONT.match(text)
+    if not m:
+        return []
+    fm = m.group(1)
+    k = re.search(r"(?m)^local_checks:[ \t]*$", fm)
+    if not k:
+        return []
+    rest = fm[k.end():]
+    end = re.search(r"(?m)^\S", rest)  # the next top-level key ends the block
+    return _block_gates(rest[: end.start()] if end else rest) or []
+
+
 def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
     """A V1 sub-plan: frontmatter, then '### Step N — title' sections with local_checks."""
     fm = _frontmatter(text)
@@ -212,11 +228,12 @@ def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
     else:
         heads = list(_STEP.finditer(body))
     preamble = body[: heads[0].start()] if heads else body
+    plan_gates = _frontmatter_checks(text)
     steps = []
     for i, h in enumerate(heads):
         sec = body[h.end(): heads[i + 1].start() if i + 1 < len(heads) else len(body)]
         sec = re.split(r"(?m)^## ", sec)[0]
-        gates = _local_checks(sec)
+        gates = _local_checks(sec) or plan_gates
         # "Remove every xfail" (all of the pinned file's tests must now pass) -> must_pass on the
         # first local_checks path. A partial "Remove AC-1's xfail" needs ids; left to the author.
         must = []
@@ -224,12 +241,13 @@ def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
             first = next((a for a in gates[0].command[1:] if a.endswith(".py") and "/" in a), None)
             if first:
                 must = [first]
-        steps.append(Step(must_pass=must, title=h.group(2).strip(),
+        steps.append(Step(must_pass=must, title=(h.group(2) or "").strip() or f"Step {h.group(1)}",
                           instructions=(preamble.strip() + "\n\n### " + h.group(0)[4:] + sec).strip(),
                           gates=gates, scope=list(fm.get("scope_paths") or [])))
     deps = fm.get("depends_on") or []
     return Plan(slug=slug, steps=steps, depends_on=list(deps) if isinstance(deps, list) else [],
-                verification=str(fm.get("plan", "")).endswith("-verify"))
+                verification=str(fm.get("plan", "")).endswith("-verify")
+                or str(fm.get("batch_verification", "")).lower() == "true")
 
 
 def parse_v1_master(master: Path) -> BatchSpec:

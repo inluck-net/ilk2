@@ -189,7 +189,7 @@ An 18-step V1 master took 2.5 h for 2 steps. Model time was 93% of worker time; 
 | Red-first was applied to repair steps: a repair that edited its test's file was judged unable to detect anything | No red-first in repair or verification plans |
 | Each release drained the supervisor, which admits nothing while draining; releases every 20-30 min kept new batches queued | Upgrades drain only when the supervisor's own code changed |
 
-After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Open (P6): parallel independent plans; here only 1 of 6 remaining plans could overlap.
+After the fixes the stuck step was accepted 13 min after a restart that kept its work, and the next step continued its session (`carried: true`). Parallel independent plans (lanes) were then built (Oct 14 04:00, §2.4.2a); here only 1 of 6 remaining plans could have overlapped. P6 was their first real batch ("Lanes on their first real batch" below).
 
 ### Parallel plans inside a batch (design proposal, Oct 14, for Chad's review)
 
