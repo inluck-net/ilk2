@@ -282,6 +282,15 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 
 **Going unattended (Chad's call).** Proposed bar: 5 consecutive reviewed RSI batches merged without a change of substance at review, and none later reverted. Then a shipped batch could merge and release itself on chad-mbp as a canary. It would roll back automatically (`ilk2 release upgrade --version <previous>`) if the next full suite or `ilk2 health` regresses, and push to rezmac after a clean day. Judgment call: 5 batches; wrong if the first batches are too small to show what review catches.
 
+**Unattended merging: proposal for Chad, once the bar is met.**
+1. **Where it merges.** A shipped RSI branch merges into a dedicated branch `rsi/main`, never into `main` directly. `main` is checked out in the build session's working tree here (this clone), and an unattended process moving it would leave that tree stale under a person mid-edit. `rsi/main` is fast-forwarded from `main` before each merge, and a conflict shelves the batch for review.
+2. **Canary on chad-mbp.** Build and upgrade a release from `rsi/main` on chad-mbp only, then run the full suite and `ilk2 health` against it.
+   - **Red:** roll back at once (`ilk2 release upgrade --version <previous>`). The batch goes back to review with the evidence.
+   - **Green for 24 h** of real batches, with no new engine-error or stall candidates attributable to it: fast-forward `main` to `rsi/main` and push to rezmac. While this clone sits on `main` with uncommitted work, this step waits for the build session.
+3. **What stays manual.** A release that drains, because the supervisor's code changed, still waits for review. A drain interrupts consumer batches, and that cost is a person's call.
+
+Judgment calls: the 24 h soak, and drain-needing changes staying manual. Wrong if a regression only shows after a day, or if most RSI changes touch supervisor code.
+
 | # | Batch | Shipped | Review |
 |---|---|---|---|
 | RSI-1 | `b-550a27b0c929`: `ilk2 report --batch` breaks time down by phase | Oct 14 22:29, 1 step, accepted on attempt 1 (about 13 min from admission; base 3 min) | **Merged as is** (2589c71, fast-forward). The spec was met: per-run pairing, unclosed phases closed by the next start or the run's end, and a test with exact arithmetic for both cases (re-checked by hand). Not a defect: nested phases would be counted twice, but the driver's phases are sequential. On P6 it shows dispatch 438.9 min, gates 25.0, base 17.6 |
