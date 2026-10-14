@@ -536,6 +536,7 @@ class Driver:
                                paths=gitops.changed_paths(self.root)[:50])
                 else:
                     gitops.reset_hard(self.root, head)
+            applied = self.apply_requested(step)
             parent = head
         n = step["attempt_count"]
         last = self.s.one("SELECT evidence FROM attempts WHERE step_id = ? AND evidence IS NOT NULL "
@@ -543,6 +544,10 @@ class Driver:
         evidence = last["evidence"] if last else None
         if kept:
             evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
+        if applied:
+            evidence = ((evidence + "\n\n") if evidence else "") + (
+                "The operator brought these commits into this worktree with `ilk2 apply` (uncommitted; "
+                "they are committed with this step): " + ", ".join(applied) + ". Keep them as they are.")
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
         # Kept work is gated too: it may already be green, and otherwise the worker gets the
@@ -643,6 +648,24 @@ class Driver:
             self.end_attempt(aid, "red", red[:300], summary, evidence=red, gates_out=verdicts)
         self.block_step(step, "attempts", f"{limit} attempts red (3, then an escalation round)",
                         evidence or "")
+
+    def apply_requested(self, step) -> list[str]:
+        """`ilk2 apply <batch> <commit>`: bring a commit (a fix from the consumer's main, say)
+        into this step's worktree, uncommitted, unless the worktree already has it. Every step
+        does this on entry, so lanes get identical content and merge cleanly."""
+        row = self.s.one("SELECT value FROM meta WHERE key = ?", f"apply:{self.batch_id}")
+        done = []
+        for sha in json.loads(row["value"]) if row else []:
+            res = gitops.apply_commit(self.root, sha)
+            self.event("commit.applied", step=step["id"], commit=sha, result=res)
+            if res == "applied":
+                done.append(sha[:12])
+            elif res.startswith("failed"):
+                self.s.open_needs_human("apply-failed", f"commit {sha[:12]} does not apply to "
+                                        f"{self.root}: {res}", f"resolve it, or drop the request: "
+                                        f"ilk2 apply {self.batch_id} {sha[:12]} --drop",
+                                        batch_id=self.batch_id)
+        return done
 
     def keeps_leftover(self, step, head: str) -> bool:
         """Changes left in the root by an earlier run are kept when they are this step's own
@@ -877,6 +900,13 @@ class Driver:
                     f = r.failures.get(tid)
                     tag = " [possibly-inherited: also failing at the step's parent]" \
                         if tid in inherited else ""
+                    if base and tid in base:
+                        # Counted as new because its message changed, but the same test failed at
+                        # the batch base: usually a pre-existing failure whose message embeds what
+                        # the code did (gh-resolve P5/P6, Oct 14: an environment-dependent test
+                        # that two workers set out to "fix").
+                        tag += (" [also failing at the batch base, message differs: likely "
+                                "pre-existing; check before changing it]")
                     lines.append(f"- {tid}{tag}: {f.message if f else ''}")
                 lines.append("\nOutput tail:\n" + r.tail[-2500:])
                 reds.append("\n".join(lines))

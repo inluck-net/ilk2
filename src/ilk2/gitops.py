@@ -139,6 +139,22 @@ def reset_hard(root: Path, sha: str) -> None:
     git(root, "clean", "-q", "-fd")
 
 
+def apply_commit(root: Path, sha: str) -> str:
+    """Apply a commit's change to the worktree, uncommitted. Returns 'present' (the worktree
+    already has it: the reverse applies), 'applied', or 'failed: <reason>'."""
+    patch = subprocess.run(["git", "-C", str(root), "show", "--format=", "--binary", sha],
+                           capture_output=True, text=True).stdout
+    if not patch.strip():
+        return "failed: empty or unknown commit"
+    rev = subprocess.run(["git", "-C", str(root), "apply", "--check", "-R", "-"], input=patch,
+                         capture_output=True, text=True)
+    if rev.returncode == 0:
+        return "present"
+    p = subprocess.run(["git", "-C", str(root), "apply", "--3way", "-"], input=patch,
+                       capture_output=True, text=True)
+    return "applied" if p.returncode == 0 else f"failed: {p.stderr.strip()[:300]}"
+
+
 def is_ancestor(root: Path, a: str, b: str) -> bool:
     """True if commit a is an ancestor of (or equal to) commit b."""
     return subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", a, b],

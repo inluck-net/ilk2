@@ -43,6 +43,8 @@ NEEDS_HUMAN_REASONS = {
     "unmeasured",
     # A V1 master claimed for an ilk2-owned project that ilk2 cannot accept (docs/04 §4.3).
     "plan-rejected",
+    # `ilk2 apply`: a requested commit does not apply to a step's worktree.
+    "apply-failed",
 }
 
 SCHEMA = """

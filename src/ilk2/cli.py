@@ -180,6 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("project_id")
     pr.add_argument("--give-back", action="store_true",
                     help="also hand the repo back to V1 (undo --take-over)")
+    ap_ = sub.add_parser("apply", help="bring a commit into a running batch's worktrees")
+    ap_.add_argument("batch")
+    ap_.add_argument("commit")
+    ap_.add_argument("--now", action="store_true", help="interrupt and resume the batch so it applies at once")
+    ap_.add_argument("--drop", action="store_true", help="remove the request")
     ps = psub.add_parser("set", help="change project settings: key=JSON value (journalled)")
     ps.add_argument("project_id")
     ps.add_argument("assignments", nargs="+", metavar="key=value")
@@ -450,6 +455,34 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 g = lease.recover(s, a.root, a.generation, a.new_head or head)
             _out({"generation": g}, True)
+        elif a.cmd == "apply":
+            import time
+            b = s.get("batches", a.batch)
+            repo = Path(s.get("projects", b["project_id"])["repo_root"])
+            sha = gitops.rev(repo, a.commit + "^{commit}")
+            if sha is None:
+                _out({"error": "rejected", "problems": [f"{a.commit} is not a commit in {repo}"]}, True)
+                return 2
+            key = f"apply:{a.batch}"
+            row = s.one("SELECT value FROM meta WHERE key = ?", key)
+            shas = json.loads(row["value"]) if row else []
+            shas = [x for x in shas if x != sha] if a.drop else shas + ([sha] if sha not in shas else [])
+            with s.tx() as c:
+                c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                          "value = excluded.value", (key, json.dumps(shas)))
+            s.event("apply.requested" if not a.drop else "apply.dropped", {"commit": sha}, batch_id=a.batch)
+            out = {"batch": a.batch, "commits": shas}
+            if a.now and not a.drop and s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN "
+                                               "('starting', 'running')", a.batch):
+                batches.park(s, a.batch, now=True)
+                for _ in range(120):
+                    if not s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', "
+                                 "'running')", a.batch):
+                        break
+                    time.sleep(5)
+                batches.resume(s, a.batch)
+                out["restarted"] = True
+            _out(out, True)
         elif a.cmd == "v1":
             from . import v1
             owned = {os.path.realpath(r["repo_root"]) for r in s.all("SELECT repo_root FROM projects")}

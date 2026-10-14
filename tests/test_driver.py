@@ -1034,3 +1034,47 @@ def test_the_p6_consumer_sequence_end_to_end(ilk, tmp_path, capsys):
     tip = ilk.git(root, "rev-parse", "resolver-1")
     assert ilk.git(root, "merge-base", "--is-ancestor", new, tip) == ""  # built on the consumer's head
     assert ilk.git(root, "show", "resolver-1:rework.txt") == "r"
+
+
+def test_a_base_failure_with_a_changed_message_is_labelled_pre_existing(ilk):
+    # gh-resolve, Oct 14: a test failing at the base whose message embeds the code's calls read as
+    # new after the batch added calls; the worker was not told it had failed at the base already.
+    ilk.make_repo({"calc.py": "def add(a, b):\n    return a - b\n",
+                   "tests/conftest.py": "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(1, 2) == 3\n",
+                   "tests/test_calls.py": "import calc\ndef test_calls():\n    assert False, open(calc.__file__).read()\n"})
+    ilk.project()
+    ilk.script([{"write": "calc.py", "text": "def add(a, b):\n    return a + b\n# new call\n"}])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_calls.py")]))
+    ilk.drive_inprocess(bid)
+    ev = ilk.s.one("SELECT evidence FROM attempts WHERE evidence IS NOT NULL ORDER BY created_at LIMIT 1")
+    assert ev and "tests/test_calls.py::test_calls [also failing at the batch base, message differs" in ev["evidence"]
+
+
+def test_ilk2_apply_brings_a_main_fix_into_the_running_batch(ilk, tmp_path, capsys):
+    # gh-resolve, Oct 14: a test-isolation fix landed on main (2e3ef059) while two batches ran;
+    # the build session paused them and applied it by hand. `ilk2 apply` does it.
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit({"plans": [{"slug": "p", "steps": [
+        {"title": "s0", "instructions": "x", "gates": [gate("tests/test_calc.py")]},
+        {"title": "s1", "instructions": "y", "gates": [gate("tests/test_calc.py")]}]}]})
+    # a fix on another branch of the consumer's repo
+    ilk.git(ilk.repo, "checkout", "-q", "-b", "fixbranch")
+    (ilk.repo / "fix.txt").write_text("hermetic\n")
+    ilk.git(ilk.repo, "add", "-A")
+    ilk.git(ilk.repo, "-c", "user.name=c", "-c", "user.email=c@c", "commit", "-qm", "the fix")
+    fix = ilk.git(ilk.repo, "rev-parse", "HEAD")
+    ilk.git(ilk.repo, "checkout", "-q", "-")
+    capsys.readouterr()
+    assert cli.main(["apply", bid, fix[:10]]) == 0
+    assert json.loads(capsys.readouterr().out)["commits"] == [fix]
+    ilk.script([GOOD], [{"write": "notes.txt", "text": "n"}])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    assert ilk.git(ilk.repo, "show", f"{b['branch']}:fix.txt") == "hermetic"
+    res = [e["payload"]["result"] for e in ilk.s.events_since(0, bid) if e["kind"] == "commit.applied"]
+    assert res == ["applied", "present"]                    # step 0 brought it in, step 1 had it
+    assert fix[:12] in ilk.stub_prompts()[0]                 # the worker is told
+    assert cli.main(["apply", bid, "nosuchcommit"]) == 2
