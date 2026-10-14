@@ -85,9 +85,23 @@ class Driver:
         self.s.event("phase.start", {"phase": name, **payload}, batch_id=self.batch_id,
                      run_id=self.run_id)
         faults.hit(f"phase-{name}")
-        yield
-        self.s.event("phase.end", {"phase": name, **payload}, batch_id=self.batch_id,
-                     run_id=self.run_id)
+        raised = None
+        try:
+            yield
+        except BaseException as e:  # noqa: BLE001 - re-raised below, unchanged
+            raised = e
+            raise
+        finally:
+            # The end event goes in a finally: a with-block that raises (Stop from a park
+            # --now or a cancel, an API back-off Stop, any driver error) used to leave the
+            # start unclosed, so the events could not say how long the phase lasted and
+            # report.py had to guess. A hard crash (os._exit, SIGKILL) still emits nothing.
+            end = {"phase": name, **payload}
+            if raised is not None:
+                end |= {"interrupted": True, "error": type(raised).__name__}
+                if isinstance(raised, Stop) and raised.reason:
+                    end["reason"] = raised.reason
+            self.s.event("phase.end", end, batch_id=self.batch_id, run_id=self.run_id)
 
     def event(self, kind: str, **payload) -> None:
         self.s.event(kind, payload, batch_id=self.batch_id, run_id=self.run_id)

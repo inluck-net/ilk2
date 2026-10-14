@@ -1202,3 +1202,33 @@ def test_a_repair_whose_test_already_passes_is_accepted_with_no_worker(ilk):
                     "WHERE st.plan_id = ?", f"{bid}.repair-1")
     assert [(r["outcome"], r["reason"]) for r in rep] == [("accepted", "gates green; no worker needed")]
     assert len(ilk.stub_prompts()) == 1
+
+
+def test_an_interrupted_phase_still_records_its_end(ilk, monkeypatch):
+    # A with-block that raises (Stop from a park --now or a cancel, an API back-off Stop, any
+    # driver error) used to leave its phase.start unclosed, so the events could not say how
+    # long the phase lasted and report.py had to guess at the next phase.start or the run end.
+    from ilk2.driver import Driver
+    from ilk2.runs import Stop
+
+    def raise_stop(*args, **kwargs):
+        raise Stop("parked", "test")
+
+    # The step's dispatch, inside phase("dispatch"); Driver.dispatch itself holds that phase,
+    # so raising from it would emit no dispatch phase at all.
+    monkeypatch.setattr("ilk2.worker.dispatch", raise_stop)
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    rid = ilk.new_run(bid)
+    assert Driver(ilk.s, rid).run() == "parked"  # the Stop still ends the run, unchanged
+    evs = [(r["kind"], json.loads(r["payload"])) for r in ilk.s.all(
+        "SELECT kind, payload FROM events WHERE run_id = ? AND kind IN "
+        "('phase.start', 'phase.end') ORDER BY cursor", rid)]
+    ends = [p for k, p in evs if k == "phase.end" and p["phase"] == "dispatch"]
+    assert len(ends) == 1
+    assert ends[0]["interrupted"] is True and ends[0]["error"] == "Stop"
+    assert ends[0]["reason"] == "parked" and ends[0]["step"]  # the payload keeps its own fields
+    starts = [p["phase"] for k, p in evs if k == "phase.start"]
+    assert "dispatch" in starts
+    assert sorted(starts) == sorted(p["phase"] for k, p in evs if k == "phase.end")
