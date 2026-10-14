@@ -288,6 +288,12 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 | RSI-2 | `b-5f2f5a57bedc`: a phase that ends by an exception still records `phase.end` (`interrupted`, `error`, `reason`) | Oct 14 22:47, 1 step, accepted on attempt 1 (about 16 min) | **Merged as is** (2bd5324, fast-forward). The worker improved on the brief: it raised from `worker.dispatch` inside the phase, because `Driver.dispatch` holds the phase itself, so patching it as the brief suggested would have tested nothing. Checked: a store failure inside the `finally` could hide the original exception; the store-busy stall test passed in the gate |
 | RSI-3 | `b-30636fcf3cb9`: every base measurement records its cost (`base.measured`: seconds, cap hits, re-run) | Oct 14 23:08, 1 step, accepted on attempt 1; its base was reused from RSI-2 (F5's first live use) | **Merged as is** (0c0675c, a merge commit, because main had moved). Minimal: one event, a `reruns` field on GateRun, and a test that forces a capped re-run. It answers #8718's 1,794 s question for the next base |
 
+**Unattended planner, first results (Oct 14 23:12-23:30):** 2 candidates planned at once (my manual tick and the supervisor's first, a race since guarded: one plan at a time). Both were closed as `already_fixed`, each with the fixing commit, file:line and an experiment:
+- the GitError: ceb788c, hooks off for ilk2's git, reproduced in a scratch repo;
+- the `stalled (spawn)` race: b7ed8b5.
+
+No batch ran. About 18 min per plan.
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |
