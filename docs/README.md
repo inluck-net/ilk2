@@ -1,6 +1,8 @@
 # ilk2 design documents
 
-**Status: design closed for P1 on Oct 13, 2026** (tag `design-accepted-p1`), after five review rounds (Codex ×3, gh-resolve ×2). Remaining items are tracked by phase in [document 6](06-open-items.md). Building starts only when Chad approves P1.
+**Status, Oct 14, 2026:** ilk2 **0.2.0** runs on both hosts. It owns gh-triage, gh-resolve's and ilk-skills' development, and kira-cloudflare's shadow and issue-sweep batches; V1's scheduler is off on chad-mbp. rezmac's resolver is moving next: P5/P6 in [document 4](04-v1-relation-and-migration.md) §4.4, "As it happened". Diagrams of the system as built: admission §2.2.1, step lifecycle §2.4, lanes §2.4.2a, upgrades §2.7 and a consumer's batch §2.8 in [document 2](02-architecture.md); a project's owner over time in [document 4](04-v1-relation-and-migration.md) §4.3.
+
+The design closed for P1 on Oct 13, 2026 (tag `design-accepted-p1`), after five review rounds (Codex ×3, gh-resolve ×2). Findings since then are in [document 6](06-open-items.md), by phase.
 
 First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by ilk-skills-4a.
 
@@ -14,6 +16,7 @@ First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by
 | 6 | [Open items after design close](06-open-items.md) | What is still open, and at which phase it gets resolved |
 | E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
 | E2 | [Evidence: what the full suite costs](evidence/2026-10-13-full-suite-cost.md) | Where do full-suite runs cost time in V1's repos, and would splitting into component repos help? |
+| E3 | [Evidence: the gh-resolve P5 batch baseline](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) | How long does each step of a real 15-step batch take on ilk2, and what did the night's fixes change? |
 
 **Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
 - invariant I10, refusal accounting;

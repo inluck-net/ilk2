@@ -253,3 +253,31 @@ def test_a_shadow_projects_remote_refs_are_refreshed_and_the_brief_says_when(ilk
     assert ilk.git(c, "rev-parse", f"origin/{branch}") == new  # refreshed at submit
     assert ilk.drive_inprocess(bid) == "shipped"
     assert "fetched by the driver at" in ilk.stub_prompts()[0]
+
+
+def test_project_remove_gives_the_repo_back_to_v1(ilk, v1data):
+    # The rollback of a take-over (kira-live on rezmac, Oct 14): V1 resolves the repo again,
+    # and registry changes made since the take-over are kept.
+    from ilk2 import cli
+    d, key = v1data
+    assert cli.main(["project", "add", "proj", str(ilk.repo), "--take-over", "--config",
+                     json.dumps({"path_prelude": [str(__import__("pathlib").Path(sys.executable).parent),
+                                                  "/usr/bin", "/bin"]})]) == 0
+    assert str(ilk.repo.resolve()) not in v1.registry_roots()
+    reg = d / "projects.json"
+    data = json.loads(reg.read_text())
+    data["projects"].append({"name": "added-later", "path": "/later"})   # a change after the take-over
+    reg.write_text(json.dumps(data))
+    from conftest import one_step
+    bid = ilk.submit(one_step())
+    assert cli.main(["project", "remove", "proj", "--give-back"]) == 2   # an unfinished batch
+    from ilk2 import batches
+    batches.cancel(ilk.s, bid, "human")
+    assert cli.main(["project", "remove", "proj", "--give-back"]) == 0
+    roots = v1.registry_roots()
+    assert str(ilk.repo.resolve()) in roots and "/later" in roots
+    launcher = d / "projects" / key / "runtime" / "launcher"
+    assert (launcher / "last-launch.json").exists() and not (d / "projects" / key / v1.MARKER).exists()
+    assert batches.project_config(ilk.s, "proj").retired               # kept, with its history
+    with pytest.raises(batches.SubmitRejected, match="retired"):
+        ilk.submit(one_step())

@@ -71,13 +71,13 @@ flowchart TD
   L -- yes --> B
   L -- no --> W{backoff over?<br/>crash, API, quota}
   W -- no --> B
-  W -- yes --> P{"project runs &lt; concurrency_limit?<br/>(kira-shadow 3; default 1)"}
+  W -- yes --> P{"project runs &lt, concurrency_limit?<br/>(kira-shadow 3, default 1)"}
   P -- no --> R1[refuse: project-limit] --> B
   P -- yes --> RB{another batch live<br/>on the same root?}
   RB -- yes --> R2[refuse: root-busy] --> B
-  RB -- no --> H{"live runs + reserved &lt; host_budget?<br/>(chad-mbp 4, rezmac 3)"}
+  RB -- no --> H{"live runs + reserved &lt, host_budget?<br/>(chad-mbp 4, rezmac 3)"}
   H -- no --> R3[refuse: host-budget] --> B
-  H -- yes --> LD{"load: 5-min load ≤ cores,<br/>free memory ≥ 2 GB,<br/>&lt; 3 gate timeouts in 30 min"}
+  H -- yes --> LD{"load: 5-min load ≤ cores,<br/>free memory ≥ 2 GB,<br/>&lt, 3 gate timeouts in 30 min"}
   LD -- no --> R4[refuse: host-load] --> B
   LD -- yes --> S[spawn driver] --> B
 ```
@@ -121,17 +121,17 @@ As built (Oct 14). The driver runs one step at a time; within a run, the worktre
 stateDiagram-v2
   [*] --> Prepare
   Prepare: Prepare at the branch head<br/>leftover changes of THIS step's last unaccepted attempt are kept,<br/>anything else is reset (diff saved)
-  Prepare --> GatesFirst: verification plan, fresh step
+  Prepare --> GatesFirst: verification plan (every entry, kept work too)
   Prepare --> Dispatch: work or repair step
   GatesFirst: Run the gates before any worker
   GatesFirst --> Accept: green (no worker at all)
-  GatesFirst --> Dispatch: red (failures become the brief)
+  GatesFirst --> Dispatch: red (failures become the brief, no attempt counted)
   Dispatch: Worker session<br/>attempt 1 of step k>0 continues step k-1's session (carry-over)<br/>attempt 2 resumes · attempt 3 fresh · 4-5 escalation with all evidence
   Dispatch --> ScopeCheck
   ScopeCheck: Changed paths vs deny_paths (always hard),<br/>step scope (hard, or advice for V1-planned projects),<br/>and no copy of the repository inside the worktree
   ScopeCheck --> Gates: ok
   ScopeCheck --> Red: denied path, or out of an enforced scope
-  Gates: Run each gate; compare with the batch base;<br/>red-first check on new must_pass pins
+  Gates: Run each gate, compare with the batch base,<br/>red-first check on new must_pass pins
   Gates --> Accept: no new failures, or only attributed ones
   Gates --> Attribute: new failures also failing at the parent
   Attribute: Walk back to the step that introduced it
@@ -204,7 +204,7 @@ With `max_lanes` > 1 (a project setting, default 1), independent work plans of o
 flowchart LR
   H0[batch head] --> LA["lane p1: worktree &lt;batch&gt;.p1<br/>branch &lt;batch-branch&gt;--p1"]
   H0 --> LB["lane p2: worktree &lt;batch&gt;.p2<br/>branch &lt;batch-branch&gt;--p2"]
-  LA -->|all steps accepted| M1{"take the merge lock;<br/>merge --no-ff into the batch branch;<br/>re-gate the plan's gates on the merged head"}
+  LA -->|all steps accepted| M1{"take the merge lock,<br/>merge --no-ff into the batch branch,<br/>re-gate the plan's gates on the merged head"}
   LB -->|all steps accepted| M2{merge lock, merge, re-gate}
   M1 -->|clean and green| H1[plan p1 shipped]
   M2 -->|clean and green| H2[plan p2 shipped]
@@ -329,7 +329,7 @@ flowchart LR
   DR --> E{live runs left?}
   E -- yes, within bound --> DR
   E -- bound passed --> K[terminate, requeue uncounted] --> X
-  E -- no --> X[supervisor exits;<br/>launchd restarts it from current]
+  E -- no --> X[supervisor exits,<br/>launchd restarts it from current]
 ```
 
   Drivers start from `current`, so driver, worker and gate changes reach the next run without a restart. The supervisor's start (`python -m ilk2 supervise`, which bypasses the CLI) loads only the bookkeeping modules (`supervisor`, `runs`, `batches`, `plans`, `store`, `lease`, `gitops`, `procs` and their basics); it imports the `Driver` lazily, only for cancel and park recovery. So a release that changes the driver, worker, gates or CLI does not drain (`tests/test_release.py` pins the module set). A drain admits nothing until every live run reaches an attempt boundary. It is bounded (§2.11.1): a driver still running when the bound passes is terminated and its run requeued, uncounted, with its work kept (§2.4). Runs record which release made each commit.
@@ -339,6 +339,25 @@ flowchart LR
 ## 2.8 Consumer interface
 
 - **The CLI with JSON output is the contract:** `ilk2 submit <batch.md|json> [--priority N] [--consumer-ref REF] [--meta JSON]`, `ilk2 status [--batch ID | --consumer-ref REF] --json` (each batch carries its `meta` back unchanged), `ilk2 runs --json`, `ilk2 events --since <cursor> --json`, `ilk2 park|resume|amend|ack`, `ilk2 cancel <batch> [--superseded-by <batch>]`, `ilk2 lease acquire|release|renew|recover` (§2.4.2), `ilk2 export --v1`. Operator commands, not consumer contract: `ilk2 project add|set|take-over`, `ilk2 v1 status|off|on [--apply]` (V1's scheduler per host, [document 4](04-v1-relation-and-migration.md) §4.9), `ilk2 report [--project P [--v1-baseline] | --batch B]`.
+- **A consumer's batch, end to end** (gh-resolve's P6 live adapter; `tests/test_driver.py::test_the_p6_consumer_sequence_end_to_end`):
+
+```mermaid
+sequenceDiagram
+  participant G as gh-resolve (consumer)
+  participant I as ilk2 (CLI + supervisor + driver)
+  participant R as execution root (git worktree)
+  G->>I: submit plan --project kira-live --branch resolver-N --base SHA --consumer-ref RUN --meta {issue, run_id}
+  I->>R: worktree add on resolver-N (ilk2 makes the root, no --root)
+  Note over I,R: driver holds the root lease, steps, gates, commits
+  I-->>G: events: batch.shipped {head} (or batch.blocked)
+  G->>I: status --consumer-ref RUN → execution_root, accepted_head, root_lease.generation
+  G->>I: lease acquire --root R --generation g --expected-head H --owner gh-resolve --length 3600
+  G->>R: merge base, pre-push hook, push, open PR (gh-resolve's credentials)
+  G->>I: lease release --root R --generation g' --new-head H2
+  Note over G,I: rework: submit again with --branch resolver-N → same root, builds on H2
+  G->>I: cancel BATCH --superseded-by NEW (supersede, stand-down, issue closed)
+```
+
 - **Versioning.** Every JSON output carries `api_version`. A consumer may pass `--api-version N` to get an older shape. The CLI keeps every version that a registered consumer has pinned, and at least the two previous ones; `ilk2 doctor --hosts` lists each host's pinned versions. (rezmac runs a pinned gh-resolve tag, so one previous version was not enough.)
 - **`status --json` schema,** per batch: status, priority, consumer reference, terminal reason (from a fixed enum), the failing gate with its new failures and fingerprints, `root_lease`, `accepted_head`, and per accepted step its commit SHA, gate results, attempt count and release version. The per-step record is the publication evidence a consumer can cite. It replaces V1's ship-proof provenance fields.
 - **Events** carry a monotonic cursor and are kept for 30 days. A cursor older than that returns `cursor-expired`, and the consumer re-reads `status`. Every event carries the batch's consumer reference.

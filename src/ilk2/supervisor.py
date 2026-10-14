@@ -151,7 +151,8 @@ class Supervisor:
         """Submit the queued V1 masters of projects taken over from V1 (docs/04 §4.3)."""
         from . import plans as plans_mod, v1
         for p in self.s.all("SELECT id FROM projects"):
-            key = batches.project_config(self.s, p["id"]).v1_key
+            pcfg = batches.project_config(self.s, p["id"])
+            key = None if pcfg.retired else pcfg.v1_key
             if not key:
                 continue
             for path in v1.claim(key):

@@ -176,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health")
 
     psub = sub.add_parser("project").add_subparsers(dest="pcmd")
+    pr = psub.add_parser("remove", help="drop a project with no unfinished batch")
+    pr.add_argument("project_id")
+    pr.add_argument("--give-back", action="store_true",
+                    help="also hand the repo back to V1 (undo --take-over)")
     ps = psub.add_parser("set", help="change project settings: key=JSON value (journalled)")
     ps.add_argument("project_id")
     ps.add_argument("assignments", nargs="+", metavar="key=value")
@@ -317,6 +321,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if a.cmd == "project":
             from . import v1
+            if a.pcmd == "remove":
+                proj = s.get("projects", a.project_id)
+                live = s.one("SELECT COUNT(*) n FROM batches WHERE project_id = ? AND status NOT IN "
+                             "('shipped', 'cancelled')", a.project_id)["n"]
+                if live:
+                    _out({"error": "rejected", "problems": [
+                        f"{a.project_id} has {live} unfinished batch(es): cancel or finish them first"]}, True)
+                    return 2
+                out = {"removed": a.project_id}
+                if a.give_back:
+                    from . import v1
+                    cfg = batches.project_config(s, a.project_id)
+                    out["v1"] = v1.give_back(proj["repo_root"], cfg.v1_key)
+                cfg = batches.project_config(s, a.project_id)
+                cfg.retired = True
+                if a.give_back:
+                    cfg.v1_key = None  # nothing more to claim from V1
+                s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))}, actor="human",
+                         reason="project remove" + (" --give-back" if a.give_back else ""))
+                _out(out, True)
+                return 0
             if a.pcmd == "set":
                 cfg = batches.project_config(s, a.project_id)
                 known = set(batches.ProjectConfig.__dataclass_fields__)

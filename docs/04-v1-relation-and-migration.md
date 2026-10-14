@@ -58,13 +58,29 @@ Mechanism:
 ## 4.3 Moving one project (the handover procedure)
 
 1. **Drain on V1:** let the project's active V1 masters ship, or park them with `/ilk-park`. Never stop a progressing batch for the migration.
-2. **Take it over:** `ilk2 project add <id> <repo> --take-over` (or `ilk2 project take-over <id>` for a project already registered). Removing the project from V1's `projects.json` alone is **not** enough: V1's scheduler scans every `~/.ilk-data/projects/<key>/plans` and resolves the repo from `runtime/launcher/last-launch.json` first, the registry second, and skips a project it cannot resolve (`skip-unresolved`, ilk-skills `scheduler_scan.py`). So the takeover removes the registry entry (backup kept), renames `last-launch.json` aside, writes an `ILK2-OWNED` marker, and records the V1 key in the project's config. It refuses while V1 has an unshipped master or a live runner for the repo. Every change is a rename or a backed-up rewrite (`ilk2/v1.py`).
+2. **Take it over:** `ilk2 project add <id> <repo> --take-over` (or `ilk2 project take-over <id>` for a project already registered). Removing the project from V1's `projects.json` alone is **not** enough: V1's scheduler scans every `~/.ilk-data/projects/<key>/plans` and resolves the repo from `runtime/launcher/last-launch.json` first, the registry second, and skips a project it cannot resolve (`skip-unresolved`, ilk-skills `scheduler_scan.py`). So the takeover removes the registry entry (backup kept), renames `last-launch.json` aside, writes an `ILK2-OWNED` marker, and records the V1 key in the project's config. It refuses only while V1 could still run something for that repo's key: a `queued` or `active` master, or a live runner. Drafts, paused and blocked masters stay in V1's dir (`left_in_v1`) and do not block it. Under gh-resolve's per-run keys (`ilk_project_per_run`), each run's worktree is a separate V1 key with its own registry entry, so the clone can be taken over while V1 finishes its in-flight runs (rezmac, Oct 14). Every change is a rename or a backed-up rewrite (`ilk2/v1.py`).
 3. **Keep V1's planning skills.** `/ilk-plan` still writes masters into the V1 plans dir. For a project ilk2 owns, the supervisor claims each `queued` master within one tick (renamed to `*.ilk2-claimed`, which V1's `MASTER-*.md` glob no longer matches; V1 polls every 5 min) and submits it. A plan ilk2 cannot accept opens a `plan-rejected` needs_human row. To stop `/ilk-plan` re-adding the repo to V1's registry (its step 8a), set `"autoschedule": false` in the repo's `.ilk-launch.json`.
 4. **Or submit directly:** `ilk2 submit <master.md>`. The importer reads V1's MASTER and sub-plan Markdown, including what real plans contain (Oct 13, all 146 gh-resolve masters: steps only from the `## Steps` section, every YAML scalar style for `command:`, leading `VAR=value` as the gate's env, the last parseable `local_checks` block of a step; ilk2 commits carry V1's `[plan:<slug>#step-<idx>]` trailer).
 5. **Measure** with `ilk2 report` and compare with the project's V1 baseline (section 4.5).
 6. **Roll back if needed, between batches only.** ilk2 never writes progress back to the Markdown (I2), so the original plan files still show every step as pending. Handing them to V1 would replay accepted work. Two safe paths:
-   - **Between batches** (the default): let the ilk2 batch ship, or park it before its first step is accepted. Then `ilk2 project remove` and re-add the project to V1's `projects.json`.
+   - **Between batches** (the default): let the ilk2 batch ship, or cancel it before its first step is accepted. Then `ilk2 project remove <id> --give-back`: it refuses while the project has an unfinished batch; it restores just that repo's V1 registry entry from the newest ilk2 backup (later registry changes are kept), renames `last-launch.json` back and removes the `ILK2-OWNED` marker. The project is retired, not deleted: it keeps its batch history and refuses new submissions.
    - **Mid-batch:** `ilk2 export --v1 <batch>` writes a V1-compatible plan snapshot. Each accepted step is marked done and linked to its commit, found by the `ilk2-attempt` trailer. V1 continues from that snapshot, never from the original files. Export refuses while any step is `accepting`.
+
+**A project's owner over time** (one owner at a time, I3; [document 2](02-architecture.md) §2.4.2):
+
+```mermaid
+stateDiagram-v2
+  [*] --> V1owned: registered in ~/.ilk-data/projects.json
+  V1owned: V1 owns it<br/>V1's scheduler runs its masters
+  V1owned --> ilk2owned: ilk2 project add --take-over<br/>(refused while a master is queued/active<br/>or a V1 runner is alive for the key)
+  ilk2owned: ilk2 owns it<br/>registry entry removed (backup kept),<br/>last-launch.json renamed aside, ILK2-OWNED marker
+  ilk2owned --> ilk2owned: /ilk-plan writes a master → status queued<br/>→ the supervisor claims it (*.ilk2-claimed) and submits it
+  ilk2owned --> Retired: ilk2 project remove --give-back<br/>(no unfinished batch)
+  Retired: retired in ilk2 (history kept, no new batches)<br/>V1 owns it again
+  Retired --> V1owned
+```
+
+Per host, V1's scheduler stays on while anything still needs it, which `ilk2 v1 status` lists. `ilk2 v1 off --apply` disables it (plist moved to `disabled-by-ilk2/`, never deleted). `ilk2 v1 on --apply` is the rollback.
 
 ## 4.4 Migration phases
 
@@ -99,7 +115,16 @@ The dates are a sequence sketch, not a commitment. Each phase starts only when t
 
 **Known cost of deferring attribution.** Until attribution lands before P4, a new failure that an earlier step caused is still repaired by whichever later step first runs that gate. The worker is told it is `possibly-inherited`, but must fix it, as in V1. That is the trap behind gh-resolve's F8 (two 60-minute iterations). It is accepted for M1 and P3 because P3's suite is under 5 minutes, which bounds the cost.
 
-ilk-skills itself is not on the list. Its development stays on V1 until P7, and its useful V1 fixes then become ilk2 inputs only where still relevant.
+**As it happened** (dates 2026, CST):
+
+| Phase | Done | What closed it |
+|---|---|---|
+| P1 spike, P2 core (M1) | Oct 13 | M1 met: 3-step batch unattended, supervisor kill recovered, stall suite S1-S27 |
+| P3 first real consumer | Oct 13 | gh-triage (not todo-triage, Chad): 2 batches, 4 of 4 steps first-attempt, merged |
+| P4 gh-resolve dev | Oct 13 | handover of gh-resolve's development; attribution A1-A10; the P5 adapter batch (15 steps) shipped Oct 14 05:37 and was merged (gh-resolve 2510bb8f). Baseline: [evidence](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) |
+| ilk-skills dev | Oct 14 00:30 | taken over on chad-mbp (Chad's go), earlier than planned; V1's scheduler then switched off on chad-mbp (00:40) |
+| P5/P6 resolver | in progress | rezmac first (Chad, Oct 14): shadow mode on (`kira-shadow`); the clone taken over as `kira-live`; P6 live adapter being built in gh-resolve; no shadow-agreement gate (Chad) |
+| P7 retire | half | chad-mbp done (Oct 14 00:40); rezmac after the resolver's engine is ilk2 and V1's in-flight runs drain |
 
 ## 4.5 Acceptance targets (versus V1, same measurement method)
 

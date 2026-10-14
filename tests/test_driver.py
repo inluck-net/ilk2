@@ -986,3 +986,51 @@ def test_a_red_gates_first_run_leaves_the_worker_its_attempt(ilk):
     ilk.script([{"delete": "tests/test_new_red.py"}])
     assert ilk.drive_inprocess(bid) == "shipped"
     assert ilk.stub_calls() == 1                            # the worker got the last attempt
+
+
+def test_the_p6_consumer_sequence_end_to_end(ilk, tmp_path, capsys):
+    # gh-resolve's P6 live adapter (Oct 14): submit without --root on branch resolver-<issue>;
+    # ship; take the root's lease, add the consumer's own commit (merge/push side), release with
+    # the new head; a rework batch on the same branch then builds on that head, in the same root.
+    from ilk2 import cli
+
+    def call(*argv):
+        capsys.readouterr()
+        rc = cli.main(list(argv))
+        out = capsys.readouterr().out
+        return rc, (json.loads(out) if out.strip().startswith("{") else out)
+    ilk.make_repo()
+    ilk.project()
+    plan = tmp_path / "issue-1.json"
+    plan.write_text(json.dumps(one_step()))
+    ilk.script([GOOD], [{"write": "rework.txt", "text": "r"}])
+    rc, out = call("submit", str(plan), "--project", "proj", "--branch", "resolver-1",
+                   "--consumer-ref", "run-1", "--meta", '{"issue": 1, "run_id": "run-1"}', "--json")
+    assert rc == 0
+    bid = out["batch"]
+    assert ilk.drive_inprocess(bid) == "shipped"
+    rc, st = call("status", "--consumer-ref", "run-1", "--json")
+    b = st["batches"][0]
+    assert b["status"] == "shipped" and b["meta"] == {"issue": 1, "run_id": "run-1"}
+    root, head, gen = b["execution_root"], b["accepted_head"], b["root_lease"]["generation"]
+    assert b["branch"] == "resolver-1" and b["root_lease"]["holder"] == "released"
+    rc, lk = call("lease", "acquire", "--root", root, "--generation", str(gen),
+                  "--expected-head", head, "--owner", "gh-resolve", "--length", "600")
+    assert rc == 0
+    (Path(root) / "merged-from-base.txt").write_text("m")        # the consumer's own commit
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=c", "-c", "user.email=c@c", "commit", "-qm", "merge base")
+    new = ilk.git(root, "rev-parse", "HEAD")
+    rc, _ = call("lease", "release", "--root", root, "--generation", str(lk["generation"]),
+                 "--new-head", new)
+    assert rc == 0
+    rc, out = call("submit", str(plan), "--project", "proj", "--branch", "resolver-1",
+                   "--consumer-ref", "run-1b", "--json")
+    assert rc == 0
+    rework = out["batch"]
+    assert ilk.drive_inprocess(rework) == "shipped"
+    r = ilk.s.get("batches", rework)
+    assert r["execution_root"] == root                          # same root, reused for rework
+    tip = ilk.git(root, "rev-parse", "resolver-1")
+    assert ilk.git(root, "merge-base", "--is-ancestor", new, tip) == ""  # built on the consumer's head
+    assert ilk.git(root, "show", "resolver-1:rework.txt") == "r"

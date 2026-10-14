@@ -274,3 +274,40 @@ def switch_on(apply: bool) -> dict:
     subprocess.run([launchctl(), "bootstrap", f"gui/{os.getuid()}", str(plist)], capture_output=True)
     out.update(scheduler_state(), applied=True)
     return out
+
+
+def give_back(root: str | Path, key: str | None) -> dict:
+    """Undo take_over for one repo: V1 resolves it again. Only that repo's registry entry is
+    restored, from the newest ilk2 backup that has it, so registry changes made since are kept;
+    the key's last-launch.json is renamed back and the ownership marker removed."""
+    root = _real(root)
+    done: dict = {"root": root, "key": key}
+    reg = data_root() / "projects.json"
+    entry = None
+    for bak in sorted(data_root().glob("projects.json.bak-ilk2-*"), reverse=True):
+        try:
+            data = json.loads(bak.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        entry = next((e for e in data.get("projects", []) if _real(e.get("path", "")) == root), None)
+        if entry:
+            done["entry_from"] = bak.name
+            break
+    if entry and reg.exists():
+        data = json.loads(reg.read_text(encoding="utf-8-sig"))
+        if not any(_real(e.get("path", "")) == root for e in data.get("projects", [])):
+            data.setdefault("projects", []).append(entry)
+            tmp = reg.with_name("projects.json.ilk2-tmp")
+            tmp.write_text(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, reg)
+            done["registry"] = "entry restored"
+    if key:
+        launcher = data_root() / "projects" / key / "runtime" / "launcher"
+        aside = launcher / ("last-launch.json" + HANDOVER)
+        if aside.exists() and not (launcher / "last-launch.json").exists():
+            os.replace(aside, launcher / "last-launch.json")
+            done["last_launch"] = "renamed back"
+        marker = data_root() / "projects" / key / MARKER
+        if marker.exists():
+            marker.unlink()
+    return done

@@ -49,6 +49,8 @@ class ProjectConfig:
     # run at once, each in its own worktree and lane branch, merged into the batch branch when
     # the plan's steps are accepted. 1 keeps the serial path exactly.
     max_lanes: int = 1
+    # `ilk2 project remove`: no new batches, no V1 claims; the row and its history stay.
+    retired: bool = False
     # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same
     # work as the repo it shadows, with no outward effect. Its roots are never leased to a
     # consumer, and its events carry shadow: true.
@@ -220,6 +222,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
            deny_paths: list[str] | None = None, meta: dict | None = None) -> str:
     proj = s.get("projects", project_id)
     cfg = ProjectConfig.from_json(proj["config"])
+    if cfg.retired:
+        raise SubmitRejected([f"project {project_id} is retired (ilk2 project remove)"])
     repo = Path(proj["repo_root"])
     problems = []
     existing = gitops.branch_head(repo, branch) if branch else None
