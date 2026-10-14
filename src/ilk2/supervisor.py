@@ -164,7 +164,8 @@ class Supervisor:
                     self.s.event("v1.claimed", {"master": path.name, "batch": bid}, batch_id=bid)
                 except Exception as e:  # noqa: BLE001 - a bad plan is a planner's job, not a crash
                     self.s.event("v1.claim-rejected", {"master": path.name, "error": str(e)[:500]})
-                    self.s.open_needs_human("plan-rejected", f"{ref}: {str(e)[:1500]}",
+                    self.s.open_needs_human("plan-rejected", f"{ref}: {str(e)[:1500]}", consumer_ref=ref,
+                                            clear_command=
                                             f"fix the plan, rename {path.name} back to "
                                             f"{path.name.replace(v1.CLAIMED, '')} to resubmit",
                                             project_id=p["id"])

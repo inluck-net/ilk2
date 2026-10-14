@@ -335,16 +335,21 @@ class Store:
     # -- needs_human ----------------------------------------------------------------------
 
     def open_needs_human(self, reason: str, detail: str, clear_command: str, *,
-                         batch_id: str | None = None, project_id: str | None = None) -> str:
-        """One open row per (batch, reason): re-entry into the same state does not duplicate."""
+                         batch_id: str | None = None, project_id: str | None = None,
+                         consumer_ref: str | None = None) -> str:
+        """One open row per (batch, reason): re-entry into the same state does not duplicate.
+        A row with no batch is keyed by its consumer ref too: two rejected V1 masters are two
+        rows (Oct 14: 14a's rejection merged into 14b's open row and went unseen)."""
         if reason not in NEEDS_HUMAN_REASONS:
             raise StoreError(f"unknown needs_human reason {reason!r}")
         with self.tx() as c:
             existing = c.execute("SELECT id FROM needs_human WHERE state = 'open' AND reason = ? "
-                                 "AND batch_id IS ?", (reason, batch_id)).fetchone()
+                                 "AND batch_id IS ?" + ("" if batch_id else " AND consumer_ref IS ?"),
+                                 (reason, batch_id) if batch_id else (reason, batch_id, consumer_ref)
+                                 ).fetchone()
             if existing:
                 return existing["id"]
-            ref = None
+            ref = consumer_ref
             if batch_id:
                 r = c.execute("SELECT consumer_ref, project_id FROM batches WHERE id = ?",
                               (batch_id,)).fetchone()

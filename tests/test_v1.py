@@ -281,3 +281,22 @@ def test_project_remove_gives_the_repo_back_to_v1(ilk, v1data):
     assert batches.project_config(ilk.s, "proj").retired               # kept, with its history
     with pytest.raises(batches.SubmitRejected, match="retired"):
         ilk.submit(one_step())
+
+
+def test_two_rejected_masters_open_two_needs_human_rows(ilk, v1data):
+    # Oct 14: 14a's plan-rejected merged into 14b's open row (both batch-less): 14a sat claimed
+    # with nothing telling anyone.
+    d, key = v1data
+    v1.take_over(ilk.repo, key)
+    ilk.project(v1_key=key)
+    plans_dir = d / "projects" / key / "plans"
+    bad = SUB.replace("python -m pytest -q -p no:cacheprovider tests/test_calc.py",
+                      "python3 /Users/x/.ilk/current/skills/ilk-loop/scripts/verification_record.py --project .")
+    bad = bad.replace("plan: add", "plan: add-batch-verify")
+    (plans_dir / "2026-10-13-add.md").write_text(bad)
+    (plans_dir / "MASTER-a.md").write_text(master("queued"))
+    (plans_dir / "MASTER-b.md").write_text(master("queued"))
+    sp = supervisor.Supervisor(ilk.s, load_check=False)
+    sp.claim_v1()
+    rows = ilk.s.all("SELECT consumer_ref FROM needs_human WHERE reason = 'plan-rejected' AND state = 'open'")
+    assert sorted(r["consumer_ref"] for r in rows) == ["v1:MASTER-a", "v1:MASTER-b"]
