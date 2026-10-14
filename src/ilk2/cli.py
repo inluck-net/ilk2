@@ -197,6 +197,11 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--take-over", action="store_true",
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
+    rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
+    rs.add_argument("op", choices=["find", "candidates"])
+    rs.add_argument("--repo", help="the ilk2 repo, for Chad's docs/rsi/requests.json "
+                    "(default: the 'ilk2' project's repo)")
+    rs.add_argument("--all", action="store_true", help="candidates: every status, not only open")
     v1p = sub.add_parser("v1", help="V1's scheduler on this host (docs/04 §4.9, P7)")
     v1p.add_argument("op", choices=["status", "off", "on"])
     v1p.add_argument("--apply", action="store_true", help="act; without it, report only")
@@ -490,6 +495,18 @@ def main(argv: list[str] | None = None) -> int:
                 batches.resume(s, a.batch)
                 out["restarted"] = True
             _out(out, True)
+        elif a.cmd == "rsi":
+            from . import rsi
+            repo = Path(a.repo) if a.repo else None
+            if repo is None:
+                row = s.one("SELECT repo_root FROM projects WHERE id = 'ilk2'")
+                repo = Path(row["repo_root"]) if row else None
+            if a.op == "find":
+                _out(rsi.record(s, rsi.find(s, repo)), True)
+            else:
+                rows = rsi.candidates(s, None if a.all else rsi.OPEN)
+                _out({"candidates": [{k: r[k] for k in ("id", "source", "title", "hits", "score",
+                                                         "status", "batch_id")} for r in rows]}, True)
         elif a.cmd == "v1":
             from . import v1
             owned = {os.path.realpath(r["repo_root"]) for r in s.all("SELECT repo_root FROM projects")}

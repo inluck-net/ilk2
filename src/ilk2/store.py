@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS repairs (
 CREATE TABLE IF NOT EXISTS supervisor (
   id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER, proc_start TEXT, boot_time INTEGER,
   release TEXT, tick_wall REAL, tick_mono REAL, started_wall REAL, kickstarts TEXT);
+CREATE TABLE IF NOT EXISTS rsi_candidates (
+  id TEXT PRIMARY KEY, source TEXT NOT NULL, title TEXT NOT NULL, evidence TEXT NOT NULL,
+  hits INTEGER NOT NULL, score REAL NOT NULL, status TEXT NOT NULL, batch_id TEXT, note TEXT,
+  first_seen REAL NOT NULL, last_seen REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
