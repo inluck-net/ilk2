@@ -245,6 +245,14 @@ gh-resolve's isolation fix 2cf192b2 was to go into P6's parked lane, which held 
 
 §2.4 "`ilk2 apply`" describes the current behaviour.
 
+### A shared doc conflict costs a repair worker (found Oct 14, P6, open)
+
+Every P6 plan's scope includes `docs/design/raw-ledger-readers.md`. The-push-holds-the-root-lease's lane merge conflicted only in that file, and the conflict became a merge repair plan, which is a full worker session. Candidates, for after P6:
+- Merge a project-declared list of append-mostly docs with `merge=union`, then re-gate as usual.
+- Let a plan author name a shared doc, so lanes append to it in a fixed order.
+
+Judgment call: union merge only for paths the project declares. It is wrong if those docs hold ordered prose that a union merge garbles.
+
 ### Stale evidence after a rule change (found Oct 14, P6; built, released after P6 ships)
 
 Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the step"). The 13:03 restart loaded the owed-path rule, but attempt 2's brief still carried attempt 1's evidence. The worker then created its own `tests/test_50b_reap_follows_ilk2.py`, outside its scope, which this project only advises on. That file conflicted add/add with reap's real one at the merge, and a merge repair plan resolves it.
