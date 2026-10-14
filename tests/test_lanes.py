@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
 import pytest
 from conftest import one_step  # noqa: F401  (fixture module import)
@@ -109,9 +110,16 @@ def test_a_dependent_plan_starts_from_the_merged_head(lanes):
                  f"{bid}.p2": [[{"write": "two.txt", "text": "2"}]]})
     sp = sup(ilk, host_budget=4)
     assert until(sp, lambda: ilk.s.get("batches", bid)["status"] == "shipped", timeout=120), dump(ilk, bid)
-    lane_runs = {r["plan_id"]: r for r in runs_of(ilk, bid) if r["plan_id"]}
-    p1, p2 = lane_runs[f"{bid}.p1"], lane_runs[f"{bid}.p2"]
-    assert p2["created_at"] >= p1["ended_at"]              # waited for p1 to merge
+    # p2's lane is cut from a head that holds p1's merge. (Not run timestamps: p1's run row
+    # ends after its plan ships, and the supervisor may start p2 in between; that flaked
+    # under pytest -n, Oct 14.)
+    merged = [e["payload"]["head"] for e in ilk.s.events_since(0, bid)
+              if e["kind"] == "lane.merged" and e["payload"]["plan"] == "p1"]
+    first = ilk.s.one("SELECT a.parent_commit FROM attempts a JOIN steps st ON st.id = a.step_id "
+                      "WHERE st.plan_id = ? ORDER BY a.created_at LIMIT 1", f"{bid}.p2")
+    b = ilk.s.get("batches", bid)
+    assert merged and subprocess.run(["git", "-C", b["execution_root"], "merge-base", "--is-ancestor",
+                                      merged[0], first["parent_commit"]]).returncode == 0
     starts = [e for e in ilk.s.events_since(0, bid) if e["kind"] == "lane.started"]
     assert [e["payload"]["plan"] for e in starts] == ["p1", "p2"]
 
