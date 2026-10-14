@@ -86,6 +86,11 @@ def ready_plans(s: Store, batch_id: str) -> list:
     taken = {r["plan_id"] for r in s.all("SELECT plan_id FROM runs WHERE batch_id = ? AND status IN "
                                          "('starting', 'running') AND plan_id IS NOT NULL", batch_id)}
     status = {p["slug"]: p["status"] for p in plans}
+    if any(is_root_plan(p) for p in plans if p["id"] in taken):
+        # A repair or verification run holds the batch root and its merge lock for its whole
+        # run: nothing else starts beside it. gh-resolve P6, Oct 14: a second repair admitted
+        # beside the first waited on the lock until its spawn was called stalled, three times.
+        return []
     open_ = [p for p in plans if p["status"] in ("pending", "active") and p["id"] not in taken]
     repairs = [p for p in plans if p["repair_of_step_id"] and p["status"] != "shipped"]
     if repairs:

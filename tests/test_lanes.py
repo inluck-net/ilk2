@@ -161,3 +161,22 @@ def test_a_lane_whose_driver_dies_resumes_in_its_worktree_with_its_work(lanes):
     assert ilk.git(b["execution_root"], "show", f"{b['branch']}:one.txt") == "1"
     assert any(e["kind"] == "worktree.kept" for e in ilk.s.events_since(0, bid))
     assert len([r for r in runs_of(ilk, bid) if r["plan_id"] == f"{bid}.p1"]) >= 2
+
+
+def test_two_repairs_never_run_at_once(lanes):
+    # gh-resolve P6, Oct 14: verification added three repairs; two were admitted together, and
+    # the second waited on the first's merge lock until the supervisor called its spawn stalled,
+    # three times, putting the batch in crash backoff. Root plans share the batch root: one at a time.
+    from ilk2 import batches as b_
+    from ilk2.runs import ready_plans
+    ilk = lanes
+    bid = ilk.submit({"plans": [plan("p1", "one.txt")]})
+    v = ilk.s.get("batches", bid)["version"]
+    b_.amend(ilk.s, bid, [{"op": "add_plan", "slug": f"repair-{i}", "repair_of_step_id": f"{bid}.p1.0",
+                           "steps": [{"title": "r", "instructions": "r", "gates": [SHELL_OK]}]}
+                          for i in (1, 2)], expect_version=v, actor="driver", reason="test")
+    ready = ready_plans(ilk.s, bid)
+    assert {p["slug"] for p in ready} == {"repair-1", "repair-2"}
+    rid = ilk.new_run(bid)
+    ilk.s.update("runs", rid, {"plan_id": ready[0]["id"]}, actor="test", reason="bind")
+    assert ready_plans(ilk.s, bid) == []                   # the other waits for that run

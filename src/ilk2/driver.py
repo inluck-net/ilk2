@@ -609,7 +609,10 @@ class Driver:
             self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
                           reason="gates first (verification or kept work)")
             with self.phase("gates", step=step["id"]):
-                red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass)
+                # A repair's own red test is already attributed: probing it again would only
+                # join the repair it is (test_attribution A5/A7/A9/A10, Oct 14).
+                red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass,
+                                               attribute=not repair)
             if red is None and (plan["verification"] or (repair and not kept)):
                 # A repair whose test already passes has nothing left to repair: gh-resolve P6,
                 # Oct 14, verification found one bad line that three tests flag, and added three
@@ -943,7 +946,8 @@ class Driver:
         return out
 
     def run_gates(self, step, aid: str, gate_list: list[Gate], expect_red: list[str],
-                  parent: str, must_pass: list[str] = ()) -> tuple[str | None, dict]:
+                  parent: str, must_pass: list[str] = (), attribute: bool = True
+                  ) -> tuple[str | None, dict]:
         changed = set(gitops.changed_paths(self.root))
         if self.cfg.setup and any(Path(p).name in LOCKFILES for p in changed):
             self.setup(self.root)
@@ -972,10 +976,10 @@ class Driver:
                 v.outcome = "fail"
                 v.new_failures += [f"{p} (declared, absent after the step)" for p in missing]
             inherited = []
-            if v.outcome == "fail" and parent != self.base and v.new_failures:
+            if attribute and v.outcome == "fail" and parent != self.base and v.new_failures:
                 inherited = self.parent_probe(gate, parent, v.new_failures)
             attributions = []
-            if inherited and gate.adapter in ("pytest", "vitest") and base is not None:
+            if attribute and inherited and gate.adapter in ("pytest", "vitest") and base is not None:
                 attributions = self.attribute(step, gate, spec, r, inherited, parent)
                 done = {a.test_id for a in attributions if a.result == "attributed"}
                 v.new_failures = [t for t in v.new_failures if t not in done]
