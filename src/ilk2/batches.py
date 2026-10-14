@@ -49,6 +49,12 @@ class ProjectConfig:
     # run at once, each in its own worktree and lane branch, merged into the batch branch when
     # the plan's steps are accepted. 1 keeps the serial path exactly.
     max_lanes: int = 1
+    # Paths (gitattributes patterns) whose lane-merge conflicts resolve as a union of both
+    # sides instead of a repair plan: docs every plan appends to. gh-resolve P6, Oct 14: 2 of 3
+    # merge repairs were docs/design/raw-ledger-readers.md alone, about 22 worker-minutes each.
+    # Opt-in (judgment call): wrong for files whose order or uniqueness matters, which a union
+    # garbles without a conflict to show it; the re-gate still runs.
+    union_merge: list[str] = field(default_factory=list)
     # `ilk2 project remove`: no new batches, no V1 claims; the row and its history stay.
     retired: bool = False
     # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same

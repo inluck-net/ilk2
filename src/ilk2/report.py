@@ -140,7 +140,10 @@ def steps(s, batch_id: str) -> dict:
                      "interrupted": sum(a["outcome"] == "interrupted" for a in atts),
                      "minutes": round(mins, 1),
                      "first_edit_min": round(min(firsts) / 60, 1) if firsts else None,
-                     "carried": carried})
+                     "carried": carried,
+                     # W4 (docs/06): the largest prompt any attempt of the step reached
+                     "peak_context_k": round(max([json.loads(a["timings"] or "{}").get(
+                         "peak_context_tokens") or 0 for a in atts] or [0]) / 1000)})
     done = [r for r in rows if r["status"] == "accepted"]
     first_try = [r for r in done if r["attempts"] - r["interrupted"] == 1 and r["red"] == 0]
     return {"batch": batch_id, "steps": rows,
@@ -151,13 +154,14 @@ def steps(s, batch_id: str) -> dict:
 
 def steps_table(r: dict) -> str:
     """The steps() result as a Markdown table, ready for docs/evidence."""
-    out = ["| # | Plan · step | Kind | Status | Attempts | Red | Interrupted | Minutes | First edit | Carried |",
-           "|---|---|---|---|---|---|---|---|---|---|"]
+    out = ["| # | Plan · step | Kind | Status | Attempts | Red | Interrupted | Minutes | First edit | Carried "
+           "| Peak context (k tokens) |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
     for i, x in enumerate(r["steps"], 1):
         out.append(f"| {i} | {x['plan']} · {x['idx']} {x['title'][:50]} | {x['kind']} | {x['status']} | "
                    f"{x['attempts']} | {x['red']} | {x['interrupted']} | {x['minutes']} | "
                    f"{x['first_edit_min'] if x['first_edit_min'] is not None else ''} | "
-                   f"{'yes' if x['carried'] else ''} |")
+                   f"{'yes' if x['carried'] else ''} | {x.get('peak_context_k') or ''} |")
     out.append(f"\n{r['accepted']} of {r['of']} steps accepted; {r['minutes_per_accepted_step']} min per "
                f"accepted step; first-attempt share {r['first_attempt_share']}.")
     return "\n".join(out)

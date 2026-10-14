@@ -180,3 +180,22 @@ def test_two_repairs_never_run_at_once(lanes):
     rid = ilk.new_run(bid)
     ilk.s.update("runs", rid, {"plan_id": ready[0]["id"]}, actor="test", reason="bind")
     assert ready_plans(ilk.s, bid) == []                   # the other waits for that run
+
+
+def test_a_union_merge_path_needs_no_repair(ilk, monkeypatch):
+    # gh-resolve P6, Oct 14: 2 of 3 merge repairs were one design doc every plan appends to.
+    monkeypatch.setenv("ILK2_TIME_SCALE", "60")
+    monkeypatch.setenv("ILK2_NOTIFY", "log")
+    monkeypatch.delenv("ILK2_FAULTS", raising=False)
+    ilk.make_repo()
+    ilk.project(max_lanes=2, concurrency_limit=2, union_merge=["notes/*.md"])
+    bid = ilk.submit({"plans": [plan("p1", "notes/log.md"), plan("p2", "notes/log.md")]})
+    by_cwd(ilk, {f"{bid}.p1": [[{"sleep": 4}, {"write": "notes/log.md", "text": "from p1\n"}]],
+                 f"{bid}.p2": [[{"sleep": 4}, {"write": "notes/log.md", "text": "from p2\n"}]]})
+    sp = sup(ilk, host_budget=4)
+    assert until(sp, lambda: ilk.s.get("batches", bid)["status"] in ("shipped", "blocked"), timeout=120), dump(ilk, bid)
+    assert ilk.s.get("batches", bid)["status"] == "shipped", dump(ilk, bid)
+    b = ilk.s.get("batches", bid)
+    text = ilk.git(b["execution_root"], "show", f"{b['branch']}:notes/log.md")
+    assert set(text.splitlines()) == {"from p1", "from p2"}
+    assert not ilk.s.one("SELECT 1 FROM plans WHERE batch_id = ? AND slug LIKE 'merge-%'", bid)

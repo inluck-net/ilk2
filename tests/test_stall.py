@@ -482,7 +482,7 @@ def test_s26_consumer_policy_no_page(stall, monkeypatch):
 
     def sent():
         log = paths.logs() / "notify.log"
-        return [json.loads(x)["text"] for x in log.open()] if log.exists() else []
+        return [json.loads(x)["text"] for x in log.read_text().splitlines()] if log.exists() else []
     assert notify.due(stall.s, b) == 0
     assert sent() == []  # no macOS, no off-host page
     with stall.s.tx() as c:

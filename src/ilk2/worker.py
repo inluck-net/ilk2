@@ -211,8 +211,8 @@ class Dispatch:
         lock = threading.Lock()
 
         def read() -> None:
-            with self.log_path.open("a") as log:
-                assert self.proc.stdout is not None
+            assert self.proc.stdout is not None
+            with self.log_path.open("a") as log, self.proc.stdout:  # the pipe closes at EOF
                 for line in self.proc.stdout:
                     line = line.strip()
                     if not line:
@@ -297,10 +297,12 @@ def dispatch(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, prompt: str
         argv = ["/usr/bin/sandbox-exec", "-f", str(files.logs / "sandbox.sb"), *argv]
     log = files.logs / ("resume.jsonl" if resume else "start.jsonl")
     t0 = time.monotonic()
-    proc = subprocess.Popen(argv, cwd=worktree, env=worker_env(files, worktree),
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=(files.logs / "stderr.txt").open("a"), text=True,
-                            start_new_session=True)
+    # The child keeps its own descriptor; the driver's copy is closed explicitly, not left to the
+    # garbage collector (ResourceWarning under pytest -n, Oct 14).
+    with (files.logs / "stderr.txt").open("a") as err:
+        proc = subprocess.Popen(argv, cwd=worktree, env=worker_env(files, worktree),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                text=True, start_new_session=True)
     assert proc.stdin is not None
     try:
         proc.stdin.write(prompt)  # over stdin: the prompt never appears in process arguments

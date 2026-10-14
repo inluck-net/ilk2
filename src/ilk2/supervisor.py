@@ -571,10 +571,13 @@ class Supervisor:
                                "boot_time": clock.boot_time()})
         log = paths.run_dir(rid)
         log.mkdir(parents=True, exist_ok=True)
-        p = subprocess.Popen([*self.drive_cmd, rid], stdout=(log / "driver.out").open("w"),
-                             stderr=subprocess.STDOUT, start_new_session=True,
-                             env=procs.host_env() | {k: v for k, v in os.environ.items()
-                                                     if k.startswith("ILK2_")})
+        # The driver keeps its own descriptor; the supervisor's copy is closed explicitly, not
+        # left to the garbage collector (ResourceWarning under pytest -n, Oct 14).
+        with (log / "driver.out").open("w") as out:
+            p = subprocess.Popen([*self.drive_cmd, rid], stdout=out,
+                                 stderr=subprocess.STDOUT, start_new_session=True,
+                                 env=procs.host_env() | {k: v for k, v in os.environ.items()
+                                                         if k.startswith("ILK2_")})
         self.children[rid] = p
         self.s.update("runs", rid, {"pid": p.pid, "pgid": p.pid,
                                     "proc_start": procs.start_time(p.pid)},

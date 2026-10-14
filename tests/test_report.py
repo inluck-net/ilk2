@@ -73,10 +73,11 @@ def test_steps_report_per_batch(ilk):
     # Oct 14: the P5 batch's per-step baseline was assembled by hand; it is one command now.
     ilk.make_repo()
     ilk.project()
-    ilk.script([BAD], [GOOD])
+    ilk.script([BAD, {"context": 120_000}], [GOOD])
     bid = ilk.submit(one_step())
     assert ilk.drive_inprocess(bid) == "shipped"
     r = report.steps(ilk.s, bid)
+    assert r["steps"][0]["peak_context_k"] == 120          # W4: largest prompt of any attempt
     assert r["accepted"] == 1 and r["of"] == 1 and r["first_attempt_share"] == 0.0
     row = r["steps"][0]
     assert row["kind"] == "work" and row["attempts"] == 2 and row["red"] == 1
