@@ -862,8 +862,8 @@ def test_a_repair_step_is_not_red_first_checked(ilk):
     ilk.script([passes_anyway], [GOOD])
     assert ilk.drive_inprocess(bid) == "shipped"
     rep = ilk.s.one("SELECT a.outcome FROM attempts a JOIN steps st ON st.id = a.step_id "
-                    "WHERE st.plan_id = ?", f"{bid}.repair-1")
-    assert rep["outcome"] == "accepted"
+                    "WHERE st.plan_id = ? ORDER BY a.created_at DESC", f"{bid}.repair-1")
+    assert rep["outcome"] == "accepted"  # (after its uncounted gates-first run, red here)
 
 
 def test_doctor_shows_host_budget_and_each_projects_limit(ilk, capsys):
@@ -1176,3 +1176,29 @@ def test_kept_work_is_gated_before_the_worker_so_its_brief_is_current(ilk):
     from ilk2 import report
     row = report.steps(ilk.s, bid)["steps"][0]
     assert (row["attempts"], row["red"]) == (2, 1)                 # the report leaves it out too
+
+
+def test_a_repair_whose_test_already_passes_is_accepted_with_no_worker(ilk):
+    # gh-resolve P6, Oct 14: one bad line failed three guard tests, so verification added three
+    # repairs. After the first fixed the line, the others had nothing to change; a no-change
+    # attempt is red, and each would have blocked the batch after five attempts.
+    from ilk2 import batches
+    ilk.make_repo({"calc.py": "def add(a, b):\n    return a - b\n",
+                   "tests/conftest.py": "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(1, 2) == 3\n",
+                   "tests/test_guard.py": "def test_guard():\n    assert True\n"})
+    ilk.project()
+    bid = ilk.submit(one_step())
+    v = ilk.s.get("batches", bid)["version"]
+    # the repair runs first (repairs come before other work) and its test passes already
+    batches.amend(ilk.s, bid, [{"op": "add_plan", "slug": "repair-1", "repair_of_step_id": f"{bid}.p.0",
+                                "steps": [{"title": "Repair", "instructions": "fix the guard",
+                                           "gates": [gate("tests/test_guard.py")],
+                                           "must_pass": ["tests/test_guard.py::test_guard"]}]}],
+                  expect_version=v, actor="driver", reason="regression-attributed")
+    ilk.script([GOOD])                        # only step 0's worker; the repair needs none
+    assert ilk.drive_inprocess(bid) == "shipped"
+    rep = ilk.s.all("SELECT a.outcome, a.reason FROM attempts a JOIN steps st ON st.id = a.step_id "
+                    "WHERE st.plan_id = ?", f"{bid}.repair-1")
+    assert [(r["outcome"], r["reason"]) for r in rep] == [("accepted", "gates green; no worker needed")]
+    assert len(ilk.stub_prompts()) == 1

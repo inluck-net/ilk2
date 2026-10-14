@@ -582,7 +582,11 @@ class Driver:
         evidence = brief(last["evidence"] if last else None)
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
-        if (plan["verification"] or kept) and n < limit:
+        # A regression repair names the test it repairs (must_pass) and is done when that passes.
+        # A merge repair names none: its gates passing says nothing about whether the plan's
+        # work was re-applied, so it always gets a worker.
+        repair = bool(plan["repair_of_step_id"]) and bool(must_pass)
+        if (plan["verification"] or kept or repair) and n < limit:
             # Kept work is gated before the worker, so its brief carries the failures as they
             # stand now, under the current driver, not the last attempt's. gh-resolve P6, Oct
             # 14: a restart loaded the owed-path rule, but the brief still said a sibling's test
@@ -606,7 +610,11 @@ class Driver:
                           reason="gates first (verification or kept work)")
             with self.phase("gates", step=step["id"]):
                 red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass)
-            if red is None and plan["verification"]:
+            if red is None and (plan["verification"] or (repair and not kept)):
+                # A repair whose test already passes has nothing left to repair: gh-resolve P6,
+                # Oct 14, verification found one bad line that three tests flag, and added three
+                # repairs. After the first, the others had nothing to change, and a no-change
+                # attempt is red, so each would have blocked the batch after five attempts.
                 with self.phase("accept", step=step["id"]):
                     self.accept(step, aid, parent)
                 self.end_attempt(aid, "accepted", "gates green; no worker needed",
