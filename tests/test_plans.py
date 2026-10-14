@@ -316,3 +316,20 @@ def test_a_steps_own_local_checks_win_over_the_frontmatters():
                                  "  - command: python -m pytest tests/test_b.py\n```\n")
     step = plans.parse_v1_subplan(text).steps[0]
     assert [x.command[-1] for x in step.gates] == ["tests/test_b.py"]
+
+
+def test_a_v1_script_gate_that_is_not_a_test_runner_is_an_exit_code_check(ilk):
+    # gh-resolve on rezmac kira-live, Oct 14, run a564c9f5: `bun run typecheck:convex` resolved
+    # to tsc, and the submit was refused as a shell *test* gate. A V1 local check is its exit code.
+    import json as _json
+    from ilk2 import batches, gitops
+    repo = ilk.make_repo({"package.json": _json.dumps({"scripts": {"typecheck": "tsc --noEmit",
+                                                                   "test": "vitest run"}}),
+                          "a.ts": "export const a = 1\n"})
+    text = GHR_LIVE_WORK.replace("  - command: python -m pytest tests/test_a.py\n    timeout: 900\n",
+                                 "  - command: bun run typecheck\n    timeout: 900\n")
+    spec = plans.BatchSpec(plans=[plans.parse_v1_subplan(text)])
+    batches.resolve_scripts(spec, repo, gitops.rev(repo, "HEAD"))
+    g = spec.plans[0].steps[0].gates[1]
+    assert (g.adapter, g.command, g.declares_tests) == ("shell", ["bun", "run", "typecheck"], False)
+    assert plans.check(spec) == []

@@ -145,6 +145,13 @@ def resolve_scripts(spec: plans.BatchSpec, repo: Path, commit: str) -> None:
                         g.adapter, g.command = r["adapter"], r["command"]
                         g.script, g.script_entry = r["script"], r["script_entry"]
                         g.env = {**r.get("env", {}), **g.env}
+                        if g.adapter == "shell" and g.from_v1:
+                            # A V1 local check whose script is not a test runner (typecheck,
+                            # lint, build) is an exit-code check, as in V1: `bun run
+                            # typecheck:convex` resolved to tsc and the submit was refused as a
+                            # shell test gate (gh-resolve on rezmac kira-live, Oct 14, run
+                            # a564c9f5). A JSON spec's test gate is still refused (§2.5.1).
+                            g.declares_tests = False
 
 
 def preflight(spec: plans.BatchSpec, repo: Path, base_sha: str, cfg: "ProjectConfig") -> list[str]:

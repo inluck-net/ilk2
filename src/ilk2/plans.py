@@ -45,6 +45,9 @@ class Gate:
     script: str | None = None          # package script name the command was resolved from
     script_entry: str | None = None    # its package.json entry: the only part of it hashed
     env: dict[str, str] = field(default_factory=dict)  # the script's leading VAR=value (e.g. TZ=UTC)
+    # Imported from a V1 local_checks entry: an exit-code check unless it resolves to a test
+    # runner (V1 semantics; gh-resolve's kira plans gate on `bun run typecheck:convex`, Oct 14).
+    from_v1: bool = False
 
 
 @dataclass
@@ -185,7 +188,7 @@ def _block_gates(block: str) -> list[Gate] | None:
         # A V1 local check that is not a test runner is an exit-code acceptance check
         gates.append(Gate(name=f"local-check-{j + 1}", adapter=adapter, command=cmd,
                           cap_s=int(tmo) if tmo else DEFAULT_GATE_CAP_S,
-                          declares_tests=adapter != "shell", env=env))
+                          declares_tests=adapter != "shell", env=env, from_v1=True))
     return gates
 
 
