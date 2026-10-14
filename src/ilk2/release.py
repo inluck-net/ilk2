@@ -216,8 +216,12 @@ def push(host: str, repo: Path, version: str) -> dict:
                        check=True, capture_output=True)
         subprocess.run([*_scp(), "-q", str(bundle), f"{host}:/tmp/ilk2.bundle"], check=True,
                        capture_output=True, timeout=300)
+    # The commit of the release being pushed, not main's tip: main may have moved on since this
+    # host's release (Oct 14: a docs-only commit after the release made the remote build a
+    # version the upgrade then could not find).
+    sha = version.rsplit("+g", 1)[1] if "+g" in version else "FETCH_HEAD"
     script = (REMOTE_ENV + "set -e; cd ~/.ilk2/src && git fetch -q /tmp/ilk2.bundle main && "
-              "git reset -q --hard FETCH_HEAD && uv run -q ilk2 release build --repo . >/dev/null && "
+              f"git reset -q --hard {sha} && uv run -q ilk2 release build --repo . >/dev/null && "
               f"uv run -q ilk2 release upgrade --version {version} >/dev/null && "
               "readlink ~/.ilk2/current")
     p = subprocess.run([*_ssh(), host, script], capture_output=True, text=True, timeout=900)

@@ -164,6 +164,8 @@ def test_push_ships_a_bundle_and_upgrades_the_same_version(tmp_path, monkeypatch
     text = log.read_text()
     assert "rezmac:/tmp/ilk2.bundle" in text
     assert "release upgrade --version 0.2.0+g1" in text and "git fetch -q /tmp/ilk2.bundle main" in text
+    # the release's own commit, not main's tip (Oct 14: main had moved on by a docs commit)
+    assert "git reset -q --hard 1 " in text
 
 
 def test_the_supervisor_entry_loads_no_driver_worker_gates_or_cli():
