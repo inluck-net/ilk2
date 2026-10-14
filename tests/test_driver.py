@@ -1146,3 +1146,33 @@ def test_a_gate_path_another_plan_creates_is_owed_by_that_plan(ilk):
     assert outs == ["accepted", "accepted"]
     owed = [e["payload"]["owed"] for e in ilk.s.events_since(0, bid) if e["kind"] == "gate.path-owed"]
     assert owed == [{"tests/test_two.py": "p2"}]
+
+
+def test_kept_work_is_gated_before_the_worker_so_its_brief_is_current(ilk):
+    # gh-resolve P6, Oct 14: after a restart the brief repeated the last attempt's evidence (a
+    # sibling's test file "absent"), which the restarted driver no longer charged; the worker
+    # wrote that file and it conflicted at the merge. Kept work is gated first, not counted.
+    from ilk2 import clock
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    root = Path(ilk.s.get("batches", bid)["execution_root"])
+    step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    rid = ilk.new_run(bid)
+    ilk.s.insert("attempts", {"id": "a-old", "run_id": rid, "step_id": step["id"], "n": 1,
+                              "status": "done", "outcome": "red", "parent_commit": "x",
+                              "evidence": "STALE: tests/test_two.py (declared, absent after the step)",
+                              "created_at": clock.wall()})
+    ilk.s.update("steps", step["id"], {"attempt_count": 1}, actor="test", reason="one red")
+    ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "drained"}, actor="test",
+                 reason="drained")
+    (root / "calc.py").write_text(GOOD["text"])           # kept work: already green
+    ilk.script([])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    prompt = ilk.stub_prompts()[0]
+    assert "STALE" not in prompt and "gates pass on the kept changes" in prompt
+    outs = [(a["n"], a["outcome"]) for a in ilk.s.all("SELECT n, outcome FROM attempts ORDER BY created_at")]
+    assert outs == [(1, "red"), (2, "measured"), (2, "accepted")]  # the measurement is not counted
+    from ilk2 import report
+    row = report.steps(ilk.s, bid)["steps"][0]
+    assert (row["attempts"], row["red"]) == (2, 1)                 # the report leaves it out too

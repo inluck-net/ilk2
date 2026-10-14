@@ -245,6 +245,12 @@ gh-resolve's isolation fix 2cf192b2 was to go into P6's parked lane, which held 
 
 §2.4 "`ilk2 apply`" describes the current behaviour.
 
+### Stale evidence after a rule change (found Oct 14, P6; built, released after P6 ships)
+
+Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the step"). The 13:03 restart loaded the owed-path rule, but attempt 2's brief still carried attempt 1's evidence. The worker then created its own `tests/test_50b_reap_follows_ilk2.py`, outside its scope, which this project only advises on. That file conflicted add/add with reap's real one at the merge, and a merge repair plan resolves it.
+
+Fix: any step entered with kept work runs its gates first, as verification steps already did, so the brief carries the current failures. The run isn't counted and is never accepted, because the session was interrupted (`test_kept_work_is_gated_before_the_worker_so_its_brief_is_current`, failing before). §2.4. Owed paths no longer reach a fresh brief, because they are not failures.
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |

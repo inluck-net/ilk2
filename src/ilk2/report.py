@@ -30,7 +30,9 @@ def build(s, project: str | None = None) -> dict:
     # or crashed without a single edit. Interrupted/API attempts were never judged.
     atts = s.all("SELECT a.outcome, a.timings FROM attempts a JOIN steps st ON st.id = a.step_id "
                  f"JOIN batches b ON b.id = st.batch_id WHERE a.status = 'done'{pf}", *pa)
-    judged = [a for a in atts if a["outcome"] not in ("interrupted", "api", "quota", "cancelled")]
+    # A gates-first run (verification, kept work) is a measurement with no worker: not judged.
+    judged = [a for a in atts if a["outcome"] not in ("interrupted", "api", "quota", "cancelled")
+              and not json.loads(a["timings"] or "{}").get("gates_first")]
 
     def edits(a) -> int:
         tools = json.loads(a["timings"] or "{}").get("tool_counts", {})
@@ -120,8 +122,11 @@ def steps(s, batch_id: str) -> dict:
     for st in s.all("SELECT st.*, p.slug, p.ord, p.repair_of_step_id, p.verification FROM steps st "
                     "JOIN plans p ON p.id = st.plan_id WHERE st.batch_id = ? ORDER BY p.ord, st.idx",
                     batch_id):
-        atts = s.all("SELECT * FROM attempts WHERE step_id = ? ORDER BY created_at", st["id"])
-        mins = sum(((a["ended_at"] or clock.wall()) - a["created_at"]) for a in atts) / 60
+        every = s.all("SELECT * FROM attempts WHERE step_id = ? ORDER BY created_at", st["id"])
+        # Minutes keep gates-first runs (comparable with the P5 baseline); attempt and red counts
+        # leave them out: a measurement with no worker is not an attempt.
+        mins = sum(((a["ended_at"] or clock.wall()) - a["created_at"]) for a in every) / 60
+        atts = [a for a in every if not json.loads(a["timings"] or "{}").get("gates_first")]
         firsts = [json.loads(a["timings"] or "{}").get("timings", {}).get("first_edit_s") for a in atts]
         firsts = [f for f in firsts if f is not None]
         carried = s.one("SELECT 1 FROM events WHERE batch_id = ? AND kind = 'phase.start' AND "

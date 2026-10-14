@@ -38,6 +38,8 @@ KEPT_NOTE = ("The worktree still holds the previous attempt's changes (the drive
              "evidence above and finish the step rather than starting over.")
 
 
+KEPT_GREEN_NOTE = ("The step's gates pass on the kept changes as they stand, but the session that made "
+                   "them was interrupted before it finished.")
 VERIFY_NOTE = ("This is a verification step. The driver has already run its gates (the full suite) "
                "at the batch head; the failures it found are in the evidence below, compared with the "
                "batch base. There is no separate verification record or recorder to read: V1's "
@@ -562,24 +564,32 @@ class Driver:
         n = step["attempt_count"]
         last = self.s.one("SELECT evidence FROM attempts WHERE step_id = ? AND evidence IS NOT NULL "
                           "ORDER BY created_at DESC LIMIT 1", step["id"])
-        evidence = last["evidence"] if last else None
-        if kept:
-            evidence = ((evidence + "\n\n") if evidence else "") + KEPT_NOTE
+        notes = []  # what the brief says about this entry, whatever the evidence turns out to be
         if applied:
-            evidence = ((evidence + "\n\n") if evidence else "") + (
-                "The operator brought these commits into this worktree with `ilk2 apply` (uncommitted; "
-                "they are committed with this step): " + ", ".join(applied) + ". Keep them as they are.")
+            notes.append("The operator brought these commits into this worktree with `ilk2 apply` "
+                         "(uncommitted; they are committed with this step): " + ", ".join(applied)
+                         + ". Keep them as they are.")
         if conflicted:
-            evidence = ((evidence + "\n\n") if evidence else "") + (
-                "Applying them conflicted with this step's work in: " + ", ".join(conflicted) + ". "
-                "Resolve the conflict markers first. Where the applied commit replaces a workaround "
-                "of yours (a fixture, an env or HOME setting), take the applied commit's version; "
-                "keep this step's own behaviour changes.")
+            notes.append("Applying them conflicted with this step's work in: " + ", ".join(conflicted)
+                         + ". Resolve the conflict markers first. Where the applied commit replaces a "
+                         "workaround of yours (a fixture, an env or HOME setting), take the applied "
+                         "commit's version; keep this step's own behaviour changes.")
+
+        def brief(ev: str | None) -> str | None:
+            parts = [x for x in (ev, KEPT_NOTE if kept else None, *notes) if x]
+            return "\n\n".join(parts) or None
+
+        evidence = brief(last["evidence"] if last else None)
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
-        # Kept work is gated too: it may already be green, and otherwise the worker gets the
-        # failures as they stand now, not the last attempt's (gh-resolve P5 batch, Oct 14).
-        if plan["verification"] and n < limit:
+        if (plan["verification"] or kept) and n < limit:
+            # Kept work is gated before the worker, so its brief carries the failures as they
+            # stand now, under the current driver, not the last attempt's. gh-resolve P6, Oct
+            # 14: a restart loaded the owed-path rule, but the brief still said a sibling's test
+            # file was missing, and the worker wrote one that conflicted at the merge. Only a verification step is
+            # accepted from it: kept work comes from an interrupted session, never accepted
+            # unseen (Codex M1 review #2). Judgment call: one gate run per restart; wrong if
+            # restarts become frequent enough that it dominates.
             # A verification step checks the batch head: its gates run first, and a worker is
             # dispatched only when they are red, with their failures as its brief. gh-resolve P5
             # batch, Oct 14: a worker spent 18 min trying to run and record the full suite that
@@ -593,22 +603,28 @@ class Driver:
                                        "n": n, "status": "running", "parent_commit": parent,
                                        "created_at": clock.wall()})
             self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
-                          reason="gates first (verification)")
+                          reason="gates first (verification or kept work)")
             with self.phase("gates", step=step["id"]):
                 red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass)
-            if red is None:
+            if red is None and plan["verification"]:
                 with self.phase("accept", step=step["id"]):
                     self.accept(step, aid, parent)
-                self.end_attempt(aid, "accepted", "gates green; no worker needed", {},
-                                 gates_out=verdicts)
+                self.end_attempt(aid, "accepted", "gates green; no worker needed",
+                                 {"gates_first": True}, gates_out=verdicts)
                 return
-            evidence = red + ("\n\n" + KEPT_NOTE if kept else "")
-            self.end_attempt(aid, "red", red[:300], {}, evidence=red, gates_out=verdicts)
+            if red is None:
+                evidence = brief(KEPT_GREEN_NOTE)
+                self.end_attempt(aid, "measured", "kept work: gates green", {"gates_first": True},
+                                 evidence=KEPT_GREEN_NOTE, gates_out=verdicts)
+            else:
+                evidence = brief(red)
+                self.end_attempt(aid, "red", red[:300], {"gates_first": True}, evidence=red,
+                                 gates_out=verdicts)
             # A gates-first run is a measurement, not work: it never takes a worker's attempt
             # (gh-resolve P5 batch, Oct 14: it took the 5th and blocked the step unseen).
             n -= 1
             self.s.update("steps", step["id"], {"attempt_count": n}, actor="driver",
-                          reason="gates-first red: not counted")
+                          reason="gates first: not counted")
         while n < limit:
             self.check_control()
             n += 1
