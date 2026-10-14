@@ -95,12 +95,18 @@ def _gate(d: dict, i: int) -> Gate:
     cmd = d["command"]
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
+    cmd, env = list(cmd), dict(d.get("env") or {})
+    # A leading VAR=value is the gate's environment, not argv[0], in JSON plans as in V1
+    # markdown (gh-resolve renders `TZ=UTC bun …`; Oct 14 it would have run `TZ=UTC` as a command)
+    while cmd and _ASSIGN.match(cmd[0]):
+        k, v = cmd.pop(0).split("=", 1)
+        env.setdefault(k, v)
     return Gate(name=d.get("name") or f"gate-{i + 1}", adapter=d.get("adapter") or adapter_for(cmd),
                 command=list(cmd), cwd=d.get("cwd", "."),
                 cap_s=int(d.get("cap_s", DEFAULT_GATE_CAP_S)),
                 declares_tests=bool(d.get("declares_tests", True)),
                 script=d.get("script"), script_entry=d.get("script_entry"),
-                env=dict(d.get("env") or {}))
+                env=env)
 
 
 def from_dict(d: dict) -> BatchSpec:

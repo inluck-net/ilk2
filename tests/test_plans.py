@@ -231,3 +231,14 @@ def test_ceremony_merge_drops_gates_that_need_the_folded_pins_commit():
     s0, s1 = spec.plans[0].steps
     assert [g.name for g in s0.gates] == ["a", "o"]
     assert [g.name for g in s1.gates] == ["a", "pins"]  # a later step checks the merged commit
+
+
+def test_a_json_gate_command_with_a_leading_assignment_gets_it_as_env():
+    # gh-resolve renders kira gates as `TZ=UTC bun run …`; from_dict ran `TZ=UTC` as argv[0].
+    from ilk2 import plans as P
+    spec = P.from_dict({"plans": [{"slug": "p", "steps": [{"instructions": "x", "gates": [
+        {"name": "cli", "command": "TZ=UTC NODE_ENV=test bun run test:cli"},
+        {"name": "list", "command": ["TZ=UTC", "bun", "test"], "env": {"TZ": "Asia/Singapore"}}]}]}]})
+    g1, g2 = spec.plans[0].steps[0].gates
+    assert g1.command == ["bun", "run", "test:cli"] and g1.env == {"TZ": "UTC", "NODE_ENV": "test"}
+    assert g2.command == ["bun", "test"] and g2.env == {"TZ": "Asia/Singapore"}  # explicit env wins
