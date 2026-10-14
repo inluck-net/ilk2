@@ -102,6 +102,14 @@ class Driver:
                 if isinstance(raised, Stop) and raised.reason:
                     end["reason"] = raised.reason
             self.s.event("phase.end", end, batch_id=self.batch_id, run_id=self.run_id)
+            # The stamp outlives the phase: runs.phase still named the ended phase until the
+            # next phase() call, so a run waiting between phases (merge_lane takes the batch's
+            # merge lock before the merge phase opens, while a repair holds it for its whole
+            # run) was charged the ended phase's bound and killed 'stalled (accept)'. The gap
+            # starts the outer bound's clock here (§2.11.1). A nested phase restores its
+            # enclosing stamp afterwards (attribute -> gates below).
+            self.s.update("runs", self.run_id, {"phase": "gap", "phase_started_mono": clock.mono()},
+                          actor="driver", reason="phase gap")
 
     def event(self, kind: str, **payload) -> None:
         self.s.event(kind, payload, batch_id=self.batch_id, run_id=self.run_id)

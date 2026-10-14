@@ -190,6 +190,30 @@ def test_two_repairs_never_run_at_once(lanes):
     assert ready_plans(ilk.s, bid) == []                   # the other waits for that run
 
 
+def test_a_lane_waiting_for_the_merge_lock_is_not_stalled(lanes, monkeypatch):
+    # gh-resolve P6, Oct 14: a lane whose plan's last step was just accepted waits in take_lock
+    # while a repair holds the batch's merge lock for its whole run (35, 22 and 22 min that day).
+    # The runs.phase stamp outlived the phase, so the wait was still charged the accept bound and
+    # the run was killed 'stalled (accept)' seconds after its step was accepted.
+    from ilk2 import batches as b_
+    monkeypatch.setenv("ILK2_BOUNDS", json.dumps({"phase": 5}))  # accept 5 s; outer stays 75 s
+    ilk = lanes
+    bid = ilk.submit({"plans": [plan("p1", "one.txt")]})
+    b = ilk.s.get("batches", bid)
+    # The lane key first: the stub matches keys as substrings of the cwd, and the batch root is
+    # a prefix of the lane's path.
+    by_cwd(ilk, {f"{bid}.p1": [[{"sleep": 10}, {"write": "one.txt", "text": "1"}]],
+                 b["execution_root"]: [[{"sleep": 30}, {"write": "fix.txt", "text": "x"}]]})
+    sp = sup(ilk, host_budget=4)
+    assert until(sp, lambda: ilk.s.one("SELECT 1 FROM runs WHERE batch_id = ? AND plan_id IS NOT NULL",
+                                       bid), timeout=30, keep=True), dump(ilk, bid)
+    b_.amend(ilk.s, bid, [{"op": "add_plan", "slug": "repair-1", "repair_of_step_id": f"{bid}.p1.0",
+                           "steps": [{"title": "r", "instructions": "r", "gates": [SHELL_OK]}]}],
+             expect_version=ilk.s.get("batches", bid)["version"], actor="test", reason="test")
+    assert until(sp, lambda: ilk.s.get("batches", bid)["status"] == "shipped", timeout=120), dump(ilk, bid)
+    assert not [r for r in runs_of(ilk, bid) if (r["terminal_reason"] or "").startswith("stalled")]
+
+
 def test_a_union_merge_path_needs_no_repair(ilk, monkeypatch):
     # gh-resolve P6, Oct 14: 2 of 3 merge repairs were one design doc every plan appends to.
     monkeypatch.setenv("ILK2_TIME_SCALE", "60")
