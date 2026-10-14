@@ -234,6 +234,17 @@ Found while building: a lane lost during its merge had no pending step to count 
 | A restarted supervisor adopts live drivers by pid + start time instead of terminating them | contradicts I4 ("never adopt", §2.10): design change, Chad's call |
 | Operational: group changes into fewer releases | no code; adopted from Oct 14 02:05 |
 
+### `ilk2 apply` against kept work (found Oct 14, P6 batch `b-1ed2752bd41b`)
+
+gh-resolve's isolation fix 2cf192b2 was to go into P6's parked lane, which held 16 files of the worker's kept work. The released `ilk2 apply` would have failed on it in two ways. First, `git apply --3way` implies `--index`, so it refuses any file whose worktree differs from the index ("does not match index"), which is every file the worker touched. Second, the commit edited `test_49b`, which main gained after the batch's base, and `git apply` rejects the whole patch over one missing file. The build session merged it by hand (4 conflicts, all the worker's fixture workaround, resolved to the fix's version). The P6 gates, run in the pinned env, went from 3 failures to 0. **Fixed** (`test_gitops_apply.py`, plus 2 driver tests, all failing before the change):
+
+- the step's work is staged before the 3-way apply;
+- absent files are skipped and reported;
+- overlaps go to the worker as conflicts, not to needs_human;
+- a commit is applied once per worktree.
+
+§2.4 "`ilk2 apply`" describes the current behaviour.
+
 ## P5 shadow evidence
 
 | Issue | Batch | Result | Checked outside ilk2 |

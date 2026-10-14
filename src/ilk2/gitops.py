@@ -140,19 +140,38 @@ def reset_hard(root: Path, sha: str) -> None:
 
 
 def apply_commit(root: Path, sha: str) -> str:
-    """Apply a commit's change to the worktree, uncommitted. Returns 'present' (the worktree
-    already has it: the reverse applies), 'applied', or 'failed: <reason>'."""
+    """Apply a commit's change to the worktree, uncommitted, beside the step's own uncommitted
+    work. Returns 'present' (the reverse applies), 'applied' (with '; skipped absent: …' when the
+    commit edits files this worktree does not have, e.g. tests added on main after the batch
+    began), 'conflicted: <paths>' (conflict markers left for the worker), or 'failed: <reason>'.
+    gh-resolve P6, Oct 14: a plain `git apply --3way` refused every file the worker had touched,
+    since --3way implies --index, and refused the whole commit over one absent file."""
     patch = subprocess.run(["git", "-C", str(root), "show", "--format=", "--binary", sha],
                            capture_output=True, text=True).stdout
     if not patch.strip():
         return "failed: empty or unknown commit"
-    rev = subprocess.run(["git", "-C", str(root), "apply", "--check", "-R", "-"], input=patch,
-                         capture_output=True, text=True)
+    absent = []
+    for line in git(root, "show", "--format=", "--name-status", "--no-renames", sha,
+                    check=False).splitlines():
+        status, _, path = line.partition("\t")
+        if status in ("M", "D") and not (root / path).exists():
+            absent.append(path)
+    excl = [f"--exclude={p}" for p in absent]
+    rev = subprocess.run(["git", "-C", str(root), "apply", "--check", "-R", *excl, "-"],
+                         input=patch, capture_output=True, text=True)
     if rev.returncode == 0:
         return "present"
-    p = subprocess.run(["git", "-C", str(root), "apply", "--3way", "-"], input=patch,
+    # --3way needs the index to match the files it touches: stage the step's work first. The
+    # acceptance commit is built through a temporary index, so this staging changes nothing else.
+    git(root, "add", "-A")
+    p = subprocess.run(["git", "-C", str(root), "apply", "--3way", *excl, "-"], input=patch,
                        capture_output=True, text=True)
-    return "applied" if p.returncode == 0 else f"failed: {p.stderr.strip()[:300]}"
+    if p.returncode == 0:
+        return "applied" + (f"; skipped absent: {', '.join(absent)}" if absent else "")
+    conflicted = git(root, "diff", "--name-only", "--diff-filter=U", check=False).split()
+    if conflicted:
+        return "conflicted: " + ", ".join(conflicted)
+    return f"failed: {p.stderr.strip()[:300]}"
 
 
 def is_ancestor(root: Path, a: str, b: str) -> bool:

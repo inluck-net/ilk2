@@ -1075,6 +1075,34 @@ def test_ilk2_apply_brings_a_main_fix_into_the_running_batch(ilk, tmp_path, caps
     b = ilk.s.get("batches", bid)
     assert ilk.git(ilk.repo, "show", f"{b['branch']}:fix.txt") == "hermetic"
     res = [e["payload"]["result"] for e in ilk.s.events_since(0, bid) if e["kind"] == "commit.applied"]
-    assert res == ["applied", "present"]                    # step 0 brought it in, step 1 had it
+    assert res == ["applied"]          # step 0 brought it in; step 1 does not re-apply it (P6, Oct 14)
     assert fix[:12] in ilk.stub_prompts()[0]                 # the worker is told
     assert cli.main(["apply", bid, "nosuchcommit"]) == 2
+
+
+def test_ilk2_apply_leaves_a_conflict_with_kept_work_to_the_worker_once(ilk, capsys):
+    # gh-resolve P6, Oct 14: the fix overlapped the worker's kept work. The conflict goes to the
+    # worker (no needs_human), and a later entry into the same step does not apply it again over
+    # the resolution.
+    from ilk2 import cli
+    from ilk2.driver import Driver
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    ilk.git(ilk.repo, "checkout", "-q", "-b", "fixbranch")
+    (ilk.repo / "calc.py").write_text("def add(a, b):\n    return a + b  # main's fix\n")
+    ilk.git(ilk.repo, "-c", "user.name=c", "-c", "user.email=c@c", "commit", "-qam", "the fix")
+    fix = ilk.git(ilk.repo, "rev-parse", "HEAD")
+    ilk.git(ilk.repo, "checkout", "-q", "-")
+    assert cli.main(["apply", bid, fix]) == 0
+    capsys.readouterr()
+    d = Driver(ilk.s, ilk.new_run(bid))
+    (d.root / "calc.py").write_text("def add(a, b):\n    return b + a  # the worker's\n")  # kept work
+    step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    done, conflicted = d.apply_requested(step, kept=True)
+    assert done == [fix[:12]] and conflicted == ["calc.py"]
+    assert "<<<<<<<" in (d.root / "calc.py").read_text()
+    assert not ilk.s.one("SELECT 1 FROM needs_human WHERE batch_id = ? AND state = 'open'", bid)
+    (d.root / "calc.py").write_text("def add(a, b):\n    return a + b  # resolved\n")
+    assert d.apply_requested(step, kept=True) == ([], [])  # not applied over the resolution
+    assert "resolved" in (d.root / "calc.py").read_text()

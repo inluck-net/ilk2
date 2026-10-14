@@ -536,7 +536,7 @@ class Driver:
                                paths=gitops.changed_paths(self.root)[:50])
                 else:
                     gitops.reset_hard(self.root, head)
-            applied = self.apply_requested(step)
+            applied, conflicted = self.apply_requested(step, kept)
             parent = head
         n = step["attempt_count"]
         last = self.s.one("SELECT evidence FROM attempts WHERE step_id = ? AND evidence IS NOT NULL "
@@ -548,6 +548,12 @@ class Driver:
             evidence = ((evidence + "\n\n") if evidence else "") + (
                 "The operator brought these commits into this worktree with `ilk2 apply` (uncommitted; "
                 "they are committed with this step): " + ", ".join(applied) + ". Keep them as they are.")
+        if conflicted:
+            evidence = ((evidence + "\n\n") if evidence else "") + (
+                "Applying them conflicted with this step's work in: " + ", ".join(conflicted) + ". "
+                "Resolve the conflict markers first. Where the applied commit replaces a workaround "
+                "of yours (a fixture, an env or HOME setting), take the applied commit's version; "
+                "keep this step's own behaviour changes.")
         session = None
         limit = bounds.ATTEMPTS_PER_STEP + bounds.ESCALATION_ATTEMPTS
         # Kept work is gated too: it may already be green, and otherwise the worker gets the
@@ -649,23 +655,43 @@ class Driver:
         self.block_step(step, "attempts", f"{limit} attempts red (3, then an escalation round)",
                         evidence or "")
 
-    def apply_requested(self, step) -> list[str]:
+    def apply_requested(self, step, kept: bool = False) -> tuple[list[str], list[str]]:
         """`ilk2 apply <batch> <commit>`: bring a commit (a fix from the consumer's main, say)
         into this step's worktree, uncommitted, unless the worktree already has it. Every step
-        does this on entry, so lanes get identical content and merge cleanly."""
+        does this on entry, so lanes get identical content and merge cleanly. Returns the
+        applied commits and the paths left in conflict for the worker.
+
+        A commit is not applied again in a worktree where it already went in with an accepted
+        step, or with this step's kept work: after a conflict is resolved the reverse no longer
+        applies, so 'present' cannot tell (gh-resolve P6, Oct 14)."""
         row = self.s.one("SELECT value FROM meta WHERE key = ?", f"apply:{self.batch_id}")
-        done = []
+        key = f"applied:{self.batch_id}"
+        rec = self.s.one("SELECT value FROM meta WHERE key = ?", key)
+        records = json.loads(rec["value"]) if rec else []
+        done, conflicted = [], []
         for sha in json.loads(row["value"]) if row else []:
+            if any(r["root"] == str(self.root) and r["sha"] == sha and (
+                    (kept and r["step"] == step["id"])
+                    or self.s.get("steps", r["step"])["status"] == "accepted")
+                   for r in records):
+                continue
             res = gitops.apply_commit(self.root, sha)
             self.event("commit.applied", step=step["id"], commit=sha, result=res)
-            if res == "applied":
+            if res.startswith(("applied", "conflicted")):
                 done.append(sha[:12])
+                records.append({"root": str(self.root), "sha": sha, "step": step["id"]})
+                if res.startswith("conflicted"):
+                    conflicted += res.split(": ", 1)[1].split(", ")
             elif res.startswith("failed"):
                 self.s.open_needs_human("apply-failed", f"commit {sha[:12]} does not apply to "
                                         f"{self.root}: {res}", f"resolve it, or drop the request: "
                                         f"ilk2 apply {self.batch_id} {sha[:12]} --drop",
                                         batch_id=self.batch_id)
-        return done
+        if records:
+            with self.s.tx() as c:
+                c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE "
+                          "SET value = excluded.value", (key, json.dumps(records)))
+        return done, conflicted
 
     def keeps_leftover(self, step, head: str) -> bool:
         """Changes left in the root by an earlier run are kept when they are this step's own
