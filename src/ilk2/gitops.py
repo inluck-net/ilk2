@@ -92,10 +92,24 @@ def diff_text(root: Path, limit: int = 200_000) -> str:
     return git(root, "diff", check=False)[:limit]
 
 
+def identity(root: Path) -> dict[str, str]:
+    """Author and committer for ilk2's commits: the repository's own configured user, as V1's
+    workers committed, else ilk2's. gh-resolve on rezmac kira-live, Oct 14: its foreign-commit
+    guard trusts only the clone's configured identity, and declined #8716's publish of
+    commits by ilk2@localhost."""
+    name = git(root, "config", "user.name", check=False)
+    email = git(root, "config", "user.email", check=False)
+    if not (name and email):
+        return dict(IDENT)
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+
+
 def commit_tree(root: Path, tree: str, parent: str, message: str, attempt_id: str) -> str:
     msg = f"{message}\n\n{TRAILER}: {attempt_id}\n"
     p = subprocess.run(["git", "-C", str(root), "commit-tree", tree, "-p", parent, "-F", "-"],
-                       input=msg, capture_output=True, text=True, env={**os.environ, **IDENT})
+                       input=msg, capture_output=True, text=True,
+                       env={**os.environ, **identity(root)})
     if p.returncode != 0:
         raise GitError(f"commit-tree: {p.stderr.strip()[:300]}")
     return p.stdout.strip()

@@ -254,7 +254,7 @@ class Driver:
                     union = ["-c", f"core.attributesFile={attrs}"]
                 out = gitops.git(root, *union, "merge", "--no-ff", "--no-edit", "-m",
                                  f"Merge plan {slug} (ilk2 lane)", self.branch,
-                                 env=gitops.IDENT, check=False)
+                                 env=gitops.identity(root), check=False)
                 if not gitops.is_ancestor(root, lane_head, gitops.branch_head(root, branch)):
                     files = gitops.git(root, "diff", "--name-only", "--diff-filter=U", check=False).split()
                     gitops.git(root, "merge", "--abort", check=False)

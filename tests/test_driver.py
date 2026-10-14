@@ -1232,3 +1232,29 @@ def test_an_interrupted_phase_still_records_its_end(ilk, monkeypatch):
     starts = [p["phase"] for k, p in evs if k == "phase.start"]
     assert "dispatch" in starts
     assert sorted(starts) == sorted(p["phase"] for k, p in evs if k == "phase.end")
+
+
+def test_ilk2_commits_as_the_repositorys_configured_user(ilk):
+    # gh-resolve on rezmac kira-live, Oct 14: its foreign-commit guard trusts only the clone's
+    # configured identity and declined #8716's publish of commits by ilk2@localhost. V1's
+    # workers committed as the repository's user.
+    ilk.make_repo()
+    ilk.git(ilk.repo, "config", "user.name", "chad007")
+    ilk.git(ilk.repo, "config", "user.email", "chad007@users.noreply.github.com")
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    who = ilk.git(ilk.repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>", b["branch"])
+    assert who == "chad007 <chad007@users.noreply.github.com>|chad007 <chad007@users.noreply.github.com>"
+
+
+def test_ilk2_commits_as_itself_when_the_repository_names_no_user(ilk):
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    assert ilk.git(ilk.repo, "log", "-1", "--format=%ae", b["branch"]) == "ilk2@localhost"
