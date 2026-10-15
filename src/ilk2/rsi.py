@@ -336,6 +336,16 @@ def tick(s, now: float | None = None) -> dict:
     if cfg.retired or not cfg.rsi_auto:
         return {"did": "nothing", "why": "rsi_auto is off for the ilk2 project"}
     repo = Path(proj["repo_root"])
+    landed = {"did": "nothing"}
+    if cfg.rsi_land:
+        from . import rsi_land
+        try:
+            landed = rsi_land.land(s, now)
+        except Exception as e:  # noqa: BLE001 - a landing error is recorded, never fatal to the tick
+            s.event("rsi.land-failed", {"error": f"{type(e).__name__}: {e}"[:500]})
+            landed = {"did": "failed", "why": str(e)[:300]}
+        if landed.get("did") not in ("nothing", "failed"):
+            s.event("rsi.land", {k: v for k, v in landed.items() if k != "did"} | {"stage": landed["did"]})
     for r in s.all("SELECT id FROM rsi_candidates WHERE status = 'planning' AND planned_at < ?",
                    now - 2 * PLAN_CAP_S):
         # a tick that died mid-plan: the candidate goes back to open, never stuck

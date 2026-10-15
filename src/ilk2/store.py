@@ -45,6 +45,7 @@ NEEDS_HUMAN_REASONS = {
     "plan-rejected",
     # `ilk2 apply`: a requested commit does not apply to a step's worktree.
     "apply-failed",
+    "rsi-review", "rsi-rollback",   # unattended RSI landing (rsi_land.py)
 }
 
 SCHEMA = """
@@ -131,6 +132,10 @@ CREATE TABLE IF NOT EXISTS rsi_candidates (
   hits INTEGER NOT NULL, score REAL NOT NULL, status TEXT NOT NULL, batch_id TEXT, note TEXT,
   first_seen REAL NOT NULL, last_seen REAL NOT NULL, planned_at REAL,
   version INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS rsi_landings (
+  batch_id TEXT PRIMARY KEY, candidate_id TEXT, merge_commit TEXT, pre_merge TEXT, version TEXT,
+  previous_version TEXT, status TEXT NOT NULL, note TEXT, at REAL NOT NULL, merged_at REAL,
+  released_at REAL, verified_at REAL, pushed_at REAL, rolled_back_at REAL);
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);

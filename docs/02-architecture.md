@@ -531,7 +531,7 @@ Each needs data from P2 and is revisited at M1.
 
 ## 2.11a RSI: ilk2 improving itself
 
-Chad, Oct 14: "Reviewed RSI first". ilk2 finds its own improvements, plans them and runs them as batches on its own repository (the ilk2 project `ilk2`), unattended. **Merging and releasing stay reviewed:** the build session reviews every shipped RSI branch, then merges and releases it by hand. Nothing an RSI batch ships reaches `main` or a release unreviewed (AGENTS.md; docs/06 "RSI" holds the review log and the bar for going further).
+Chad, Oct 14: "Reviewed RSI first". ilk2 finds its own improvements, plans them and runs them as batches on its own repository (the ilk2 project `ilk2`), unattended. **Since Oct 15 it also lands them unattended** (Chad: "RSI branches may merge and release without your review, as long as we can track back with some kind of audit logs"). Each landing is audited end to end, and anything the landing checks refuse waits for a person (AGENTS.md; docs/06 "RSI").
 
 ```mermaid
 flowchart LR
@@ -544,9 +544,13 @@ flowchart LR
   Plan -->|no file, edits, kernel in scope,<br/>no test, check fails| Shelf[("candidate shelved,<br/>reopens on 2+ new hits")]
   Plan -->|one step + must_pass| Submit["submit to project ilk2<br/>gate: the full suite (set by ilk2)"]
   Submit --> Batch["batch runs as any other:<br/>red-first, gates, accept"]
-  Batch --> Review{"build session reviews<br/>the shipped branch"}
-  Review -->|merge + release| Main[("main, both hosts")]
-  Review -->|reject| Log[("docs/06 RSI log")]
+  Batch --> Land{"rsi_land: kernel untouched? no test or assert removed?<br/>merges clean? suite green on the merge?"}
+  Land -->|any no| Review[("rsi-review needs_human:<br/>a person reviews it")]
+  Land -->|yes| Rel["release on chad-mbp when idle"]
+  Rel --> Canary{"canary, 15 min:<br/>supervisor ticks, no run ends<br/>in an error or a stall"}
+  Canary -->|no| Back[("roll back to the previous release,<br/>rsi-rollback needs_human")]
+  Canary -->|yes| Push["after 24 h, push to rezmac when idle"]
+  Push --> Audit[("audit: git trailers, rsi_landings<br/>(ilk2 rsi log), rsi.* events")]
 ```
 
 - **Finding** (`ilk2 rsi find`, `ilk2 rsi candidates`) is plain code and idempotent. Sources by weight:
@@ -564,6 +568,14 @@ flowchart LR
   - **Gate:** ilk2 sets the gate (the project's `rsi_gate`, by default the full suite with `-n 4`); a planner never chooses or weakens one.
   - **Shelving:** a session that writes no file, edits other files, puts the protected kernel in scope, omits a test, or fails `submit --check` shelves the candidate with its reason.
 - **Other hosts' records** feed the same loop: host.json `rsi_hosts` (chad-mbp: `["rezmac"]`) makes each tick run the other host's finder over ssh and keep its candidates here, titled `[host] …`, with their status owned here. An unreachable host is an `rsi.remote-failed` event, never a failed tick. (Oct 14: kira-live runs on rezmac, and RSI plans and builds on chad-mbp.)
+- **Landing** (`ilk2 rsi land`, run at the start of every tick when the ilk2 project has `rsi_land`) handles one stage of one batch at a time. Each landing finishes before the next merges, so a canary judges one change:
+  - **merge** into `main` in the build checkout, only when it is on `main` and has no uncommitted changes, with trailers `ilk2-rsi-batch`, `ilk2-rsi-candidate`, `ilk2-rsi-branch`;
+  - **verify**: the project's setup and RSI gate on the merged commit in a scratch worktree; red resets `main` to before the merge (`reset --keep`, only if nothing came after it);
+  - **release** on chad-mbp, only when no run is live;
+  - **canary** (15 min): the supervisor ticks and no run ended in an error or a stall since the release, else roll back to the previous release;
+  - **push** to the `rsi_hosts` (rezmac) 24 h after a verified release, only when idle there.
+
+  Refused for review, never retried: a diff touching the protected kernel (the project's `deny_paths` plus the RSI and release code and their tests), or removing a `def test_` or an `assert` line from an existing test file, or not merging cleanly, or red after merging. `ilk2 rsi log` reads back which version came from which batch and candidate. Judgment calls: 15 min and 24 h; wrong if regressions take longer to show.
 - **The trigger** (`ilk2 rsi tick`, spawned by the supervisor every 30 min as its own process, never two at once) runs only when the ilk2 project has `rsi_auto`, no ilk2 batch is in flight, fewer than 2 shipped RSI branches await review (`ilk2 rsi pending`), and fewer than 3 RSI batches were submitted in the last 24 hours. Every no-op says why. Judgment calls: 30 min, 2 and 3; the review queue is the real limit.
 
 ## 2.12 Code layout and size

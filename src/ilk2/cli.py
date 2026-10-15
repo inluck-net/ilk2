@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
-    rs.add_argument("op", choices=["find", "candidates", "tick", "pending"])
+    rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log"])
     rs.add_argument("--repo", help="the ilk2 repo, for Chad's docs/rsi/requests.json "
                     "(default: the 'ilk2' project's repo)")
     rs.add_argument("--all", action="store_true", help="candidates: every status, not only open")
@@ -506,6 +506,12 @@ def main(argv: list[str] | None = None) -> int:
                 _out(rsi.record(s, rsi.find(s, repo)), True)
             elif a.op == "tick":
                 _out(rsi.tick(s), True)
+            elif a.op == "land":
+                from . import rsi_land
+                _out(rsi_land.land(s), True)
+            elif a.op == "log":
+                from . import rsi_land
+                _out({"landings": rsi_land.log(s)}, True)
             elif a.op == "pending":
                 _out({"pending": [{"batch": b["id"], "branch": b["branch"], "ref": b["consumer_ref"]}
                                   for b in rsi.pending(s)]}, True)

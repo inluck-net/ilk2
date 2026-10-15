@@ -282,6 +282,15 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 
 **Going unattended (Chad's call).** Proposed bar: 5 consecutive reviewed RSI batches merged without a change of substance at review, and none later reverted. Then a shipped batch could merge and release itself on chad-mbp as a canary. It would roll back automatically (`ilk2 release upgrade --version <previous>`) if the next full suite or `ilk2 health` regresses, and push to rezmac after a clean day. Judgment call: 5 batches; wrong if the first batches are too small to show what review catches.
 
+**Decided Oct 15 (Chad):** unattended merging and releasing, provided every change can be traced back by an audit log. Built in `rsi_land.py`, with these differences from the proposal below:
+- merges go into `main` in the build checkout, only when it is clean, instead of a separate `rsi/main`;
+- verification runs the full suite on the merged commit before any release;
+- the canary lasts 15 min before rezmac's 24 h soak;
+- the kernel adds the RSI and release code and their tests;
+- a batch that removes a test or an assert waits for review.
+
+See docs/02 §2.11a.
+
 **Unattended merging: proposal for Chad, once the bar is met.**
 1. **Where it merges.** A shipped RSI branch merges into a dedicated branch `rsi/main`, never into `main` directly. `main` is checked out in the build session's working tree here (this clone), and an unattended process moving it would leave that tree stale under a person mid-edit. `rsi/main` is fast-forwarded from `main` before each merge, and a conflict shelves the batch for review.
 2. **Canary on chad-mbp.** Build and upgrade a release from `rsi/main` on chad-mbp only, then run the full suite and `ilk2 health` against it.

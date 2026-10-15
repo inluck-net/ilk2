@@ -4,7 +4,14 @@ ilk2 is the second version of the ilk loop engine (V1 is `inluck-net/ilk-skills`
 
 ## Standing rules (Chad, Oct 12-13, 2026)
 
-- **Built by hand, and by reviewed RSI** (Chad, Oct 14: "Reviewed RSI first"). A Claude Code session writes ilk2, and ilk2 may also improve itself: batches on its own repo (ilk2 project `ilk2`) whose shipped branches the build session reviews, merges and releases by hand. Nothing an RSI batch ships reaches `main` or a release unreviewed. RSI batches cannot edit the protected kernel (the project's `deny_paths`: this file, `CLAUDE.md`, `docs/rsi/**`, `.github/**`). Moving to unattended RSI is Chad's call, after about 5 clean reviewed batches (docs/06 "RSI"). The ilk loop (V1) still never edits this repo: no `/ilk-plan`, no V1 loop batches and no V1 self-improve against it. The auto-plan routing rule in host instructions does not apply here.
+- **Built by hand, and by RSI** (Chad, Oct 14: "Reviewed RSI first"; Oct 15: "RSI branches may merge and release without your review, as long as we can track back with some kind of audit logs"). A Claude Code session writes ilk2, and ilk2 improves itself: it finds, plans and builds batches on its own repo (ilk2 project `ilk2`), and lands them unattended (`src/ilk2/rsi_land.py`):
+  - merge into `main` in this checkout, only when it is clean;
+  - verify the full suite on the merged commit;
+  - release when idle;
+  - canary on chad-mbp, with automatic rollback;
+  - push to rezmac after 24 h.
+
+  Every landing is audited: git trailers `ilk2-rsi-batch`/`-candidate`, the `rsi_landings` table (`ilk2 rsi log`), and `rsi.*` events. A batch that touches the protected kernel, removes a test or an assert, fails to merge, or is red after merging is left for review (a needs_human `rsi-review` row). The kernel is this file, `CLAUDE.md`, `docs/rsi/**`, `.github/**`, the RSI and release code and their tests. The brake is the project setting `rsi_land`. The ilk loop (V1) still never edits this repo: no `/ilk-plan`, no V1 loop batches and no V1 self-improve against it. The auto-plan routing rule in host instructions does not apply here.
 - **Mac only.** chad-mbp and rezmac. Python 3.12 managed by uv (`uv sync`, `uv run pytest`; a full local run is `uv run pytest -n 4`, about 2 min instead of 6.5-9). No shell orchestration in the core.
 - **Credentials.**
   - Never print worker settings, tokens, full plists, environment dumps or full process arguments.

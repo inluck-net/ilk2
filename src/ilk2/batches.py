@@ -59,6 +59,9 @@ class ProjectConfig:
     # when idle (ilk2 rsi tick). Off unless set; shipped RSI branches are still reviewed by hand.
     rsi_auto: bool = False
     rsi_gate: dict | None = None   # the gate every RSI step gets (default: rsi.SUITE_GATE)
+    # Unattended landing (Chad, Oct 15): shipped RSI branches merge, verify, release, canary
+    # and push by themselves, audited in rsi_landings (rsi_land.py). Off: they wait for review.
+    rsi_land: bool = False
     # `ilk2 project remove`: no new batches, no V1 claims; the row and its history stay.
     retired: bool = False
     # A shadow project (docs/04 §4.2, P5): a separate clone that cannot push, running the same
