@@ -70,6 +70,7 @@ def test_a_shipped_rsi_batch_lands_unattended_and_is_audited(land):
     assert rsi_land.land(ilk.s, later)["did"] == "pushed"         # no other host: done here
     (row,) = rsi_land.log(ilk.s)
     assert row["status"] == "pushed" and row["candidate_id"] == "stall:abc" and row["merge_commit"]
+
     kinds = [e["kind"] for e in ilk.s.events_since(0) if e["kind"].startswith("rsi.")]
     assert kinds[-3:] == ["rsi.released", "rsi.verified", "rsi.pushed"] and "rsi.merged" in kinds
 
@@ -144,3 +145,18 @@ def test_removed_tests_reads_only_definitions_and_asserts(land):
     ilk.git(ilk.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "comment")
     got = rsi_land.removed_tests(ilk.repo, base, ilk.git(ilk.repo, "rev-parse", "HEAD"))
     assert got == ["tests/test_calc.py: assert add(0, 0) == 0"]       # a changed assert counts
+
+
+def test_a_verified_landing_closes_its_candidate(land):
+    # Oct 15: landed candidates stayed 'submitted' forever.
+    ilk = land
+    rsi.record(ilk.s, [rsi.Candidate("stall:abc", "stall", "runs end lost", [{}])])
+    shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "x\n"}])
+    rsi_land.land(ilk.s)
+    rsi_land.land(ilk.s)
+    row = rsi_land.log(ilk.s)[0]
+    later = row["released_at"] + rsi_land.CANARY_S + 1
+    tick_supervisor(ilk, later)
+    rsi_land.land(ilk.s, later)
+    c = ilk.s.get("rsi_candidates", "stall:abc")
+    assert c["status"] == "done" and row["version"] in c["note"]

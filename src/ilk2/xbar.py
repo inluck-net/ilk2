@@ -10,6 +10,7 @@ Pages stay opt-in (Q12); this item is the passive view (docs/06 "Self-resolution
 
 from __future__ import annotations
 
+import json
 import shlex
 
 LIVE = ("queued", "active")
@@ -67,7 +68,11 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     hostwide = by_batch.get(None, [])
     running = [b for b in batches if b["status"] in LIVE and b["id"] not in by_batch]
     rsi_st = st.get("rsi") or {}
-    pending = rsi_st.get("pending") or []
+    # Only a branch a person must look at needs you: held for review, or landing switched off.
+    # One that simply has not landed yet is shown in the RSI section (Oct 15: "awaits review"
+    # read as a hold while it only waited for the next landing pass).
+    pending = [p for p in rsi_st.get("pending") or [] if p.get("review", True)]
+    landing_q = [p for p in rsi_st.get("pending") or [] if not p.get("review", True)]
     n_need = len(attention) + len(hostwide) + len(pending)
 
     # A release in its canary signs the title (docs/02 §2.9). The red title never signs: it
@@ -111,7 +116,7 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
         out.append(f"host: {r['reason']}: {_trunc(r['detail'], 60)}")
         out += clear_lines(r)
     for p in pending:
-        out.append(f"{p['batch']} [{p.get('ref') or ''}] ilk2: RSI branch {p['branch']} awaits review")
+        out.append(f"{p['batch']} [{p.get('ref') or ''}] ilk2: RSI branch {p['branch']} needs review")
         out.append(f"--review: git log main..{p['branch']} | font=Menlo size=11")
 
     out += ["---", f"▶ running ({len(running)})" + ("" if running else "  — none")]
@@ -175,6 +180,11 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
                 out.append(f"--{cmd} | font=Menlo size=11 bash=/bin/sh param1=-c "
                            f"param2={shlex.quote('printf %s ' + shlex.quote(cmd) + ' | pbcopy')} "
                            "terminal=false")
+        for p in landing_q:
+            out.append(f"{p['batch']} [{p.get('ref') or ''}] awaits landing")
+        if rsi_st.get("last_tick"):
+            lt = rsi_st["last_tick"]
+            out.append(f"trigger: {lt.get('did')}" + (f" ({_trunc(lt['why'], 60)})" if lt.get("why") else ""))
         line = f"{rsi_st.get('open', 0)} open candidates"
         if rsi_st.get("planning"):
             line += f" · planning: {_trunc(rsi_st['planning'], 60)}"
@@ -230,8 +240,14 @@ def main() -> int:
                     landing_on, repo = cfg.rsi_land, proj["repo_root"] if proj else None
                 except Exception:  # noqa: BLE001 - no ilk2 project row: the brake reads off
                     landing_on, repo = False, None
+                held = {r["batch_id"] for r in s.all(
+                    "SELECT batch_id FROM rsi_landings WHERE status = 'review'")}
+                lt = s.one("SELECT value FROM meta WHERE key = 'rsi_last_tick'")
                 st["rsi"] = {"pending": [{"batch": b["id"], "branch": b["branch"],
-                                          "ref": b["consumer_ref"]} for b in rsi.pending(s)],
+                                          "ref": b["consumer_ref"],
+                                          "review": (b["id"] in held) or not landing_on}
+                                         for b in rsi.pending(s)],
+                             "last_tick": json.loads(lt["value"]) if lt else None,
                              "open": len(rsi.candidates(s)),
                              "planning": planning["title"] if planning else None,
                              "now": now,

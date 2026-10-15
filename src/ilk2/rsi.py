@@ -30,7 +30,7 @@ WEIGHTS = {"request": 100, "engine-error": 50, "stall": 40, "needs-human": 30, "
            "refusal": 20, "report": 10}
 # A step's own red attempts are the consumer's work, not ilk2's; capacity and leases are the
 # host's state, not defects.
-NOT_DEFECTS_NH = {"attempts"}
+NOT_DEFECTS_NH = {"attempts", "rsi-review"}  # rsi-review: RSI's own hold for a person, not a defect
 NOT_DEFECTS_REFUSAL = {"project-limit", "host-load", "host-budget", "root-lease", "waiting-lease",
                        "waiting-api", "quota", "reserve"}
 STALL_REASONS = re.compile(r"^(stalled|lost)")
@@ -333,7 +333,31 @@ def pending(s) -> list:
     return out
 
 
+def today_count(s, now: float) -> int:
+    """RSI-found batches in the last 24 h that were not cancelled (requests are not counted)."""
+    n = 0
+    for b in s.all("SELECT snapshot FROM batches WHERE project_id = ? AND consumer_ref LIKE "
+                   "'rsi-auto-%' AND status != 'cancelled' AND created_at > ?", PROJECT, now - 86400):
+        try:
+            cand = (json.loads(b["snapshot"]).get("meta") or {}).get("rsi_candidate") or ""
+        except (TypeError, ValueError):
+            cand = ""
+        n += not str(cand).startswith("request:")
+    return n
+
+
 def tick(s, now: float | None = None) -> dict:
+    """One trigger pass; its outcome is kept in meta 'rsi_last_tick' for the panel."""
+    out = _tick(s, now)
+    with s.tx() as c:
+        c.execute("INSERT INTO meta(key, value) VALUES ('rsi_last_tick', ?) ON CONFLICT(key) DO "
+                  "UPDATE SET value = excluded.value",
+                  (json.dumps({"at": clock.wall(), "did": out.get("did"), "why": out.get("why"),
+                               "batch": out.get("batch")}),))
+    return out
+
+
+def _tick(s, now: float | None = None) -> dict:
     """Find, then, if the trigger may, plan and submit the top open candidate. Every exit says
     why it did nothing (a quiet trigger must be tellable from a stuck one)."""
     from . import batches
@@ -376,13 +400,15 @@ def tick(s, now: float | None = None) -> dict:
     waiting = pending(s)
     if len(waiting) >= REVIEW_CAP:
         return {"did": "nothing", "why": f"{len(waiting)} RSI branches wait for review", **rec}
-    today = s.one("SELECT COUNT(*) n FROM batches WHERE project_id = ? AND consumer_ref LIKE "
-                  "'rsi-auto-%' AND created_at > ?", PROJECT, now - 86400)["n"]
-    if today >= DAILY_CAP:
-        return {"did": "nothing", "why": f"daily cap {DAILY_CAP} reached", **rec}
     top = next(iter(candidates(s)), None)
     if top is None:
         return {"did": "nothing", "why": "no open candidate", **rec}
+    # Judgment call (Oct 15): the cap limits RSI's self-found work, so Chad's requests skip it,
+    # and a cancelled batch uses no slot (the first request's batch was cancelled for a planner
+    # brief defect, and the cap then held the second request for half a day). Wrong if Chad
+    # wants RSI's total volume capped.
+    if top["source"] != "request" and today_count(s, now) >= DAILY_CAP:
+        return {"did": "nothing", "why": f"daily cap {DAILY_CAP} reached", **rec}
     s.update("rsi_candidates", top["id"], {"status": "planning", "planned_at": now}, actor="rsi",
              reason="tick")
     s.event("rsi.planning", {"candidate": top["id"], "title": top["title"]})

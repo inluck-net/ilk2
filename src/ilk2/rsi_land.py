@@ -191,12 +191,14 @@ def canary(s, row, now: float) -> dict:
     if ticking and not bad:
         _set(s, row["batch_id"], status="verified", verified_at=now)
         s.event("rsi.verified", {"batch": row["batch_id"], "version": row["version"]})
+        _close_candidate(s, row, "done", f"landed in {row['version']} (batch {row['batch_id']})")
         return {"did": "verified", "batch": row["batch_id"]}
     why = "the supervisor is not ticking" if not ticking else \
         f"runs ended badly since the release: {[dict(r) for r in bad][:5]}"
     if row["previous_version"]:
         release.upgrade(row["previous_version"])
     _set(s, row["batch_id"], status="rolled-back", rolled_back_at=now, note=why[:1000])
+    _close_candidate(s, row, "shelved", f"rolled back from {row['version']}: {why[:300]}")
     s.event("rsi.rolled-back", {"batch": row["batch_id"], "version": row["version"],
                                 "to": row["previous_version"], "why": why[:500]})
     s.open_needs_human("rsi-rollback", f"RSI release {row['version']} (batch {row['batch_id']}) "
@@ -253,6 +255,15 @@ def land(s, now: float | None = None) -> dict:
         if b["id"] not in landed:
             return merge(s, b, repo, cfg)
     return {"did": "nothing", "why": "nothing to land"}
+
+
+def _close_candidate(s, row, status: str, note: str) -> None:
+    """A landed candidate is done (its batch is in a verified release); a rolled-back one is
+    shelved with why. Before Oct 15 they stayed 'submitted' forever."""
+    cid = row["candidate_id"]
+    if cid and s.one("SELECT 1 FROM rsi_candidates WHERE id = ?", cid):
+        s.update("rsi_candidates", cid, {"status": status, "note": note[:1000]}, actor="rsi",
+                 reason=f"landing {status}")
 
 
 def log(s) -> list[dict]:

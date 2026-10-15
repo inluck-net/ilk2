@@ -186,11 +186,14 @@ def test_the_trigger_waits_for_a_batch_in_flight_reviews_and_the_daily_cap(ilk, 
     first = rsi.tick(ilk.s)
     assert first["did"] == "submitted"
     assert rsi.tick(ilk.s)["why"] == "an ilk2 batch is in flight"
-    ilk.s.transition("batches", first["batch"], "cancelled", actor="t", reason="t")
+    # shipped (not cancelled: a cancelled batch uses no slot of the daily cap)
+    ilk.s.update("batches", first["batch"], {"status": "shipped"}, actor="t", reason="t")
     monkeypatch.setattr(rsi, "pending", lambda s: [1, 2])
     assert rsi.tick(ilk.s)["why"] == "2 RSI branches wait for review"
     monkeypatch.setattr(rsi, "pending", lambda s: [])
     monkeypatch.setattr(rsi, "DAILY_CAP", 1)
+    (c,) = rsi.candidates(ilk.s, None)                   # another open RSI-found candidate
+    ilk.s.update("rsi_candidates", c["id"], {"status": "open"}, actor="t", reason="t")
     assert rsi.tick(ilk.s)["why"] == "daily cap 1 reached"
 
 
@@ -294,3 +297,43 @@ def test_a_must_pass_that_is_not_a_test_id_shelves_the_plan(ilk):
     ilk.script(spec_write({**PLAN, "must_pass": ["the panel shows the model"]}))
     out = rsi.tick(ilk.s)
     assert out["did"] == "shelved" and "not test ids" in out["note"]
+
+
+def test_requests_skip_the_daily_cap_and_cancelled_batches_use_no_slot(ilk, monkeypatch):
+    # Oct 15: the first request's batch was cancelled for a planner defect, and the cap then
+    # held the second request for half a day.
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write(PLAN))
+    first = rsi.tick(ilk.s)
+    assert first["did"] == "submitted"
+    ilk.s.transition("batches", first["batch"], "cancelled", actor="t", reason="t")
+    assert rsi.today_count(ilk.s, clock.wall()) == 0               # cancelled: no slot
+    ilk.s.update("batches", first["batch"], {"status": "shipped"}, actor="t", reason="t")
+    assert rsi.today_count(ilk.s, clock.wall()) == 1
+    monkeypatch.setattr(rsi, "DAILY_CAP", 1)
+    monkeypatch.setattr(rsi, "pending", lambda s: [])
+    (ilk.repo / "docs" / "rsi").mkdir(parents=True)
+    (ilk.repo / "docs" / "rsi" / "requests.json").write_text(json.dumps(
+        [{"id": "r1", "title": "a request", "acceptance": "a test pins it"}]))
+    ilk.script(spec_write(PLAN))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "submitted" and out["candidate"] == "request:r1"   # skipped the cap
+    assert rsi.today_count(ilk.s, clock.wall()) == 1                        # not counted
+
+
+def test_the_tick_records_its_outcome_for_the_panel(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    rsi.tick(ilk.s)
+    last = json.loads(ilk.s.one("SELECT value FROM meta WHERE key = 'rsi_last_tick'")["value"])
+    assert last["did"] == "nothing" and last["why"] == "no open candidate"
+
+
+def test_rsi_review_holds_are_not_defects(ilk):
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    ilk.s.open_needs_human("rsi-review", "RSI batch needs a review", "look", batch_id=bid)
+    assert not [c for c in rsi.find(ilk.s) if c.source == "needs-human"]

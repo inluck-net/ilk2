@@ -119,7 +119,7 @@ def test_a_pending_rsi_branch_needs_attention():
     start = next(i for i, x in enumerate(lines) if x.startswith("⚠ needs you"))
     end = next(i for i, x in enumerate(lines) if x.startswith("▶ running"))
     section = lines[start:end]
-    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 awaits review" in section
+    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 needs review" in section
     assert any(x.startswith("--review: git log main..ilk2/b-9") and "Menlo" in x for x in section)
 
 
@@ -222,7 +222,7 @@ def test_main_carries_the_rsi_state_and_keeps_rendering_when_rsi_fails(ilk, caps
                                     "first_seen": 1.0, "last_seen": 1.0})
     assert xbar.main() == 0
     out = capsys.readouterr().out
-    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 awaits review" in out
+    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 needs review" in out
     assert "0 open candidates · planning: planning one" in out
 
     def boom(s):
@@ -232,3 +232,15 @@ def test_main_carries_the_rsi_state_and_keeps_rendering_when_rsi_fails(ilk, caps
     out = capsys.readouterr().out
     assert out.splitlines()[0].startswith("ilk2 ") and "open candidates" not in out
     assert "landing now" not in out and "landing:" not in out
+
+
+def test_a_branch_awaiting_landing_is_not_a_needs_you_item():
+    # Oct 15: "awaits review" read as a hold while the branch only waited for the next pass.
+    st = {"batches": [], "needs_human": [],
+          "rsi": {"pending": [{"batch": "b-1", "branch": "ilk2/b-1", "ref": "rsi-auto-3", "review": False}],
+                  "open": 1, "landing_on": True,
+                  "last_tick": {"did": "nothing", "why": "daily cap 3 reached"}}}
+    out = xbar.render(st, tick_age=5, stale=180)
+    assert out.splitlines()[0] == "ilk2 ok"
+    assert "b-1 [rsi-auto-3] awaits landing" in out and "needs review" not in out
+    assert "trigger: nothing (daily cap 3 reached)" in out
