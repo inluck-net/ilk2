@@ -70,14 +70,17 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     pending = rsi_st.get("pending") or []
     n_need = len(attention) + len(hostwide) + len(pending)
 
+    # A release in its canary signs the title (docs/02 §2.9). The red title never signs: it
+    # means the supervisor is not ticking, whatever a landing holds.
+    sign = " ↻" if (rsi_st.get("landing") or {}).get("status") == "released" else ""
     if tick_age is None or tick_age > stale:
         title = "ilk2 ✗ | color=red"
     elif n_need:
-        title = f"ilk2 ⚠ {n_need} | color=orange"
+        title = f"ilk2 ⚠ {n_need}{sign} | color=orange"
     elif running:
-        title = f"ilk2 ▶ {len(running)}"
+        title = f"ilk2 ▶ {len(running)}{sign}"
     else:
-        title = "ilk2 ok"
+        title = f"ilk2 ok{sign}"
     out = [title, "---"]
     if tick_age is None:
         out.append("supervisor has never ticked | color=red")
@@ -145,10 +148,38 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
             out.append(f"--{mark} {_trunc(st_['title'], 70)}{commit}")
 
     if "rsi" in st:
+        out += ["---", "RSI"]
+        landing = rsi_st.get("landing")
+        if landing:
+            from . import rsi_land
+            now = rsi_st.get("now") or 0
+            st_ = landing.get("status")
+            if st_ == "merged":
+                stage = "merged"
+            elif st_ == "released":
+                m = max(0, int(((landing.get("released_at") or 0) + rsi_land.CANARY_S - now) // 60))
+                stage = f"released, canary {m}m left"
+            elif st_ == "verified":
+                h = max(0, int(((landing.get("verified_at") or 0) + rsi_land.SOAK_S -
+                                rsi_land.CANARY_S - now) // 3600))
+                stage = f"verified, {h}h until the rezmac push"
+            else:
+                stage = st_ or "?"
+            out.append(f"landing now: {stage} · {landing.get('version') or '?'}  "
+                       f"{landing.get('batch_id')}  {landing.get('title') or '?'}")
+        for r in (rsi_st.get("recent") or [])[:5]:
+            out.append(f"{r.get('version') or '?'}  {r.get('title') or '?'}  {r.get('status')}")
+            repo, commit = rsi_st.get("repo"), r.get("merge_commit")
+            if repo and commit:
+                cmd = f"git -C {repo} show --stat {commit}"
+                out.append(f"--{cmd} | font=Menlo size=11 bash=/bin/sh param1=-c "
+                           f"param2={shlex.quote('printf %s ' + shlex.quote(cmd) + ' | pbcopy')} "
+                           "terminal=false")
         line = f"{rsi_st.get('open', 0)} open candidates"
         if rsi_st.get("planning"):
             line += f" · planning: {_trunc(rsi_st['planning'], 60)}"
-        out += ["---", "RSI", line]
+        line += f" · today {rsi_st.get('today', 0)}/{rsi_st.get('cap', 0)} batches"
+        out += [line, "landing: on" if rsi_st.get("landing_on") else "landing: off (rsi_land)"]
 
     done = [b for b in batches if b["status"] in ("shipped", "cancelled")][:3]
     if done:
@@ -181,10 +212,35 @@ def main() -> int:
             try:
                 from . import rsi
                 planning = s.one("SELECT title FROM rsi_candidates WHERE status = 'planning'")
+                now = clock.wall()
+                landing = s.one("SELECT l.*, c.title FROM rsi_landings l LEFT JOIN rsi_candidates "
+                                "c ON c.id = l.candidate_id WHERE l.status IN "
+                                "('merged','released','verified') ORDER BY l.at LIMIT 1")
+                recent = [{"status": r["status"], "version": r["version"], "batch_id": r["batch_id"],
+                           "title": r["title"], "merge_commit": r["merge_commit"]} for r in s.all(
+                    "SELECT l.*, c.title FROM rsi_landings l LEFT JOIN rsi_candidates c ON "
+                    "c.id = l.candidate_id ORDER BY l.at DESC LIMIT 5")]
+                today = s.one("SELECT COUNT(*) n FROM batches WHERE project_id = ? AND "
+                              "consumer_ref LIKE 'rsi-auto-%' AND created_at > ?",
+                              rsi.PROJECT, now - 86400)["n"]
+                try:
+                    from . import batches
+                    cfg = batches.project_config(s, rsi.PROJECT)
+                    proj = s.one("SELECT repo_root FROM projects WHERE id = ?", rsi.PROJECT)
+                    landing_on, repo = cfg.rsi_land, proj["repo_root"] if proj else None
+                except Exception:  # noqa: BLE001 - no ilk2 project row: the brake reads off
+                    landing_on, repo = False, None
                 st["rsi"] = {"pending": [{"batch": b["id"], "branch": b["branch"],
                                           "ref": b["consumer_ref"]} for b in rsi.pending(s)],
                              "open": len(rsi.candidates(s)),
-                             "planning": planning["title"] if planning else None}
+                             "planning": planning["title"] if planning else None,
+                             "now": now,
+                             "landing": dict(landing) if landing else None,
+                             "recent": recent,
+                             "today": today,
+                             "cap": rsi.DAILY_CAP,
+                             "landing_on": landing_on,
+                             "repo": repo}
             except Exception:  # noqa: BLE001 - no rsi_candidates table, or an rsi error: render without it
                 st.pop("rsi", None)
         finally:

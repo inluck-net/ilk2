@@ -124,12 +124,92 @@ def test_a_pending_rsi_branch_needs_attention():
 
 
 def test_the_rsi_section_shows_candidates_and_planning():
-    st = {"batches": [], "needs_human": [], "rsi": {"pending": [], "open": 3, "planning": "x"}}
+    st = {"batches": [], "needs_human": [],
+          "rsi": {"pending": [], "open": 3, "planning": "x", "today": 1, "cap": 3}}
     lines = xbar.render(st, tick_age=5, stale=180).splitlines()
-    assert "3 open candidates · planning: x" in lines
+    assert "3 open candidates · planning: x · today 1/3 batches" in lines
     assert lines.index("RSI") > next(i for i, x in enumerate(lines) if x.startswith("▶ running"))
     bare = xbar.render({"batches": [], "needs_human": []}, tick_age=5, stale=180)
     assert "RSI" not in bare.splitlines() and "open candidates" not in bare
+
+
+def test_the_rsi_section_shows_the_landing_in_progress_with_its_stage():
+    now = 1_729_000_000.0
+
+    def st(landing):
+        return {"batches": [], "needs_human": [],
+                "rsi": {"pending": [], "open": 0, "planning": None, "now": now,
+                        "landing": landing, "recent": [], "today": 0, "cap": 3,
+                        "landing_on": True, "repo": "/repo"}}
+
+    for landing, stage in [
+        ({"status": "merged", "version": "v2", "batch_id": "b-1", "title": "fix x"}, "merged"),
+        # released 5 min ago: 10 of the 15 canary minutes are left
+        ({"status": "released", "version": "v2", "batch_id": "b-1", "title": "fix x",
+          "released_at": now - 300}, "released, canary 10m left"),
+        # verified 1 h ago: SOAK_S - CANARY_S after that is 22h45m out, so 22h
+        ({"status": "verified", "version": "v2", "batch_id": "b-1", "title": "fix x",
+          "verified_at": now - 3600}, "verified, 22h until the rezmac push"),
+    ]:
+        lines = xbar.render(st(landing), tick_age=5, stale=180).splitlines()
+        assert f"landing now: {stage} · v2  b-1  fix x" in lines
+    missing = xbar.render(st({"status": "merged", "batch_id": "b-1"}), tick_age=5, stale=180)
+    assert "landing now: merged · ?  b-1  ?" in missing.splitlines()
+    bare = xbar.render({"batches": [], "needs_human": [], "rsi": {"pending": [], "open": 0}},
+                       tick_age=5, stale=180)
+    assert "landing now" not in bare
+
+
+def test_the_rsi_section_lists_recent_landings_with_a_git_show_copy():
+    recent = [{"status": "pushed", "version": f"v{i}", "batch_id": f"b-{i}", "title": f"fix {i}",
+               "merge_commit": f"deadbee{i}"} for i in range(6, 0, -1)]  # newest first
+    st = {"batches": [], "needs_human": [],
+          "rsi": {"pending": [], "open": 0, "planning": None, "now": 0, "landing": None,
+                  "recent": recent, "today": 0, "cap": 3, "landing_on": False, "repo": "/repo"}}
+    lines = xbar.render(st, tick_age=5, stale=180).splitlines()
+    assert [x for x in lines if x.startswith("v")] == \
+        [f"v{i}  fix {i}  pushed" for i in range(6, 1, -1)]  # five rows, no sixth
+    subs = [x for x in lines if x.startswith("--git -C")]
+    assert len(subs) == 5
+    for i, sub in zip(range(6, 1, -1), subs):
+        assert f"param2=" in sub and f"git -C /repo show --stat deadbee{i}" in sub
+        assert "pbcopy" in sub and "terminal=false" in sub
+    st["rsi"]["repo"] = None
+    assert not [x for x in xbar.render(st, tick_age=5, stale=180).splitlines()
+                if x.startswith("--git -C")]
+
+
+def test_the_rsi_section_reports_the_daily_cap_and_the_landing_switch():
+    st = {"batches": [], "needs_human": [],
+          "rsi": {"pending": [], "open": 3, "planning": "x", "now": 0, "landing": None,
+                  "recent": [], "today": 1, "cap": 3, "landing_on": True, "repo": None}}
+    lines = xbar.render(st, tick_age=5, stale=180).splitlines()
+    assert "3 open candidates · planning: x · today 1/3 batches" in lines
+    assert "landing: on" in lines
+    st["rsi"]["landing_on"] = False
+    lines = xbar.render(st, tick_age=5, stale=180).splitlines()
+    assert "landing: off (rsi_land)" in lines and "landing: on" not in lines
+
+
+def test_the_title_carries_the_canary_sign_while_a_release_is_in_its_canary():
+    def st(landing, batches=None, needs=None):
+        return {"batches": batches or [], "needs_human": needs or [],
+                "rsi": {"pending": [], "open": 0, "planning": None, "now": 0,
+                        "landing": landing, "recent": [], "today": 0, "cap": 3,
+                        "landing_on": True, "repo": None}}
+
+    canary = {"status": "released", "released_at": 0, "version": "v2", "batch_id": "b-1",
+              "title": "fix x"}
+    assert title(xbar.render(st(canary), tick_age=5, stale=180)) == "ilk2 ok ↻"
+    run = [batch("b-1", "active", [("x", "pending", 1)])]
+    assert title(xbar.render(st(canary, run), tick_age=5, stale=180)) == "ilk2 ▶ 1 ↻"
+    need = [batch("b-1", "blocked", blocked_reason="x"), batch("b-2", "blocked", blocked_reason="y")]
+    assert title(xbar.render(st(canary, need), tick_age=5, stale=180)) == "ilk2 ⚠ 2 ↻ | color=orange"
+    # the red title never signs, whatever the landing holds
+    assert title(xbar.render(st(canary), tick_age=None, stale=180)) == "ilk2 ✗ | color=red"
+    # and only a release in its canary signs
+    for landing in (None, {"status": "merged"}, {"status": "verified"}, {"status": "pushed"}):
+        assert title(xbar.render(st(landing), tick_age=5, stale=180)) == "ilk2 ok"
 
 
 def test_main_carries_the_rsi_state_and_keeps_rendering_when_rsi_fails(ilk, capsys, monkeypatch):
@@ -151,3 +231,4 @@ def test_main_carries_the_rsi_state_and_keeps_rendering_when_rsi_fails(ilk, caps
     assert xbar.main() == 0
     out = capsys.readouterr().out
     assert out.splitlines()[0].startswith("ilk2 ") and "open candidates" not in out
+    assert "landing now" not in out and "landing:" not in out
