@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 
 LIVE = ("queued", "active")
 
@@ -39,22 +40,103 @@ def _steps(b: dict) -> list[dict]:
     return [st for p in b.get("plans", []) for st in p.get("steps", [])]
 
 
+def _configured_model() -> str | None:
+    """The worker template's configured model: its `model` key, else `env.ANTHROPIC_MODEL`.
+
+    Only those two keys are read: the template also holds credentials (AGENTS.md), and none of
+    its other keys may reach the menu. None when the file is missing, unreadable, or sets
+    neither key — the line is then omitted even when live models exist.
+    """
+    from . import paths
+    try:
+        d = json.loads((paths.home() / "worker-template" / "settings.json").read_text())
+    except (OSError, ValueError):  # ValueError: JSONDecodeError is one
+        return None
+    if not isinstance(d, dict):
+        return None
+    m = d.get("model")
+    if isinstance(m, str) and m:
+        return m
+    env = d.get("env")
+    if isinstance(env, dict):
+        m = env.get("ANTHROPIC_MODEL")
+        if isinstance(m, str) and m:
+            return m
+    return None
+
+
+def _newest_log(candidates) -> Path | None:
+    """Newest worker event log of the candidates. hook.jsonl is a different shape (worker_hook)."""
+    try:
+        fs = [p for p in candidates if p.name != "hook.jsonl"]
+        return max(fs, key=lambda p: p.stat().st_mtime) if fs else None
+    except OSError:
+        return None
+
+
+def _init_model(log: Path | None) -> str | None:
+    """The `model` of the first system init event in a worker event log (worker.py:175-177)."""
+    if log is None:
+        return None
+    try:
+        with log.open() as f:
+            for i, line in enumerate(f):
+                if i >= 200:
+                    break
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                ev = obj.get("ev") if isinstance(obj, dict) else None
+                if isinstance(ev, dict) and ev.get("type") == "system" and ev.get("subtype") == "init":
+                    m = ev.get("model")
+                    return m if isinstance(m, str) and m else None
+    except OSError:
+        return None
+    return None
+
+
+def _live_model(run_id: str, attempt_id: str) -> str | None:
+    """The model a live attempt's worker actually runs, from its init event.
+
+    The log is the newest `*.jsonl` under the attempt's own logs dir (start.jsonl or
+    resume.jsonl). A resumed attempt appends resume.jsonl under the attempt that created the
+    session rather than under its own id (driver.py:869-875), so an empty own dir falls back to
+    the newest one under the run. No init event within the first 200 lines means no model yet.
+    """
+    from . import paths
+    run = paths.run_dir(run_id)
+    try:
+        own = list((run / attempt_id / "logs").glob("*.jsonl"))
+    except OSError:
+        own = []
+    log = _newest_log(own) or _newest_log(run.glob("*/logs/*.jsonl"))
+    return _init_model(log)
+
+
 def live_runs(s) -> dict[str, dict]:
-    """batch id -> the live run's phase, its age, and the running attempt's age."""
+    """batch id -> the live run's phase, its age, the running attempt's age, and its model."""
     from . import clock
     out = {}
     for r in s.all("SELECT * FROM runs WHERE status IN ('starting', 'running')"):
         same_boot = r["boot_time"] in (None, clock.boot_time())
         phase_age = (clock.mono() - r["phase_started_mono"]) if (same_boot and r["phase_started_mono"]) else None
-        a = s.one("SELECT created_at FROM attempts WHERE run_id = ? AND status = 'running' "
+        a = s.one("SELECT id, created_at FROM attempts WHERE run_id = ? AND status = 'running' "
                   "ORDER BY created_at DESC LIMIT 1", r["id"])
         info = {"phase": r["phase"] or "starting", "phase_age_s": phase_age,
                 "attempt_age_s": (clock.wall() - a["created_at"]) if a else None}
         plan = s.one("SELECT slug FROM plans WHERE id = ?", r["plan_id"]) if "plan_id" in r.keys() \
             and r["plan_id"] else None
-        cur = out.setdefault(r["batch_id"], {**info, "lanes": []})
+        cur = out.setdefault(r["batch_id"], {**info, "lanes": [], "models": []})
         if plan:
             cur["lanes"].append(plan["slug"])  # lanes: several live runs on one batch
+        m = _live_model(r["id"], a["id"]) if a else None
+        if m and m not in cur["models"]:
+            cur["models"].append(m)
+    for cur in out.values():
+        cur["models"].sort()
+        if cur["models"]:
+            cur["model"] = ", ".join(cur["models"])  # lanes that ran different models
     return out
 
 
@@ -91,6 +173,14 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
         out.append("supervisor has never ticked | color=red")
     elif tick_age > stale:
         out.append(f"supervisor last ticked {tick_age:.0f}s ago (bound {stale:.0f}s) | color=red")
+
+    # Which model the workers are meant to run, and which ones are running (docs/02 §2.9).
+    wm = st.get("worker_model") or {}
+    cfg = wm.get("configured")
+    if cfg:  # no configured model: omit the whole line, whatever the live models are
+        live_m = sorted(wm.get("live") or [])
+        suffix = f"  (live: {', '.join(live_m)})" if live_m and set(live_m) != {cfg} else ""
+        out.append(f"worker model: {cfg}{suffix}")
 
     def clear_lines(r: dict) -> list[str]:
         cmd = r.get("clear_command") or ""
@@ -144,6 +234,9 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
         elif b["status"] == "queued":
             parts.append("queued")
         out.append(f"{b['id']}{ref}  {b['project']} · " + " · ".join(parts))
+        model = (live or {}).get("model")
+        if model:  # omitted until the worker emits its init event
+            out.append(f"--model: {model}")
         lane_cur = [next((x for x in p.get("steps", []) if x.get("status") != "accepted"), None)
                     for p in b.get("plans", []) if p.get("slug") in lanes]
         for st_ in steps:
@@ -214,6 +307,10 @@ def main() -> int:
             for b in st["batches"]:
                 if b["id"] in live:
                     b["live"] = live[b["id"]]
+            st["worker_model"] = {
+                "configured": _configured_model(),
+                "live": sorted({m for v in live.values() for m in v["models"]}),
+            }
             row = s.one("SELECT tick_mono, tick_wall, boot_time FROM supervisor WHERE id = 1")
             tick_age = None
             if row and row["tick_wall"] is not None:

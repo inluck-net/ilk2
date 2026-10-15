@@ -1,5 +1,7 @@
 """The ilk2 SwiftBar item (`ilk2 xbar`, contrib/xbar/ilk2.10s.sh): title states and dropdown."""
 
+import json
+
 from ilk2 import xbar
 
 
@@ -244,3 +246,109 @@ def test_a_branch_awaiting_landing_is_not_a_needs_you_item():
     assert out.splitlines()[0] == "ilk2 ok"
     assert "b-1 [rsi-auto-3] awaits landing" in out and "needs review" not in out
     assert "trigger: nothing (daily cap 3 reached)" in out
+
+
+def _running(ilk, model=None, init=True):
+    """A running batch whose live attempt's worker event log records `model` in its init event."""
+    from conftest import one_step
+    from ilk2 import clock
+    bid = ilk.submit(one_step())
+    rid = ilk.new_run(bid)
+    step = ilk.s.one("SELECT id FROM steps WHERE batch_id = ?", bid)
+    aid = f"a-{rid}"
+    ilk.s.insert("attempts", {"id": aid, "run_id": rid, "step_id": step["id"], "n": 1,
+                              "status": "running", "created_at": clock.wall()})
+    logs = ilk.home / "data" / "runs" / rid / aid / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    ev = {"type": "system", "subtype": "init", "model": model, "session_id": "s-1"} if init \
+        else {"type": "assistant", "message": {}}
+    (logs / "start.jsonl").write_text(json.dumps({"t": 0.1, "ev": ev}) + "\n")
+    return bid, rid, aid
+
+
+def _end(ilk, rid, aid):
+    from ilk2 import clock
+    ilk.s.update("attempts", aid, {"status": "done", "outcome": "accepted"},
+                 actor="test", reason="x")
+    ilk.s.update("runs", rid, {"status": "ended", "terminal_reason": "done",
+                               "ended_at": clock.wall()}, actor="test", reason="x")
+
+
+def test_the_menu_shows_the_configured_worker_model(ilk, capsys):
+    tmpl = ilk.home / "worker-template" / "settings.json"
+    tmpl.write_text(json.dumps({"model": "cfg-model"}))
+    assert xbar.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "worker model: cfg-model" in lines
+    assert lines.index("---") < lines.index("worker model: cfg-model") < \
+        next(i for i, x in enumerate(lines) if x.startswith("⚠ needs you"))
+
+    # `env.ANTHROPIC_MODEL` is the fallback when the template sets no `model` key
+    tmpl.write_text(json.dumps({"env": {"ANTHROPIC_MODEL": "env-model"}}))
+    assert xbar.main() == 0
+    assert "worker model: env-model" in capsys.readouterr().out.splitlines()
+
+    # neither key set, and no template file at all: the whole line is absent
+    tmpl.write_text(json.dumps({"env": {}}))
+    assert xbar.main() == 0
+    assert "worker model" not in capsys.readouterr().out
+    tmpl.unlink()
+    assert xbar.main() == 0
+    assert "worker model" not in capsys.readouterr().out
+
+
+def test_the_worker_model_line_shows_the_live_models_only_when_they_differ(ilk, capsys):
+    # the template the `ilk` pin writes configures stub-model
+    ilk.make_repo()
+    ilk.project()
+    bid, rid, aid = _running(ilk, model="stub-model")
+    assert xbar.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [x for x in lines if x.startswith("worker model:")] == ["worker model: stub-model"]
+    _end(ilk, rid, aid)
+
+    bid, rid, aid = _running(ilk, model="other-model")
+    assert xbar.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "worker model: stub-model  (live: other-model)" in lines
+    _end(ilk, rid, aid)
+
+    # several distinct live models: every one of them, sorted and comma-separated
+    _running(ilk, model="b-model")
+    _running(ilk, model="a-model")
+    assert xbar.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "worker model: stub-model  (live: a-model, b-model)" in lines
+
+
+def test_each_running_batch_shows_the_model_its_live_attempt_runs(ilk, capsys):
+    ilk.make_repo()
+    ilk.project()
+    b1, _, _ = _running(ilk, model="m-live")
+    b2, _, _ = _running(ilk, init=False)  # the worker has not emitted its init event yet
+    assert xbar.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    def subs(bid):  # the batch block's own submenu lines (status() lists newest first)
+        head = next(i for i, x in enumerate(lines) if x.startswith(f"{bid}  "))
+        out = []
+        for x in lines[head + 1:]:
+            if not x.startswith("--"):
+                break
+            out.append(x)
+        return out
+
+    s1 = subs(b1)
+    assert s1[0] == "--model: m-live"  # first submenu line, before the step lines
+    assert any(x.startswith(("--▶", "--·")) for x in s1[1:])
+    assert not any(x.startswith("--model:") for x in subs(b2))
+
+
+def test_the_worker_template_never_leaks_other_keys_into_the_menu(ilk, capsys):
+    (ilk.home / "worker-template" / "settings.json").write_text(
+        json.dumps({"model": "cfg-model", "env": {"ANTHROPIC_API_TOKEN": "sekret-token"},
+                    "apiKeyHelper": "sekret-helper"}))
+    assert xbar.main() == 0
+    out = capsys.readouterr().out
+    assert "worker model: cfg-model" in out.splitlines()
+    assert "sekret-token" not in out and "sekret-helper" not in out
