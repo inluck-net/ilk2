@@ -1,6 +1,6 @@
 [project]
 name = "ilk2"
-version = "0.2.0"
+version = "0.3.0"
 description = "Small execution core for multi-step coding batches on a Mac (ilk V2)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
