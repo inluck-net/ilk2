@@ -1,0 +1,7 @@
+[
+  {
+    "id": "panel-rsi-section",
+    "title": "The SwiftBar panel has a dedicated RSI section, and the icon shows when an RSI release is in its canary",
+    "acceptance": "src/ilk2/xbar.py: (1) a section titled 'RSI' lists, from rsi_landings and rsi_candidates: the landing in progress with its stage (merged, released with the canary's minutes left, verified with the hours until the rezmac push), version, batch id and candidate title; the last 5 landings as '<version>  <candidate title>  <status>' each with a submenu item that copies 'git -C <repo> show --stat <merge_commit>' to the clipboard; one line '<open> open candidates · planning: <title> · today <n>/3 batches'; one line 'landing: on' or 'landing: off (rsi_land)'. (2) the menu title gains the suffix ' ↻' while a landing is in status 'released' (an RSI release in its canary), in every title state except the red ✗. (3) main() still never raises: without the rsi tables the section is omitted. Tests in tests/test_xbar.py pin each of these with render() on hand-built inputs; docs/02-architecture.md's SwiftBar paragraph describes the section and the ↻ sign in one or two sentences."
+  }
+]
