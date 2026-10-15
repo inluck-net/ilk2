@@ -213,6 +213,15 @@ def push(s, row, repo: Path, hosts: list[str], now: float) -> dict:
         return {"did": "nothing", "why": "soaking before the other hosts"}
     done = []
     for h in hosts:
+        # A host already running a release that contains this merge needs nothing, and pushing
+        # this landing's older version would downgrade it (Oct 16: 0.3.0 went to rezmac ahead
+        # of the soaking landings).
+        have = release.host_version(h) or ""
+        sha = have.rsplit("+g", 1)[1] if "+g" in have else None
+        if sha and row["merge_commit"] and gitops.rev(repo, sha) and gitops.is_ancestor(
+                repo, row["merge_commit"], gitops.rev(repo, sha)):
+            done.append(f"{h} (already has it: {have})")
+            continue
         idle = subprocess.run([*release._ssh(), h, "sqlite3 ~/.ilk2/data/state.db \"select count(*) "
                                "from runs where status in ('starting','running')\""],
                               capture_output=True, text=True, timeout=60).stdout.strip()

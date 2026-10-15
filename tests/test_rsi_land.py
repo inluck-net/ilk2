@@ -178,3 +178,25 @@ def test_a_soaking_landing_does_not_hold_the_next_one(land, monkeypatch):
     assert out["did"] == "merged" and out["batch"] == second
     assert {r["batch_id"]: r["status"] for r in rsi_land.log(ilk.s)} == {first: "verified",
                                                                            second: "merged"}
+
+
+def test_a_host_that_already_has_the_merge_is_not_pushed_an_older_version(land, monkeypatch):
+    # Oct 16: 0.3.0 went to rezmac by hand while two landings soaked; pushing their older
+    # versions afterwards would have downgraded it.
+    ilk = land
+    monkeypatch.setattr(rsi, "hosts", lambda: ["rezmac"])
+    shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "1\n"}])
+    rsi_land.land(ilk.s)
+    rsi_land.land(ilk.s)
+    row = rsi_land.log(ilk.s)[0]
+    later = row["released_at"] + rsi_land.CANARY_S + 1
+    tick_supervisor(ilk, later)
+    rsi_land.land(ilk.s, later)                             # verified
+    ilk.git(ilk.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "later")
+    newer = ilk.git(ilk.repo, "rev-parse", "--short=8", "HEAD")
+    monkeypatch.setattr(release, "host_version", lambda h: f"0.3.0+g{newer}")
+    pushed = []
+    monkeypatch.setattr(release, "push", lambda *a, **k: pushed.append(a) or {"ok": True})
+    out = rsi_land.land(ilk.s, later + rsi_land.SOAK_S)
+    assert out["did"] == "pushed" and pushed == []           # nothing sent: rezmac has it
+    assert "already has it" in out["hosts"][0]
