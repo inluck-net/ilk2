@@ -18,12 +18,14 @@ jobs:
           node-version: 20
       - name: Vitest caches 3.2.4 and 4.1.11 for S20/S21 (tests/test_vitest.py)
         run: |
+          # Locked trees, installed as locked (Oct 16: npm 10.8 crashed resolving vitest 4's optional
+          # browser peers with 'edgesOut' on a fresh resolve; the peers are not needed here).
           mkdir -p ~/.cache/ilk2-test-vitest
-          cp tests/fixtures/vitest-cache/package.json ~/.cache/ilk2-test-vitest/
-          npm install --prefix ~/.cache/ilk2-test-vitest --no-audit --no-fund
+          cp tests/fixtures/vitest-cache/package.json tests/fixtures/vitest-cache/package-lock.json ~/.cache/ilk2-test-vitest/
+          npm ci --prefix ~/.cache/ilk2-test-vitest --no-audit --no-fund --legacy-peer-deps
           mkdir -p ~/.cache/ilk2-test-vitest4
-          cp tests/fixtures/vitest4-cache/package.json ~/.cache/ilk2-test-vitest4/
-          npm install --prefix ~/.cache/ilk2-test-vitest4 --no-audit --no-fund
+          cp tests/fixtures/vitest4-cache/package.json tests/fixtures/vitest4-cache/package-lock.json ~/.cache/ilk2-test-vitest4/
+          npm ci --prefix ~/.cache/ilk2-test-vitest4 --no-audit --no-fund --legacy-peer-deps
       - name: Tests
         env:
           ILK2_REQUIRE_VITEST: "1"
