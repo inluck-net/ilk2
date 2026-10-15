@@ -525,6 +525,12 @@ def main(argv: list[str] | None = None) -> int:
                 out = v1.switch_off(owned, a.apply)
             else:
                 out = v1.switch_on(a.apply)
+            if a.op in ("off", "on") and a.apply:
+                # A host-level switch leaves a trace in ilk2's own log (gh-resolve-e1, Oct 15:
+                # rezmac's switch-off at Oct 14 22:11 could only be dated by a plist's ctime).
+                s.event(f"v1.{a.op}", {"applied": bool(out.get("applied")),
+                                       "blockers": out.get("blockers", [])[:20],
+                                       "by": os.environ.get("USER", "")})
             _out(out, True)
             return 2 if a.op == "off" and a.apply and not out.get("applied") else 0
         elif a.cmd == "report":

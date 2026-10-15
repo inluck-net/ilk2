@@ -332,3 +332,15 @@ def test_a_pid_reused_after_the_runner_died_is_not_a_live_runner(ilk, v1data):
         assert v1.runner_alive(key) is None
     finally:
         p.kill()
+
+
+def test_a_switch_off_or_on_is_recorded_as_an_event(ilk, v1data, agents, capsys):
+    # gh-resolve-e1, Oct 15: rezmac's switch-off could only be dated by a plist's ctime.
+    from ilk2 import cli
+    d, key = v1data
+    (d / "projects.json").write_text(json.dumps({"projects": []}))
+    assert cli.main(["v1", "off", "--apply"]) == 0
+    assert cli.main(["v1", "on", "--apply"]) == 0
+    assert cli.main(["v1", "off"]) == 0                      # a dry run records nothing
+    evs = [(e["kind"], e["payload"]["applied"]) for e in ilk.s.events_since(0) if e["kind"].startswith("v1.")]
+    assert evs == [("v1.off", True), ("v1.on", True)]
