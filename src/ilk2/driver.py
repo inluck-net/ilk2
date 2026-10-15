@@ -1334,8 +1334,9 @@ def finish_cancel(s: Store, batch_id: str, b: bounds.Bounds | None = None) -> bo
     if fenced(s, batch_id, Path(s.get("batches", batch_id)["execution_root"])):
         return False  # checked first, so a fenced root does not add a run row every tick
     rid = new_id("r")
+    now = clock.wall()  # a bookkeeping run: it ends as it starts (reports read ended_at)
     s.insert("runs", {"id": rid, "batch_id": batch_id, "status": "ended",
-                      "terminal_reason": "cancel-recovery", "created_at": clock.wall()})
+                      "terminal_reason": "cancel-recovery", "created_at": now, "ended_at": now})
     return Driver(s, rid, b).finish_cancel()
 
 

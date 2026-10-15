@@ -1287,3 +1287,22 @@ def test_ilk2_commits_as_itself_when_the_repository_names_no_user(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
     b = ilk.s.get("batches", bid)
     assert ilk.git(ilk.repo, "log", "-1", "--format=%ae", b["branch"]) == "ilk2@localhost"
+
+
+def test_recovery_runs_record_when_they_ended(ilk):
+    # Oct 16: park-recovery and cancel-recovery runs were inserted ended but with no ended_at, so
+    # reports that read ended_at counted them as running until now.
+    from ilk2 import batches as b_
+    from ilk2.driver import finish_cancel
+    from ilk2.supervisor import Supervisor
+    ilk.make_repo()
+    ilk.project()
+    parked = ilk.submit(one_step())
+    Supervisor(ilk.s, load_check=False).finish_park(parked)
+    cancelled = ilk.submit(one_step())
+    b_.cancel(ilk.s, cancelled, "human")
+    finish_cancel(ilk.s, cancelled)
+    rows = ilk.s.all("SELECT terminal_reason, created_at, ended_at FROM runs WHERE terminal_reason "
+                     "IN ('park-recovery', 'cancel-recovery')")
+    assert {r["terminal_reason"] for r in rows} == {"park-recovery", "cancel-recovery"}
+    assert all(r["ended_at"] is not None and r["ended_at"] >= r["created_at"] for r in rows)

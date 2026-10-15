@@ -398,8 +398,10 @@ class Supervisor:
     def finish_park(self, batch_id: str) -> None:
         from .driver import Driver
         rid = new_id("r")
+        now = clock.wall()  # a bookkeeping run: it ends as it starts (reports read ended_at)
         self.s.insert("runs", {"id": rid, "batch_id": batch_id, "status": "ended",
-                               "terminal_reason": "park-recovery", "created_at": clock.wall()})
+                               "terminal_reason": "park-recovery", "created_at": now,
+                               "ended_at": now})
         Driver(self.s, rid, self.b).recover_accepting()
         self.release_lease(batch_id)
 
