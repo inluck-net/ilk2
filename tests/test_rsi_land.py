@@ -160,3 +160,21 @@ def test_a_verified_landing_closes_its_candidate(land):
     rsi_land.land(ilk.s, later)
     c = ilk.s.get("rsi_candidates", "stall:abc")
     assert c["status"] == "done" and row["version"] in c["note"]
+
+
+def test_a_soaking_landing_does_not_hold_the_next_one(land, monkeypatch):
+    # Oct 15: the first verified landing's 24-hour soak before rezmac held rsi-auto-4 for hours.
+    ilk = land
+    monkeypatch.setattr(rsi, "hosts", lambda: ["rezmac"])
+    first = shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "1\n"}])
+    rsi_land.land(ilk.s)
+    rsi_land.land(ilk.s)
+    row = rsi_land.log(ilk.s)[0]
+    later = row["released_at"] + rsi_land.CANARY_S + 1
+    tick_supervisor(ilk, later)
+    assert rsi_land.land(ilk.s, later)["did"] == "verified"
+    second = shipped_rsi_batch(ilk, [{"write": "more.md", "text": "2\n"}])
+    out = rsi_land.land(ilk.s, later + 60)             # the first soaks; the second merges
+    assert out["did"] == "merged" and out["batch"] == second
+    assert {r["batch_id"]: r["status"] for r in rsi_land.log(ilk.s)} == {first: "verified",
+                                                                           second: "merged"}

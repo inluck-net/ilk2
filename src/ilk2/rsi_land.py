@@ -238,18 +238,23 @@ def land(s, now: float | None = None) -> dict:
     if not cfg.rsi_land:
         return {"did": "nothing", "why": "rsi_land is off: branches wait for review"}
     repo = Path(proj["repo_root"])
-    row = s.one("SELECT * FROM rsi_landings WHERE status IN ('merged', 'released', 'verified') "
-                "ORDER BY at LIMIT 1")
+    # One landing between merge and the end of its canary, so a canary judges one change.
+    row = s.one("SELECT * FROM rsi_landings WHERE status IN ('merged', 'released') ORDER BY at LIMIT 1")
     if row and row["status"] == "merged":
         return release_landed(s, row, repo)
-    if row and row["status"] == "released":
+    if row:
         return canary(s, row, now)
-    if row and row["status"] == "verified":
+    # A verified landing soaking before the other hosts does not hold the next one: on Oct 15
+    # the first verified landing's 24-hour soak held every later batch for a day.
+    row = s.one("SELECT * FROM rsi_landings WHERE status = 'verified' ORDER BY at LIMIT 1")
+    if row:
         if not rsi.hosts():  # no other host: the landing is done here
             _set(s, row["batch_id"], status="pushed", pushed_at=now)
             s.event("rsi.pushed", {"batch": row["batch_id"], "version": row["version"], "hosts": []})
             return {"did": "pushed", "batch": row["batch_id"], "hosts": []}
-        return push(s, row, repo, rsi.hosts(), now)
+        res = push(s, row, repo, rsi.hosts(), now)
+        if res["did"] != "nothing":
+            return res
     landed = {r["batch_id"] for r in s.all("SELECT batch_id FROM rsi_landings")}
     for b in rsi.pending(s):
         if b["id"] not in landed:
