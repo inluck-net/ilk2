@@ -337,3 +337,52 @@ def test_rsi_review_holds_are_not_defects(ilk):
     bid = ilk.submit(one_step())
     ilk.s.open_needs_human("rsi-review", "RSI batch needs a review", "look", batch_id=bid)
     assert not [c for c in rsi.find(ilk.s) if c.source == "needs-human"]
+
+
+def fake_gh(tmp_path, monkeypatch, rows, rc=0):
+    import os
+    b = tmp_path / "bin"
+    b.mkdir(exist_ok=True)
+    (b / "gh").write_text(f"#!/bin/sh\ncat <<'J'\n{json.dumps(rows)}\nJ\nexit {rc}\n")
+    (b / "gh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{b}:{os.environ['PATH']}")
+
+
+def test_chads_rsi_req_issues_are_requests_and_others_are_ignored(ilk, tmp_path, monkeypatch):
+    # Chad, Oct 16: requests as GitHub issues labelled rsi:req, by his account only, read only.
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_issues": True}))
+    fake_gh(tmp_path, monkeypatch, [
+        {"number": 7, "title": "show lanes", "body": "a test pins two lanes", "author": {"login": "chad007"}},
+        {"number": 8, "title": "no acceptance", "body": "  ", "author": {"login": "chad007"}},
+        {"number": 9, "title": "someone else", "body": "x", "author": {"login": "mallory"}}])
+    got = [c for c in rsi.find(ilk.s, tmp_path) if c.source == "request"]
+    assert [(c.id, c.title) for c in got] == [("request:gh-7", "show lanes")]
+    assert got[0].evidence[0]["acceptance"] == "a test pins two lanes"
+
+
+def test_issues_are_off_unless_the_host_reads_them_and_failures_are_events(ilk, tmp_path, monkeypatch):
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    fake_gh(tmp_path, monkeypatch, [{"number": 7, "title": "t", "body": "b", "author": {"login": "chad007"}}])
+    assert not [c for c in rsi.find(ilk.s, tmp_path) if c.source == "request"]   # host.json off
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_issues": True}))
+    fake_gh(tmp_path, monkeypatch, [], rc=1)
+    assert not [c for c in rsi.find(ilk.s, tmp_path) if c.source == "request"]
+    assert any(e["kind"] == "rsi.issues-failed" for e in ilk.s.events_since(0))
+
+
+def test_a_goal_off_its_target_is_a_candidate(ilk, tmp_path, monkeypatch):
+    # Chad, Oct 16: standing goals in docs/rsi/goals.json, measured with ilk2 report.
+    ilk.make_repo()
+    (tmp_path / "docs" / "rsi").mkdir(parents=True)
+    (tmp_path / "docs" / "rsi" / "goals.json").write_text(json.dumps([
+        {"id": "kira-speed", "project": "kira-live", "host": "rezmac",
+         "metric": "minutes_per_accepted_step", "max": 20},
+        {"id": "waste", "project": "gh-resolve", "metric": "share_attempts_producing_nothing", "max": 0.1}]))
+    values = {"kira-live": 30.1, "gh-resolve": 0.08}
+    monkeypatch.setattr(rsi, "_metric", lambda g: values[g["project"]])
+    got = [c for c in rsi.find(ilk.s, tmp_path) if c.source == "goal"]
+    assert [c.id for c in got] == ["goal:kira-speed"]                     # waste is on target
+    assert "is 30.1, target <= 20" in got[0].title and got[0].evidence[0]["host"] == "rezmac"

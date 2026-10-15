@@ -305,3 +305,17 @@ def test_narrowing_replaces_a_bare_directory_and_keeps_option_values():
     out = gates.with_test_ids(cmd, ["tests/test_x.py::t"], drop=("--deselect", "-k"))
     assert out == ["python3", "-m", "pytest", "-q", "-n", "8", "--dist", "loadfile", "-p",
                    "no:cacheprovider", "--timeout-method=signal", "tests/test_x.py::t"]
+
+
+def test_a_gate_that_hits_its_cap_is_rerun_once_with_twice_the_cap(tmp_path):
+    # Chad, Oct 16: #8519's first kira batch waited 12 h overnight on a suite near its 900 s cap.
+    from ilk2 import gates
+    from ilk2.plans import Gate
+    g = Gate(name="slowish", adapter="shell", declares_tests=False,
+             command=["sh", "-c", "sleep 1.5"], cap_s=1)
+    r = gates.measure(g, tmp_path, {"PATH": "/usr/bin:/bin"}, tmp_path / "w")
+    assert r.outcome == "pass" and r.timeouts == 1 and r.reruns == 1
+    never = Gate(name="slow", adapter="shell", declares_tests=False,
+                 command=["sh", "-c", "sleep 5"], cap_s=1)
+    r = gates.measure(never, tmp_path, {"PATH": "/usr/bin:/bin"}, tmp_path / "w2")
+    assert r.outcome == "unmeasured" and "(twice)" in r.reason          # still a person's call

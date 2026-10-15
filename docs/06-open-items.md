@@ -282,6 +282,14 @@ Fix: any step entered with kept work runs its gates first, as verification steps
 
 **Going unattended (Chad's call).** Proposed bar: 5 consecutive reviewed RSI batches merged without a change of substance at review, and none later reverted. Then a shipped batch could merge and release itself on chad-mbp as a canary. It would roll back automatically (`ilk2 release upgrade --version <previous>`) if the next full suite or `ilk2 health` regresses, and push to rezmac after a clean day. Judgment call: 5 batches; wrong if the first batches are too small to show what review catches.
 
+**Decided Oct 16 (Chad: "go as what you recommended"):**
+1. **The kernel splits.** Governance stays out of RSI's reach. RSI's own machinery becomes RSI-editable, but only through review.
+2. **Chad's inputs** are GitHub issues labelled `rsi:req` (read only, chad007 only) and goals in `docs/rsi/goals.json`.
+3. **Design questions:**
+   - (a) a gate that hits its cap is re-run once with twice the cap, then a person;
+   - (b) planning steps as a batch runs (Q17) stays deferred: no batch so far shows a step that needed re-planning mid-run;
+   - (c) a restarted supervisor does not adopt live drivers: I4 stands, and releases drain only when idle.
+
 **Decided Oct 15 (Chad):** unattended merging and releasing, provided every change can be traced back by an audit log. Built in `rsi_land.py`, with these differences from the proposal below:
 - merges go into `main` in the build checkout, only when it is clean, instead of a separate `rsi/main`;
 - verification runs the full suite on the merged commit before any release;

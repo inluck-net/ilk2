@@ -26,7 +26,7 @@ from pathlib import Path
 from . import clock, paths
 
 WINDOW_S = 7 * 24 * 3600   # judgment call: a week of records; wrong if defects recur more slowly
-WEIGHTS = {"request": 100, "engine-error": 50, "stall": 40, "needs-human": 30, "gate-cap": 25,
+WEIGHTS = {"request": 100, "goal": 90, "engine-error": 50, "stall": 40, "needs-human": 30, "gate-cap": 25,
            "refusal": 20, "report": 10}
 # A step's own red attempts are the consumer's work, not ilk2's; capacity and leases are the
 # host's state, not defects.
@@ -80,6 +80,88 @@ def requests(repo: Path | None) -> list[Candidate]:
         out.append(Candidate(f"request:{r['id']}", "request", r["title"],
                              [{"request": r["id"], "acceptance": r["acceptance"]}]))
     return out
+
+
+ISSUES = {"repo": "inluck-net/ilk2", "label": "rsi:req", "author": "chad007"}
+
+
+def issues(s) -> list[Candidate]:
+    """Chad's requests as GitHub issues (Chad, Oct 16): open issues labelled rsi:req on the ilk2
+    repo, by Chad's account only, read only (RSI never comments, labels or closes). The issue
+    body is the acceptance check; an empty one is skipped. An unreachable GitHub is an event,
+    never a failed tick: the other sources still count (judgment call)."""
+    import subprocess
+    from .supervisor import host_config
+    try:
+        if not host_config().get("rsi_issues"):  # per host: the host that plans RSI reads them
+            return []
+    except (OSError, ValueError):
+        return []
+    try:
+        p = subprocess.run(["gh", "issue", "list", "--repo", ISSUES["repo"], "--label",
+                            ISSUES["label"], "--author", ISSUES["author"], "--state", "open",
+                            "--json", "number,title,body,author", "--limit", "50"],
+                           capture_output=True, text=True, timeout=60)
+        if p.returncode:
+            raise RuntimeError(p.stderr.strip()[-300:])
+        rows = json.loads(p.stdout or "[]")
+    except Exception as e:  # noqa: BLE001
+        s.event("rsi.issues-failed", {"error": str(e)[:300]})
+        return []
+    out = []
+    for r in rows:
+        if (r.get("author") or {}).get("login") != ISSUES["author"] or not (r.get("body") or "").strip():
+            continue
+        out.append(Candidate(f"request:gh-{r['number']}", "request", r["title"],
+                             [{"issue": r["number"], "acceptance": r["body"][:4000]}]))
+    return out
+
+
+def goals(s, repo: Path | None) -> list[Candidate]:
+    """Chad's standing goals: docs/rsi/goals.json (protected kernel), each
+    {"id", "project", "metric", "max" or "min", "host"?}. The metric is a number in
+    `ilk2 report --project <p> --json`, read on the goal's host (ssh) or here. A goal off its
+    target is a candidate; on target, none. A broken file stops the finder, like requests."""
+    if repo is None:
+        return []
+    f = repo / "docs" / "rsi" / "goals.json"
+    if not f.exists():
+        return []
+    out = []
+    for g in json.loads(f.read_text()):
+        try:
+            value = _metric(g)
+        except Exception as e:  # noqa: BLE001 - an unreachable host is reported, not fatal
+            s.event("rsi.goal-failed", {"goal": g.get("id"), "error": str(e)[:300]})
+            continue
+        if value is None:
+            continue
+        off = (g.get("max") is not None and value > g["max"]) or \
+              (g.get("min") is not None and value < g["min"])
+        if off:
+            target = f"<= {g['max']}" if g.get("max") is not None else f">= {g['min']}"
+            out.append(Candidate(f"goal:{g['id']}", "goal",
+                                 f"goal {g['id']}: {g['project']} {g['metric']} is {value}, target {target}",
+                                 [{"goal": g["id"], "project": g["project"], "metric": g["metric"],
+                                   "value": value, "target": target, "host": g.get("host")}]))
+    return out
+
+
+def _metric(g: dict):
+    import subprocess
+    from .release import REMOTE_ENV, _ssh
+    cmd = ["ilk2", "report", "--project", g["project"], "--json"]
+    if g.get("host"):
+        p = subprocess.run([*_ssh(), g["host"], REMOTE_ENV + "~/.ilk2/current/venv/bin/" + " ".join(cmd)],
+                           capture_output=True, text=True, timeout=180)
+    else:
+        import sys
+        p = subprocess.run([sys.executable, "-m", "ilk2", *cmd[1:]], capture_output=True, text=True,
+                           timeout=180)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip()[-300:])
+    v = json.loads(p.stdout).get(g["metric"])
+    return v if isinstance(v, (int, float)) else None
 
 
 def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidate]:
@@ -147,6 +229,8 @@ def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidat
                 f"{b['project_id']}: the base phase takes longer than the workers",
                 {"batch": b["id"], "base_min": ph.get("base"), "dispatch_min": ph.get("dispatch")})
     out = list(found.values()) + requests(repo)
+    if repo is not None:  # Chad's inputs live with the ilk2 repo's host
+        out += issues(s) + goals(s, repo)
     return sorted(out, key=lambda c: -score(c.source, len(c.evidence)))
 
 
@@ -233,7 +317,9 @@ The candidate, found by ilk2 in its own records:
 
   evidence (most recent last): {evidence}
 
-First decide whether this is still a defect on main. The evidence may predate a fix: search the
+If the candidate is a goal (a metric off its target), plan the one step that most moves the
+metric, grounded in the evidence and the code; say not_a_defect only if no change to ilk2 can
+move it. Otherwise, first decide whether this is still a defect on main. The evidence may predate a fix: search the
 code and git log for it. Then write exactly one JSON object to the file {spec_file} at the root of
 this checkout, and stop. One of:
 

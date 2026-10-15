@@ -318,7 +318,12 @@ def measure(gate: Gate, root: Path, env: dict[str, str], workdir: Path,
     r = runner(gate, root, env, spec, workdir)
     timeouts = int("cap" in r.reason and r.transient)
     if r.outcome == "unmeasured" and r.transient:
-        r2 = runner(gate, root, env, spec, workdir)
+        # A run that hit its cap is re-run once with twice the cap, then left to a person (Chad,
+        # Oct 16: #8519's first kira batch waited 12 h overnight on a suite near its 900 s cap).
+        # Judgment call: x2; wrong if suites outgrow any fixed multiple. Still never a pass:
+        # an unmeasured gate is not green (I5).
+        again = replace(gate, cap_s=gate.cap_s * 2) if "cap" in r.reason else gate
+        r2 = runner(again, root, env, spec, workdir)
         timeouts += int("cap" in r2.reason and r2.transient)
         if r2.outcome == "unmeasured":
             r2.transient = False

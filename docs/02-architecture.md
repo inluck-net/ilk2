@@ -271,7 +271,7 @@ A gate's result is `pass`, `fail` (with the new failures), or `unmeasured` (with
 
 | Situation | Classified as |
 |---|---|
-| Harness crashed or killed by a signal; gate hit its own cap while the host was under load | `unmeasured`, transient. Re-run once on the same tree, with no new worker attempt |
+| Harness crashed or killed by a signal; gate hit its own cap while the host was under load | `unmeasured`, transient. Re-run once on the same tree, with no new worker attempt. A run that hit its cap is re-run with **twice the cap** (Chad, Oct 16: #8519's first kira batch waited 12 h overnight on a suite near its 900 s cap; judgment call: ×2, wrong if suites outgrow any fixed multiple). Unmeasured twice stays a person's call: an unmeasured gate is never a pass (I5) |
 | A single test hit its own runner timeout (vitest `testTimeout`, pytest `--timeout`), or an xdist worker crashed | A **timeout-class failure**: its fingerprint is the class, not the first frame, which is unstable for these. That test is re-run once alone, after the gate finishes. It counts as new only if it fails again on that re-run (gh-resolve review F6: 2 of 3 consumer pre-push runs failed this way, each on a different test) |
 | Runner unknown, command not found, second run also unmeasured | `unmeasured`, permanent. The step is blocked with the reason |
 | Collection error | Recorded **per file**. A file that errors at the base too is a base failure, not a batch blocker. A file that errors only after the step is a new failure |
@@ -553,6 +553,9 @@ flowchart LR
   Push --> Audit[("audit: git trailers, rsi_landings<br/>(ilk2 rsi log), rsi.* events")]
 ```
 
+- **Chad's inputs** (Oct 16) outrank everything RSI finds, and RSI reads them but never writes them:
+  - requests: `docs/rsi/requests.json`, or open GitHub issues on `inluck-net/ilk2` labelled `rsi:req` by chad007 only. The issue body is the acceptance check, and an empty one is skipped. Issues are read on the host whose host.json has `"rsi_issues": true` (chad-mbp); an unreachable GitHub is an `rsi.issues-failed` event, not a failed tick.
+  - goals: `docs/rsi/goals.json`, `[{"id", "project", "metric", "max" or "min", "host"?}]`. The metric is a number from `ilk2 report --project <p> --json`, read on the goal's host. A goal off its target becomes a candidate (weight 90), and the planner plans the one step that most moves it.
 - **Finding** (`ilk2 rsi find`, `ilk2 rsi candidates`) is plain code and idempotent. Sources by weight:
   - Chad's requests (100);
   - driver errors (50);
@@ -575,7 +578,7 @@ flowchart LR
   - **canary** (15 min): the supervisor ticks and no run ended in an error or a stall since the release, else roll back to the previous release;
   - **push** to the `rsi_hosts` (rezmac) 24 h after a verified release, only when idle there.
 
-  Refused for review, never retried: a diff touching the protected kernel (the project's `deny_paths` plus the RSI and release code and their tests), or removing a `def test_` or an `assert` line from an existing test file, or not merging cleanly, or red after merging. `ilk2 rsi log` reads back which version came from which batch and candidate. Judgment calls: 15 min and 24 h; wrong if regressions take longer to show.
+  Refused for review, never retried: a diff touching the protected kernel. Since Oct 16 the kernel has two parts. **Governance** (AGENTS.md, CLAUDE.md, `docs/rsi/**`, `.github/**`) is the ilk2 project's `deny_paths`, so no RSI attempt may edit it at all. **RSI's own machinery** (`rsi.py`, `rsi_land.py`, `release.py` and their tests) may be fixed by RSI batches, but such a batch always lands by review, or removing a `def test_` or an `assert` line from an existing test file, or not merging cleanly, or red after merging. `ilk2 rsi log` reads back which version came from which batch and candidate. Judgment calls: 15 min and 24 h; wrong if regressions take longer to show.
 - **The trigger** (`ilk2 rsi tick`, spawned by the supervisor every 30 min as its own process, never two at once) runs only when the ilk2 project has `rsi_auto`, no ilk2 batch is in flight, fewer than 2 shipped RSI branches await review (`ilk2 rsi pending`), and fewer than 3 RSI-found batches were submitted in the last 24 hours. Chad's requests skip that cap, and a cancelled batch uses no slot (Oct 15: a batch cancelled for a planner defect held the next request for half a day). Every no-op says why, and the panel shows the last one (`trigger: …`). A landing that passes its canary closes its candidate (`done`, with the version); a rollback shelves it. Judgment calls: 30 min, 2 and 3; the review queue is the real limit.
 
 ## 2.12 Code layout and size

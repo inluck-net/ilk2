@@ -31,9 +31,13 @@ from . import clock, gitops, paths
 
 CANARY_S = 15 * 60        # judgment call: a supervisor tick and a few runs; wrong if regressions hide longer
 SOAK_S = 24 * 3600        # judgment call: a day of real batches before rezmac (live consumer work)
-KERNEL = ["AGENTS.md", "CLAUDE.md", "docs/rsi/**", ".github/**", "src/ilk2/rsi.py",
-          "src/ilk2/rsi_land.py", "src/ilk2/release.py", "tests/test_rsi.py",
-          "tests/test_rsi_land.py"]
+# Governance: no RSI batch may edit these (the ilk2 project's deny_paths turn any attempt that
+# does red). Machinery: RSI may fix its own code, but such a batch always lands by review
+# (Chad, Oct 16: "go as what you recommended").
+GOVERNANCE = ["AGENTS.md", "CLAUDE.md", "docs/rsi/**", ".github/**"]
+MACHINERY = ["src/ilk2/rsi.py", "src/ilk2/rsi_land.py", "src/ilk2/release.py",
+             "tests/test_rsi.py", "tests/test_rsi_land.py"]
+KERNEL = GOVERNANCE + MACHINERY
 TRAILER = "ilk2-rsi"
 
 
@@ -136,7 +140,10 @@ def merge(s, b, repo: Path, cfg) -> dict:
     base = _git(repo, "merge-base", main, head)
     bad = touched_kernel(repo, base, head, cfg.deny_paths)
     if bad:
-        return _review(s, b, f"touches the protected kernel: {bad[:10]}")
+        from .batches import path_matches
+        what = "RSI's own machinery" if all(path_matches(f, MACHINERY) for f in bad) \
+            else "the protected kernel"
+        return _review(s, b, f"touches {what}: {bad[:10]}")
     weak = removed_tests(repo, base, head)
     if weak:
         return _review(s, b, f"removes tests or asserts: {weak[:10]}")

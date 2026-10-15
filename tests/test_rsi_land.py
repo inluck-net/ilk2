@@ -91,7 +91,8 @@ def test_a_batch_that_touches_the_kernel_waits_for_review(land):
     ilk = land
     shipped_rsi_batch(ilk, [{"write": "src/ilk2/rsi.py", "text": "CAP = 99\n"}])
     out = rsi_land.land(ilk.s)
-    assert out["did"] == "review" and "protected kernel" in out["why"]
+    # RSI may fix its own machinery (Oct 16), but never without a review
+    assert out["did"] == "review" and "RSI's own machinery" in out["why"]
 
 
 def test_a_red_suite_on_the_merged_commit_undoes_the_merge(land, monkeypatch):
