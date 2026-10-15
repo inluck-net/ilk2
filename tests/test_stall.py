@@ -360,7 +360,9 @@ def test_s23_cancel_mid_attempt(stall):
     att = stall.s.one("SELECT * FROM attempts WHERE status = 'running'")
     root = stall.s.get("batches", bid)["execution_root"]
     end = time.monotonic() + 10
-    while not procs.processes_in(root) and time.monotonic() < end:
+    # the worker has started and recorded its call: under load (an RSI batch's gate, Oct 15) a
+    # cancel that came while the stub was still starting left stub_calls() at 0
+    while not (procs.processes_in(root) and stall.stub_calls() == 1) and time.monotonic() < end:
         time.sleep(0.1)
     assert procs.processes_in(root), "the worker should be running in the root"
     assert all(p.poll() is None for p in sp.children.values())  # the driver is alive

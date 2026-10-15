@@ -244,7 +244,9 @@ this checkout, and stop. One of:
                       rule it follows, and the test it adds; self-contained: the worker sees only
                       this text and the repository>",
     "scope": ["<files the worker may change>"],
-    "must_pass": ["tests/<file>.py::<test name>, a new test that fails before the change"]}}
+    "must_pass": ["<test id only, e.g. tests/test_x.py::test_y>"]}}
+
+must_pass lists only test ids (no commentary): new tests that fail before your change.
 
 Rules for a plan: one step; a change that a reviewer can check in ten minutes; it must add a
 test that fails without the change; it updates docs/02-architecture.md or docs/06-open-items.md
@@ -287,6 +289,13 @@ def plan(s, cand, repo: Path, cfg, cap_s: float = PLAN_CAP_S) -> dict:
         if "not_a_defect" in got:
             return {"done": f"not a defect: {got['not_a_defect']}"[:1000]}
         problems = []
+        # a test id only: the first planner run copied the brief's description into each entry
+        # ('tests/x.py::test_y, a new test that ...'), which no test id ever matches
+        ids = [re.split(r"[\s,]", str(m).strip(), maxsplit=1)[0] for m in got.get("must_pass") or []]
+        bad_ids = [m for m in ids if not re.fullmatch(r"tests/[\w./-]+\.py(::[\w\[\]./-]+)*", m)]
+        if bad_ids:
+            problems.append(f"must_pass entries that are not test ids: {bad_ids[:5]}")
+        got["must_pass"] = ids
         for k in ("title", "instructions", "scope", "must_pass"):
             if not got.get(k):
                 problems.append(f"no {k}")

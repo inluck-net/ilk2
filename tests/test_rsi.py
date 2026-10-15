@@ -273,3 +273,24 @@ def test_an_unreachable_host_is_reported_not_fatal(ilk, monkeypatch, tmp_path):
     out = rsi.tick(ilk.s)
     assert out["why"] == "no open candidate"
     assert any(e["kind"] == "rsi.remote-failed" for e in ilk.s.events_since(0))
+
+
+def test_must_pass_entries_are_reduced_to_test_ids(ilk):
+    # Oct 15: the planner copied the brief's description into must_pass, so no id ever matched
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write({**PLAN, "must_pass": ["tests/test_calc.py::test_add, a new test that fails"]}))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "submitted", out
+    st = ilk.s.one("SELECT must_pass FROM steps WHERE batch_id = ?", out["batch"])
+    assert json.loads(st["must_pass"]) == ["tests/test_calc.py::test_add"]
+
+
+def test_a_must_pass_that_is_not_a_test_id_shelves_the_plan(ilk):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script(spec_write({**PLAN, "must_pass": ["the panel shows the model"]}))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "shelved" and "not test ids" in out["note"]
