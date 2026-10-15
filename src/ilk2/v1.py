@@ -76,10 +76,15 @@ def find_key(root: str | Path) -> str | None:
 
 
 def runner_alive(key: str) -> int | None:
-    """V1's runner pid for this key if it is alive. A reused pid reads as alive: the safe side."""
+    """V1's runner pid for this key if it is alive. A runner starts before it writes its pid
+    file, so a process that started after the file was last written holds a reused pid and is
+    not the runner (rezmac, Oct 15: a pid file from Sep 4 named pid 52670, by then an
+    sshd-session, and held `ilk2 v1 off`). When the start time cannot be read, a live pid
+    still reads as alive: the safe side."""
     f = data_root() / "projects" / key / "runtime" / "launcher" / "running.pid"
     try:
         m = re.search(r"\d+", f.read_text())
+        written = f.stat().st_mtime
     except OSError:
         return None
     if not m:
@@ -90,8 +95,21 @@ def runner_alive(key: str) -> int | None:
     except ProcessLookupError:
         return None
     except PermissionError:
-        return pid
+        pass
+    started = _started_epoch(pid)
+    if started is not None and started > written + 5:  # 5 s: ps reports whole seconds
+        return None
     return pid
+
+
+def _started_epoch(pid: int) -> float | None:
+    from datetime import datetime
+    from .procs import start_time
+    s = start_time(pid)
+    try:
+        return datetime.strptime(" ".join(s.split()), "%a %b %d %H:%M:%S %Y").timestamp() if s else None
+    except ValueError:
+        return None
 
 
 def unshipped(key: str) -> list[str]:

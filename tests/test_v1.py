@@ -311,3 +311,24 @@ def test_a_registration_whose_path_is_gone_is_stale_not_a_blocker(ilk, v1data, a
     assert v1.needs_v1(set()) == []
     assert v1.stale_registrations(set()) == [str(gone)]
     assert v1.switch_off(set(), apply=False)["blockers"] == []
+
+
+def test_a_pid_reused_after_the_runner_died_is_not_a_live_runner(ilk, v1data):
+    # rezmac, Oct 15: a running.pid from Sep 4 named pid 52670, by then an sshd-session.
+    import os
+    import subprocess
+    import time
+    d, key = v1data
+    f = d / "projects" / key / "runtime" / "launcher" / "running.pid"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f"{os.getpid()}\n")
+    assert v1.runner_alive(key) == os.getpid()           # this process started before the file
+    old = time.time() - 30 * 86400
+    p = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(1.2)
+        f.write_text(f"{p.pid}\n")
+        os.utime(f, (old, old))                           # the file is older than the process
+        assert v1.runner_alive(key) is None
+    finally:
+        p.kill()
