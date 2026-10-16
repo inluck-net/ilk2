@@ -111,6 +111,11 @@ def build(s, project: str | None = None) -> dict:
                         "median_minutes_to_clear": round(statistics.median(waited), 1) if waited else None},
         "refused_hours": {k: round(v, 2) for k, v in refused.items()},
         "minutes_to_first_edit_median": round(statistics.median(firsts) / 60, 2) if firsts else None,
+        # pace: per attempt, model seconds per turn; per accepted step, turns over its attempts
+        "seconds_per_turn_median": _median([tm["model_s"] / tm["turns"] for tm in
+                                            (json.loads(x["timings"] or "{}") for x in judged)
+                                            if tm.get("turns")]),
+        "turns_per_accepted_step_median": _median(_turns_per_accepted(s, project)),
     }
 
 
@@ -149,6 +154,31 @@ def phase_minutes(s, batch_id: str) -> dict[str, float]:
     return {k: round(v, 1) for k, v in sorted(mins.items(), key=lambda kv: (-kv[1], kv[0]))}
 
 
+def _median(xs):
+    return round(statistics.median(xs), 1) if xs else None
+
+
+def _turns_per_accepted(s, project) -> list[float]:
+    sql = ("SELECT st.id FROM steps st JOIN batches b ON b.id = st.batch_id WHERE st.status = "
+           "'accepted'" + (" AND b.project_id = ?" if project else ""))
+    out = []
+    for st in s.all(sql, *([project] if project else [])):
+        n = sum((json.loads(a["timings"] or "{}").get("turns") or 0)
+                for a in s.all("SELECT timings FROM attempts WHERE step_id = ?", st["id"]))
+        if n:
+            out.append(n)
+    return out
+
+
+def _pace(atts) -> dict:
+    turns = model_s = 0.0
+    for a in atts:
+        tm = json.loads(a["timings"] or "{}")
+        turns += tm.get("turns") or 0
+        model_s += tm.get("model_s") or 0
+    return {"turns": int(turns), "s_per_turn": round(model_s / turns, 1) if turns else None}
+
+
 def steps(s, batch_id: str) -> dict:
     """Per-step numbers for one batch, the baseline table later batches compare against
     (docs/evidence/2026-10-14-gh-resolve-p5-batch-baseline.md was this, by hand). Minutes are
@@ -178,7 +208,10 @@ def steps(s, batch_id: str) -> dict:
                      "carried": carried,
                      # W4 (docs/06): the largest prompt any attempt of the step reached
                      "peak_context_k": round(max([json.loads(a["timings"] or "{}").get(
-                         "peak_context_tokens") or 0 for a in atts] or [0]) / 1000)})
+                         "peak_context_tokens") or 0 for a in atts] or [0]) / 1000),
+                     # pace (kira-cloudflare-44, Oct 16): model turns over every attempt of the
+                     # step, and the model seconds per turn, so plans can be sized against it
+                     **_pace(atts)})
     done = [r for r in rows if r["status"] == "accepted"]
     first_try = [r for r in done if r["attempts"] - r["interrupted"] == 1 and r["red"] == 0]
     return {"batch": batch_id, "steps": rows,
@@ -193,13 +226,14 @@ def steps(s, batch_id: str) -> dict:
 def steps_table(r: dict) -> str:
     """The steps() result as a Markdown table, ready for docs/evidence."""
     out = ["| # | Plan · step | Kind | Status | Attempts | Red | Interrupted | Minutes | First edit | Carried "
-           "| Peak context (k tokens) |",
-           "|---|---|---|---|---|---|---|---|---|---|---|"]
+           "| Peak context (k tokens) | Turns | s/turn |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for i, x in enumerate(r["steps"], 1):
         out.append(f"| {i} | {x['plan']} · {x['idx']} {x['title'][:50]} | {x['kind']} | {x['status']} | "
                    f"{x['attempts']} | {x['red']} | {x['interrupted']} | {x['minutes']} | "
                    f"{x['first_edit_min'] if x['first_edit_min'] is not None else ''} | "
-                   f"{'yes' if x['carried'] else ''} | {x.get('peak_context_k') or ''} |")
+                   f"{'yes' if x['carried'] else ''} | {x.get('peak_context_k') or ''} | "
+                   f"{x.get('turns') or ''} | {x.get('s_per_turn') or ''} |")
     out.append(f"\n{r['accepted']} of {r['of']} steps accepted; {r['minutes_per_accepted_step']} min per "
                f"accepted step; first-attempt share {r['first_attempt_share']}.")
     phases = sorted(((k, v) for k, v in (r.get("phase_minutes") or {}).items() if v >= 0.05),

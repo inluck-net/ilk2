@@ -79,6 +79,9 @@ def test_steps_report_per_batch(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
     r = report.steps(ilk.s, bid)
     assert r["steps"][0]["peak_context_k"] == 120          # W4: largest prompt of any attempt
+    assert r["steps"][0]["turns"] >= 2 and r["steps"][0]["s_per_turn"] is not None   # pace
+    proj = report.build(ilk.s, "proj")
+    assert proj["turns_per_accepted_step_median"] >= 2 and proj["seconds_per_turn_median"] is not None
     assert r["accepted"] == 1 and r["of"] == 1 and r["first_attempt_share"] == 0.0
     row = r["steps"][0]
     assert row["kind"] == "work" and row["attempts"] == 2 and row["red"] == 1

@@ -160,6 +160,14 @@ class Dispatch:
     thinking_s: float = 0.0
     peak_context: int = 0      # largest prompt (input + cache) of any turn: docs/02 §2.6
     compactions: int = 0       # compaction system events seen in the stream
+    # Pace (kira-cloudflare-44, Oct 16: steps sized against the worker's real pace). A turn is
+    # one main-loop model response (one message id, however many stream events carry it); its
+    # model time runs from the last tool result (or the start) to the response's first event.
+    # Counted here because a session killed at the cap emits no result with num_turns.
+    turns: int = 0
+    model_s: float = 0.0
+    _turn_ids: set = field(default_factory=set)
+    _since_user: float = 0.0
     capped: bool = False
     cancelled: bool = False
     terminated: dict | None = None
@@ -181,8 +189,15 @@ class Dispatch:
             self.compactions += 1
             pre = int((ev.get("compact_metadata") or {}).get("pre_tokens") or 0)
             self.peak_context = max(self.peak_context, pre)
+        elif typ == "user":
+            self._since_user = t  # a tool result: the next turn's model time starts here
         elif typ == "assistant":
             self.timings.setdefault("first_assistant_s", t)
+            mid = (ev.get("message") or {}).get("id")
+            if not ev.get("parent_tool_use_id") and mid and mid not in self._turn_ids:
+                self._turn_ids.add(mid)
+                self.turns += 1
+                self.model_s += max(0.0, t - self._since_user)
             # main loop only: a subagent's turns (parent_tool_use_id set) have their own context
             u = {} if ev.get("parent_tool_use_id") else ((ev.get("message") or {}).get("usage") or {})
             ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
@@ -281,6 +296,7 @@ class Dispatch:
             "tool_counts": {n: self.tool_uses.count(n) for n in sorted(set(self.tool_uses))},
             "thinking_chars": self.thinking_chars, "thinking_s": round(self.thinking_s, 1),
             "peak_context_tokens": self.peak_context, "compactions": self.compactions,
+            "turns": self.turns, "model_s": round(self.model_s, 1),
             "timings": {k: round(v, 3) for k, v in self.timings.items()},
             "terminated": self.terminated,
         }

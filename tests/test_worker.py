@@ -313,3 +313,17 @@ def test_sandboxed_bare_mktemp_works(env, tmp_path):
     r = subprocess.run(["/usr/bin/sandbox-exec", "-f", str(sb), "/bin/bash", "-c",
                         'f=$(mktemp) && echo ok && rm "$f"'], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_turns_count_main_loop_responses_once_and_their_model_time():
+    # kira-cloudflare-44, Oct 16: steps sized against the worker's real pace; a session killed
+    # at the cap emits no result with num_turns, so turns are counted from the stream.
+    from ilk2.worker import Dispatch
+    d = Dispatch(proc=None, log_path=None, worktree=None, t0=0.0)
+    d._note({"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "a"}]}}, 20.0)
+    d._note({"type": "assistant", "message": {"id": "m1", "content": [{"type": "tool_use", "name": "Bash"}]}}, 21.0)
+    d._note({"type": "user", "message": {"content": []}}, 25.0)                      # tool result
+    d._note({"type": "assistant", "parent_tool_use_id": "t1",
+             "message": {"id": "sub1", "content": []}}, 26.0)                        # a subagent
+    d._note({"type": "assistant", "message": {"id": "m2", "content": []}}, 40.0)
+    assert d.turns == 2 and d.model_s == 35.0                  # 20 s (start→m1) + 15 s (25→40)

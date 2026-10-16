@@ -30,7 +30,14 @@ import time
 import uuid
 
 
+_N = [0]
+
+
 def emit(ev):
+    # each assistant message gets its own id, as Claude Code's stream does (ilk2 counts turns)
+    if ev.get("type") == "assistant" and isinstance(ev.get("message"), dict) and "id" not in ev["message"]:
+        _N[0] += 1
+        ev["message"]["id"] = f"msg_stub_{_N[0]}"
     sys.stdout.write(json.dumps(ev) + "\n")
     sys.stdout.flush()
 
