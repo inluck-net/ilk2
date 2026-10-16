@@ -265,6 +265,14 @@ Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the st
 
 Fix: any step entered with kept work runs its gates first, as verification steps already did, so the brief carries the current failures. The run isn't counted and is never accepted, because the session was interrupted (`test_kept_work_is_gated_before_the_worker_so_its_brief_is_current`, failing before). §2.4. Owed paths no longer reach a fresh brief, because they are not failures.
 
+### A shell gate red at the base pulls unrelated fixes into a step (found Oct 16, open: Chad)
+
+On rezmac kira-live #8644 (b-5206fa7e6324), step 0's commit ca183b96b also edited an unrelated Apple Messages PRD (+33), its README (+1) and `scripts/check-prd-boundary-current.ts` (+11).
+- **The cause is ilk2's rule.** The gate `bash scripts/consistency-regression.sh` was red at the base, 4abda25, the existing `resolver-8644` head ("2 regression(s) found"). A shell gate is judged absolutely (§2.5.1, B5): it must exit 0 after the step, so the worker had to fix someone else's regressions.
+- **Not an isolation leak.** Session f5fe3d6a was new to this step, and the root was the batch's own worktree.
+- **Proposed (a):** a shell gate from the sub-plan frontmatter (plan-wide, a regression check) passes when it was red at the base and its normalised output is unchanged, and the brief says so. A step's own local_checks stay absolute, since those are its acceptance checks. Judgment call: plan-wide vs step-level as the line between regression and acceptance; wrong if plans put acceptance checks in the frontmatter.
+- **Alternative (b), on gh-resolve's side:** render such checks only when green at the base.
+
 ### Speed levers from docs/03 §3.4 that were never built (found Oct 16)
 
 kira-cloudflare-44 measured support piece A's step 0 timing out at the 3600 s attempt cap. It made 154 tool calls, spent about 3150 s in model turns at ~20 s per turn, and made its first edit at 1007 s; all its gates passed on the kept work. docs/03 §3.4 promises three levers that would address this, and none is built:
