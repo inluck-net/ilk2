@@ -149,6 +149,12 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     attention = [b for b in batches if b["status"] == "blocked" or b["id"] in by_batch]
     hostwide = by_batch.get(None, [])
     running = [b for b in batches if b["status"] in LIVE and b["id"] not in by_batch]
+    # Running first, then queued; and only the running ones are counted as running (Chad,
+    # Oct 16: "ilk2 ▶ 5" while 3 ran and 2 waited for a host slot).
+    running.sort(key=lambda b: b["status"] == "queued")
+    n_queued = sum(1 for b in running if b["status"] == "queued")
+    n_running = len(running) - n_queued
+    queued_note = f" (+{n_queued} queued)" if n_queued else ""
     rsi_st = st.get("rsi") or {}
     # Only a branch a person must look at needs you: held for review, or landing switched off.
     # One that simply has not landed yet is shown in the RSI section (Oct 15: "awaits review"
@@ -165,7 +171,7 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
     elif n_need:
         title = f"ilk2 ⚠ {n_need}{sign} | color=orange"
     elif running:
-        title = f"ilk2 ▶ {len(running)}{sign}"
+        title = f"ilk2 ▶ {n_running}{queued_note}{sign}"
     else:
         title = f"ilk2 ok{sign}"
     out = [title, "---"]
@@ -209,7 +215,8 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
         out.append(f"{p['batch']} [{p.get('ref') or ''}] ilk2: RSI branch {p['branch']} needs review")
         out.append(f"--review: git log main..{p['branch']} | font=Menlo size=11")
 
-    out += ["---", f"▶ running ({len(running)})" + ("" if running else "  — none")]
+    out += ["---", f"▶ running ({n_running})" + (f" · queued ({n_queued})" if n_queued else "")
+            + ("" if running else "  — none")]
     for b in running:
         ref = f" [{b['consumer_ref']}]" if b.get("consumer_ref") else ""
         steps = _steps(b)

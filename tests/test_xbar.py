@@ -352,3 +352,16 @@ def test_the_worker_template_never_leaks_other_keys_into_the_menu(ilk, capsys):
     out = capsys.readouterr().out
     assert "worker model: cfg-model" in out.splitlines()
     assert "sekret-token" not in out and "sekret-helper" not in out
+
+
+def test_queued_batches_are_not_counted_as_running():
+    # Chad, Oct 16: the title said "ilk2 ▶ 5" while 3 ran and 2 waited for a host slot.
+    st = {"batches": [batch("b-q1", "queued", [("x", "pending", 0)]),
+                      batch("b-a1", "active", [("y", "pending", 1)]),
+                      batch("b-q2", "queued", [("z", "pending", 0)]),
+                      batch("b-a2", "active", [("w", "pending", 1)])], "needs_human": []}
+    out = xbar.render(st, tick_age=5, stale=180)
+    assert title(out) == "ilk2 ▶ 2 (+2 queued)"
+    assert "▶ running (2) · queued (2)" in out
+    ids = [ln.split()[0] for ln in out.splitlines() if ln.startswith("b-")]
+    assert ids == ["b-a1", "b-a2", "b-q1", "b-q2"]               # running first
