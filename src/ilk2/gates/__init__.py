@@ -53,6 +53,7 @@ class GateRun:
     tail: str = ""
     timeouts: int = 0                # gate-cap hits, for host-load admission (§2.11.1)
     reruns: int = 0                  # extra runs measure() made after a transient unmeasured
+    red_lines: list[str] = field(default_factory=list)  # a shell gate's failing output lines
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -279,6 +280,22 @@ def rerun_alone(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir:
     return run_pytest(g, root, env, spec, workdir).outcome == "pass"
 
 
+_RED_MARK = re.compile(r"❌|🚨|✗|✘|\bFAIL(?:ED)?\b|\bERROR\b|\b[Ee]rror:")
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def red_lines(out: str, root: str | None = None) -> list[str]:
+    """The failing lines of a shell check's whole output: the lines with a failure marker,
+    without colour codes or volatile paths, digits kept (a third regression is not the same as
+    two). Compared with the base's for a plan-wide check (judge_inherited_red)."""
+    lines = set()
+    for ln in out.splitlines():
+        ln = _ANSI.sub("", ln)
+        if _RED_MARK.search(ln):
+            lines.add(normalize_message(ln, root)[:300])
+    return sorted(lines)
+
+
 def run_shell(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: Path) -> GateRun:
     """A check with plain exit-code meaning (lint, type check, build; §2.5.1). It reports one
     pseudo-test, `<gate>::<exit>`, so a red result is a failure the judge can see. It must be
@@ -297,6 +314,7 @@ def run_shell(gate: Gate, root: Path, env: dict[str, str], spec: str, workdir: P
         run.outcome, run.reason, run.transient = "unmeasured", f"killed by signal {-rc}", True
     elif rc != 0:
         tid = f"{gate.name}::<exit>"
+        run.red_lines = red_lines(out, str(root))
         last = next((ln for ln in reversed(out.splitlines()) if ln.strip()), "")
         run.outcome, run.reason = "fail", f"exit {rc}"
         run.failures[tid] = Failure(tid, fingerprint("exit", f"exit {rc}: {last}", [], str(root)),

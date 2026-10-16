@@ -1367,3 +1367,56 @@ def test_a_batch_records_how_far_its_base_is_behind_the_default_branch(ilk, tmp_
     assert cli.main(["submit", str(spec), "--project", "proj", "--check"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["base_behind"]["commits"] == 3 and "refresh the branch first" in out["warnings"][0]
+
+
+PLAN_WIDE = """---
+plan: issue-1-work-x
+status: pending
+local_checks:
+  - command: bash check.sh
+  - command: python -m pytest -q -p no:cacheprovider tests/test_calc.py
+scope_paths:
+  - "calc.py"
+---
+
+## Steps
+
+### Step 0
+
+Fix add.
+"""
+CHECK_SH = 'n=$(grep -c . regressions.txt); while read -r l; do echo "❌ $l"; done < regressions.txt; ' \
+           '[ "$n" -gt 0 ] && { echo "🚨 $n regression(s) found"; exit 1; }; exit 0\n'
+
+
+def plan_wide_repo(ilk, text=PLAN_WIDE):
+    ilk.make_repo({"calc.py": "def add(a, b):\n    return a - b\n", "check.sh": CHECK_SH,
+                   "regressions.txt": "prd inventory missing apple-messages\nprd boundary snippet\n",
+                   "tests/conftest.py": "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+                   "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(1, 2) == 3\n"})
+    ilk.project()
+    from ilk2 import batches as b_, plans
+    return b_.submit(ilk.s, "proj", plans.BatchSpec(plans=[plans.parse_v1_subplan(text)]))
+
+
+def test_a_plan_wide_check_red_at_the_base_does_not_make_the_step_fix_it(ilk):
+    # gh-resolve #8644 (Chad's go, Oct 16): consistency-regression.sh was red at a stale base, and
+    # the absolute rule made the worker fix two unrelated PRD regressions.
+    bid = plan_wide_repo(ilk)
+    ilk.script([GOOD])
+    assert ilk.drive_inprocess(bid) == "shipped"
+    ev = [e["payload"] for e in ilk.s.events_since(0, bid) if e["kind"] == "gate.inherited-red"]
+    assert ev and any("prd inventory" in ln for ln in ev[0]["lines"])
+    b = ilk.s.get("batches", bid)
+    changed = ilk.git(ilk.repo, "diff", "--name-only", f"{b['base_commit']}..{b['branch']}")
+    assert changed == "calc.py"                                   # the PRD regressions untouched
+
+
+def test_a_new_regression_in_a_plan_wide_check_is_still_red_and_named(ilk):
+    bid = plan_wide_repo(ilk, PLAN_WIDE.replace('  - "calc.py"', '  - "calc.py"\n  - "regressions.txt"'))
+    third = {"append": "regressions.txt", "text": "a new one this step made\n"}
+    ilk.script([GOOD, third], [GOOD, third], [GOOD, third], [GOOD, third], [GOOD, third])
+    assert ilk.drive_inprocess(bid) == "blocked"
+    ev = ilk.s.one("SELECT evidence FROM attempts WHERE evidence IS NOT NULL ORDER BY created_at LIMIT 1")
+    assert "new since the batch base" in ev["evidence"] and "a new one this step made" in ev["evidence"]
+    assert "prd inventory" not in ev["evidence"].split("new since the batch base")[1].split("\n")[0]

@@ -48,6 +48,10 @@ class Gate:
     # Imported from a V1 local_checks entry: an exit-code check unless it resolves to a test
     # runner (V1 semantics; gh-resolve's kira plans gate on `bun run typecheck:convex`, Oct 14).
     from_v1: bool = False
+    # From a V1 sub-plan's frontmatter local_checks: applied to every step, so a regression
+    # check, not a step's acceptance check. A shell one red at the base is judged against the
+    # base (gh-resolve #8644, Chad's go Oct 16); a step's own shell checks stay absolute (B5).
+    plan_wide: bool = False
 
 
 @dataclass
@@ -213,7 +217,10 @@ def _frontmatter_checks(text: str) -> list[Gate]:
         return []
     rest = fm[k.end():]
     end = re.search(r"(?m)^\S", rest)  # the next top-level key ends the block
-    return _block_gates(rest[: end.start()] if end else rest) or []
+    gates = _block_gates(rest[: end.start()] if end else rest) or []
+    for g in gates:
+        g.plan_wide = True
+    return gates
 
 
 def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:

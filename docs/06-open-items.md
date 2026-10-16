@@ -265,7 +265,7 @@ Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the st
 
 Fix: any step entered with kept work runs its gates first, as verification steps already did, so the brief carries the current failures. The run isn't counted and is never accepted, because the session was interrupted (`test_kept_work_is_gated_before_the_worker_so_its_brief_is_current`, failing before). §2.4. Owed paths no longer reach a fresh brief, because they are not failures.
 
-### A shell gate red at the base pulls unrelated fixes into a step (found Oct 16, open: Chad)
+### A shell gate red at the base pulls unrelated fixes into a step (found Oct 16; (a) built on Chad's go)
 
 On rezmac kira-live #8644 (b-5206fa7e6324), step 0's commit ca183b96b also edited an unrelated Apple Messages PRD (+33), its README (+1) and `scripts/check-prd-boundary-current.ts` (+11).
 - **The cause is ilk2's rule.** The gate `bash scripts/consistency-regression.sh` was red at the base, 4abda25, the existing `resolver-8644` head ("2 regression(s) found"). A shell gate is judged absolutely (§2.5.1, B5): it must exit 0 after the step, so the worker had to fix someone else's regressions.

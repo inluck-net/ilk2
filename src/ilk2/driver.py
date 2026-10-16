@@ -395,6 +395,29 @@ class Driver:
                     out.append(Gate(**g))
         return out
 
+    def _red_key(self, gate: Gate, spec: str, commit: str, batch_id: str | None = None) -> str:
+        return f"base-red:{batch_id or self.batch_id}:{gate.name}:{spec}:{commit[:12]}"
+
+    def _set_meta(self, key: str, value: str) -> None:
+        with self.s.tx() as c:
+            c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE "
+                      "SET value = excluded.value", (key, value))
+
+    def inherited_red(self, gate: Gate, spec: str, r) -> tuple[bool, list[str]]:
+        """A plan-wide shell check red after the step: (inherited, new failing lines). Inherited
+        when it was red at the batch base and every failing line it reports now was already
+        reported there; with no marker lines on either side, when its failure fingerprint is
+        unchanged. gh-resolve #8644 (Chad's go, Oct 16): consistency-regression.sh was red at a
+        stale base, and the absolute rule made the worker fix two unrelated PRD regressions."""
+        row = self.s.one("SELECT value FROM meta WHERE key = ?", self._red_key(gate, spec, self.base))
+        if not row:
+            return False, r.red_lines
+        base = json.loads(row["value"])
+        new = [ln for ln in r.red_lines if ln not in set(base.get("lines") or [])]
+        if r.red_lines or base.get("lines"):
+            return not new, new
+        return r.failure_map() == (base.get("failures") or {}), []
+
     def measure_base(self, gate: Gate, where: Path, commit: str) -> dict[str, str] | None:
         env = self.env()
         spec = gates.spec_version(gate, where, env)
@@ -421,6 +444,10 @@ class Driver:
                                                 "failures": prior["failures"], "at": prior["at"]})
             self.event("base.reused", gate=gate.name, commit=commit, from_batch=prior["batch_id"],
                        age_s=round(clock.wall() - prior["at"]))
+            red = self.s.one("SELECT value FROM meta WHERE key = ?",
+                             self._red_key(gate, spec, commit, prior["batch_id"]))
+            if red:
+                self._set_meta(self._red_key(gate, spec, commit), red["value"])
             return json.loads(prior["failures"])
         t0 = time.monotonic()
         r = gates.measure(gate, where, env, self.dir / "gates", spec)
@@ -437,6 +464,10 @@ class Driver:
         # A shell gate red at the base is recorded, not blocking: it is judged absolutely after
         # its step (run_gates), never against this base (§2.5.1, revised Oct 13).
         failures = r.failure_map()
+        if gate.adapter == "shell" and r.outcome == "fail":
+            # what a plan-wide check already reported at the base (judge_inherited_red)
+            self._set_meta(self._red_key(gate, spec, commit),
+                           json.dumps({"lines": r.red_lines, "failures": failures}))
         self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
                                             "spec_version": spec, "commit_sha": commit,
                                             "outcome": r.outcome, "failures": dumps(failures),
@@ -1023,6 +1054,17 @@ class Driver:
                 # unchanged red (same exit, same output) pass vacuously (B5).
                 base = {}
             v = gates.judge(r, base, expect_red, obligations=False)
+            if gate.adapter == "shell" and gate.plan_wide and v.outcome == "fail":
+                inherited, new = self.inherited_red(gate, spec, r)
+                if inherited:
+                    v.outcome, v.new_failures = "pass", []
+                    self.event("gate.inherited-red", gate=gate.name, step=step["id"],
+                               lines=r.red_lines[:20])
+                elif new and self.s.one("SELECT 1 FROM meta WHERE key = ?",
+                                        self._red_key(gate, spec, self.base)):
+                    # red at the base too: only the new lines are this step's to fix
+                    v.new_failures = [f"{gate.name}: new since the batch base (already-red lines "
+                                      f"there are not yours to fix): {ln}" for ln in new[:20]]
             missing = r.missing_paths
             owed = self.owed_elsewhere(step, missing) if missing else {}
             if owed:
