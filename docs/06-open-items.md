@@ -265,6 +265,15 @@ Lifecycle's attempt 1 was red only on `test_50b` ("declared, absent after the st
 
 Fix: any step entered with kept work runs its gates first, as verification steps already did, so the brief carries the current failures. The run isn't counted and is never accepted, because the session was interrupted (`test_kept_work_is_gated_before_the_worker_so_its_brief_is_current`, failing before). §2.4. Owed paths no longer reach a fresh brief, because they are not failures.
 
+### Speed levers from docs/03 §3.4 that were never built (found Oct 16)
+
+kira-cloudflare-44 measured support piece A's step 0 timing out at the 3600 s attempt cap. It made 154 tool calls, spent about 3150 s in model turns at ~20 s per turn, and made its first edit at 1007 s; all its gates passed on the kept work. docs/03 §3.4 promises three levers that would address this, and none is built:
+- **The worker model as a per-project setting.** Today every worker uses the template's model, mimo-v2.6-pro, inherited from V1 (docs/03:3). The "Oct 14 flash trial" it names as the first input left no evidence.
+- **Effort and thinking settings per project.**
+- **An import-time warning on steps whose scope spans many files or modules.**
+
+The attempt cap is one global bound, `bounds.attempt_cap` = 3600 s (Q7, a judgment call). Open: the mechanisms are ilk2's to build; which model and settings each project uses is Chad's decision.
+
 ## RSI: ilk2 improves itself (Chad, Oct 14: "Reviewed RSI first")
 
 **What it is.** ilk2 runs batches on its own repository, as the ilk2 project `ilk2` on chad-mbp. A batch's step gates are ilk2's full suite (`pytest -n 4`, about 2 min), with red-first checks on the step's new tests. A setup hook (`uv sync --locked`) builds each worktree's virtualenv from the shared uv cache.
