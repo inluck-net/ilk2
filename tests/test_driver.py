@@ -1306,3 +1306,35 @@ def test_recovery_runs_record_when_they_ended(ilk):
                      "IN ('park-recovery', 'cancel-recovery')")
     assert {r["terminal_reason"] for r in rows} == {"park-recovery", "cancel-recovery"}
     assert all(r["ended_at"] is not None and r["ended_at"] >= r["created_at"] for r in rows)
+
+
+def test_status_says_when_a_batch_shipped_and_what_its_root_deps_were_installed_for(ilk):
+    # gh-resolve D-549/D-550, Oct 16: a probe linked a root's node_modules installed for a
+    # lockfile 900 lines behind its base, and a shipped batch had no ship time to cap reap with.
+    from ilk2 import cli
+    files = {"calc.py": "def add(a, b):\n    return a - b\n", "uv.lock": "version = 1\n",
+             "tests/conftest.py": "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n",
+             "tests/test_calc.py": "from calc import add\ndef test_add():\n    assert add(1, 2) == 3\n"}
+    ilk.make_repo(files)
+    ilk.project(setup={"command": ["python", "-c", "open('installed', 'w').write('x')"], "cap_s": 60})
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    (b,) = cli.status(ilk.s, bid)["batches"]
+    assert b["shipped_at"] and b["shipped_at"] >= ilk.s.get("batches", bid)["created_at"]
+    su = b["setup"]
+    assert su["ok"] is True and su["lock_digest"] and su["commit"] and su["deps_current"] is True
+    assert su["seconds"] >= 0
+    Path(b["execution_root"], "uv.lock").write_text("version = 2\n")      # a merge changed it
+    assert cli.status(ilk.s, bid)["batches"][0]["setup"]["deps_current"] is False
+
+
+def test_status_without_a_setup_hook_has_no_setup_record(ilk):
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    (b,) = cli.status(ilk.s, bid)["batches"]
+    assert b["setup"] is None and b["shipped_at"]

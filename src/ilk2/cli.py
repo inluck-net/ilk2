@@ -53,6 +53,24 @@ def _meta(arg: str | None) -> dict | None:
         raise batches.SubmitRejected([f"--meta is not readable JSON: {e}"])
 
 
+def _root_setup(s, b) -> dict | None:
+    """The latest setup run in the batch's execution root, and whether the root's lockfiles
+    still match what it installed (deps_current: false after a merge changed them; null when
+    the root is gone). None when no setup ran there (no setup hook, or before activation)."""
+    from .driver import lock_digest
+    root = b["execution_root"]
+    for e in reversed(s.all("SELECT payload, at FROM events WHERE batch_id = ? AND kind = "
+                            "'setup.ran' ORDER BY cursor", b["id"])):
+        p = json.loads(e["payload"])
+        if p.get("where") != root:
+            continue
+        now = lock_digest(Path(root)) if Path(root).is_dir() else None
+        return {"commit": p.get("commit"), "lock_digest": p.get("lock_digest"), "ok": p.get("ok"),
+                "seconds": p.get("seconds"), "at": e["at"],
+                "deps_current": (now == p.get("lock_digest")) if Path(root).is_dir() else None}
+    return None
+
+
 def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
     from . import lease
     if batch_id:
@@ -91,7 +109,13 @@ def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
                     "root_lease": dict(lr) if lr else None,
                     "accepted_head": lr["accepted_head"] if lr else None, "plans": plans,
                     "refusals": [dict(r) for r in s.open_refusals(b["id"])],
-                    "meta": json.loads(b["snapshot"]).get("meta")})
+                    "meta": json.loads(b["snapshot"]).get("meta"),
+                    # gh-resolve D-549/D-550 (Oct 16): when the batch shipped, and what the
+                    # execution root's dependencies were installed for
+                    "shipped_at": (s.one("SELECT MAX(at) t FROM transitions WHERE entity = 'batches' "
+                                         "AND entity_id = ? AND to_state = 'shipped'", b["id"])
+                                   or {"t": None})["t"],
+                    "setup": _root_setup(s, b)})
     if consumer_ref and not batch_id:
         nh = [dict(r) for b in rows for r in s.open_human_rows(b["id"])]
     else:

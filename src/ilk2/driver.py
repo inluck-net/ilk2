@@ -28,6 +28,20 @@ LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lo
              "uv.lock", "poetry.lock", "Pipfile.lock"}
 
 
+def lock_digest(where: Path) -> str | None:
+    """A digest of the lockfiles at the top of a worktree: what a setup installed for. None
+    when there is none. gh-resolve, Oct 16: a probe linked a root's node_modules installed for a
+    lockfile 900 lines behind its base, and nothing could say so."""
+    import hashlib
+    h, seen = hashlib.sha256(), False
+    for name in sorted(LOCKFILES):
+        f = Path(where) / name
+        if f.is_file():
+            h.update(name.encode() + b"\0" + f.read_bytes())
+            seen = True
+    return h.hexdigest()[:16] if seen else None
+
+
 # Run endings that are not a failure of the run: they never consume a restart (§2.10).
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
@@ -350,13 +364,23 @@ class Driver:
     def setup(self, where: Path) -> None:
         cmd, cap = self.cfg.setup["command"], self.cfg.setup.get("cap_s", self.b.setup_cap)
         g = Gate(name="setup", adapter="shell", command=cmd, cap_s=int(cap), declares_tests=False)
+        t0 = time.monotonic()
+
+        def ran(ok: bool, tries: int) -> None:
+            # What this worktree's dependencies were installed for (status --batch: 'setup')
+            self.event("setup.ran", where=str(where), ok=ok, tries=tries,
+                       seconds=round(time.monotonic() - t0, 1),
+                       commit=gitops.git(where, "rev-parse", "HEAD", check=False) or None,
+                       lock_digest=lock_digest(where))
         for i in range(2):
             rc, out, capped, _ = gates._run(cmd, where, self.env(), g.cap_s)
             if rc == 0:
+                ran(True, i + 1)
                 return
             transient = capped or (rc is not None and rc < 0) or "ETIMEDOUT" in out \
                 or "network" in out.lower() or "ECONNRESET" in out
             if not transient or i == 1:
+                ran(False, i + 1)
                 self.block_batch("setup", f"setup failed (exit {rc}): {out[-1500:]}",
                                  "fix the setup, then: ilk2 resume " + self.batch_id)
 
