@@ -236,6 +236,37 @@ class SubmitRejected(ValueError):
         self.problems = problems
 
 
+BASE_BEHIND_WARN = (50, 2.0)  # judgment call (gh-resolve agreed, Oct 16): commits, days
+
+
+def base_behind(repo: Path, base_sha: str, default_branch: str) -> dict | None:
+    """How far a batch's base is behind origin/<default branch>: commits and days (the tip's
+    commit time minus the base's). gh-resolve D-555, Oct 16: #8644 built on a stale dev commit
+    whose consistency check and chunk test were already red. Fetched first, best effort: an
+    unreachable remote measures against the last fetched tip. None when there is no remote tip."""
+    gitops.git(repo, "fetch", "-q", "origin", default_branch, check=False)
+    tip = gitops.rev(repo, f"origin/{default_branch}")
+    if not tip or not base_sha:
+        return None
+    n = gitops.git(repo, "rev-list", "--count", f"{base_sha}..{tip}", check=False)
+    try:
+        t_tip = int(gitops.git(repo, "show", "-s", "--format=%ct", tip))
+        t_base = int(gitops.git(repo, "show", "-s", "--format=%ct", base_sha))
+    except (ValueError, gitops.GitError):
+        return None
+    return {"commits": int(n or 0), "days": round(max(0, t_tip - t_base) / 86400, 1),
+            "default": f"origin/{default_branch}", "tip": tip[:12]}
+
+
+def base_warning(bb: dict | None) -> str | None:
+    if not bb:
+        return None
+    if bb["commits"] >= BASE_BEHIND_WARN[0] or bb["days"] >= BASE_BEHIND_WARN[1]:
+        return (f"base is {bb['commits']} commits and {bb['days']} days behind {bb['default']} "
+                f"({bb['tip']}): a run inherits its breakage; refresh the branch first")
+    return None
+
+
 def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None = None,
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
            originals: dict | None = None, branch: str | None = None,
@@ -309,6 +340,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         # here. The driver checks out this batch's branch once it holds the lease (R4).
         root = root.resolve()
     snapshot = spec.to_dict()
+    snapshot["base_behind"] = base_behind(repo, base_sha, proj["default_branch"])
     if deny_paths:
         snapshot["deny_paths"] = list(deny_paths)  # submit --deny-path: this batch only, additive
     if meta is not None:

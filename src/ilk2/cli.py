@@ -115,7 +115,8 @@ def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
                     "shipped_at": (s.one("SELECT MAX(at) t FROM transitions WHERE entity = 'batches' "
                                          "AND entity_id = ? AND to_state = 'shipped'", b["id"])
                                    or {"t": None})["t"],
-                    "setup": _root_setup(s, b)})
+                    "setup": _root_setup(s, b),
+                    "base_behind": json.loads(b["snapshot"]).get("base_behind")})
     if consumer_ref and not batch_id:
         nh = [dict(r) for b in rows for r in s.open_human_rows(b["id"])]
     else:
@@ -447,10 +448,23 @@ def main(argv: list[str] | None = None) -> int:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
             if a.check:
+                proj = s.get("projects", a.project)
+                repo = Path(proj["repo_root"])
+                base_sha = gitops.rev(repo, a.branch or a.base or proj["default_branch"])
+                bb = batches.base_behind(repo, base_sha, proj["default_branch"]) if base_sha else None
+                warn = batches.base_warning(bb)
                 _out({"ok": True, "plans": len(spec.plans),
-                      "steps": sum(len(p.steps) for p in spec.plans)}, True)
+                      "steps": sum(len(p.steps) for p in spec.plans), "base_behind": bb,
+                      **({"warnings": [warn]} if warn else {})}, True)
             else:
-                _out({"batch": bid}, a.json) if a.json else print(bid)
+                bb = json.loads(s.get("batches", bid)["snapshot"]).get("base_behind")
+                warn = batches.base_warning(bb)
+                if a.json:
+                    _out({"batch": bid, "base_behind": bb, **({"warnings": [warn]} if warn else {})}, True)
+                else:
+                    print(bid)
+                    if warn:
+                        print(f"warning: {warn}", file=sys.stderr)
         elif a.cmd == "status":
             _out(status(s, a.batch, a.consumer_ref), a.json)
         elif a.cmd == "events":

@@ -1338,3 +1338,32 @@ def test_status_without_a_setup_hook_has_no_setup_record(ilk):
     assert ilk.drive_inprocess(bid) == "shipped"
     (b,) = cli.status(ilk.s, bid)["batches"]
     assert b["setup"] is None and b["shipped_at"]
+
+
+def test_a_batch_records_how_far_its_base_is_behind_the_default_branch(ilk, tmp_path, monkeypatch, capsys):
+    # gh-resolve D-555, Oct 16: #8644 built on a stale dev commit whose checks were already red.
+    import subprocess as sp
+    from ilk2 import batches as b_, cli
+    ilk.make_repo()
+    origin = tmp_path / "origin.git"
+    sp.run(["git", "clone", "-q", "--bare", str(ilk.repo), str(origin)], check=True)
+    ilk.git(ilk.repo, "remote", "add", "origin", str(origin))
+    other = tmp_path / "other"
+    sp.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    for i in range(3):                                         # dev moves on by 3 commits
+        sp.run(["git", "-C", str(other), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                "--allow-empty", "-m", f"dev {i}"], check=True)
+    sp.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True)
+    ilk.project()
+    bid = ilk.submit(one_step())                               # base: the local main, now behind
+    (b,) = cli.status(ilk.s, bid)["batches"]
+    assert b["base_behind"]["commits"] == 3 and b["base_behind"]["default"] == "origin/main"
+    assert b_.base_warning(b["base_behind"]) is None           # under the default threshold
+    monkeypatch.setattr(b_, "BASE_BEHIND_WARN", (2, 99.0))
+    assert "3 commits" in b_.base_warning(b["base_behind"])
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(one_step()))
+    capsys.readouterr()
+    assert cli.main(["submit", str(spec), "--project", "proj", "--check"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["base_behind"]["commits"] == 3 and "refresh the branch first" in out["warnings"][0]
