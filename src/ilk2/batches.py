@@ -371,7 +371,79 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         lease.init_driver(s, str(root), base_sha)
         s.event("submitted", {"priority": priority, "plans": len(spec.plans),
                               "steps": sum(len(p.steps) for p in spec.plans)}, batch_id=bid)
+        for w in plan_warnings(spec):
+            s.event("submit.warning", w, batch_id=bid)
     return bid
+
+
+# -- plan-shape warnings (docs/07 §7.4.1): telemetry, never a refusal -----------------------
+
+# Per plan, per step: a V1 sub-plan's steps share its preamble and plan-level scope, so a step's
+# own section (0.9-1.9k chars in both 17d and 17e) says nothing about its size. Over 53 gh-resolve
+# plans whose steps all shipped (Oct 17), files per step and characters per step each rank with
+# minutes per step at Spearman 0.45-0.48; 18 plans averaged > 40 min per step.
+FILES_PER_STEP_MAX = 6        # judgment call: flags 16 of 53 plans, 10 of them slow; misses 8 slow
+CHARS_PER_STEP_MAX = 12_000   # judgment call: flags 15 of 53, 10 of them slow; misses 8 slow
+
+
+def _own(instructions: str) -> str:
+    """A V1 step's own section; a JSON step's instructions are all its own."""
+    i = instructions.rfind("\n### Step ")
+    return instructions[i:] if i >= 0 else instructions
+
+
+def plan_warnings(spec: plans.BatchSpec) -> list[dict]:
+    """Shapes that made batch 17d slow (docs/evidence E5). Wrong if plans past these bounds prove
+    as fast and reliable per step; they are measured, not enforced."""
+    out = []
+    for p in spec.plans:
+        if p.verification or not p.steps:
+            continue
+        n = len(p.steps)
+        files = len({x for st in p.steps for x in st.scope}) / n
+        shared = len(p.steps[0].instructions) - len(_own(p.steps[0].instructions))
+        chars = (shared + sum(len(_own(st.instructions)) for st in p.steps)) / n
+        if files > FILES_PER_STEP_MAX:
+            out.append({"kind": "files-per-step", "plan": p.slug, "steps": n, "value": round(files, 1),
+                        "limit": FILES_PER_STEP_MAX})
+        if chars > CHARS_PER_STEP_MAX:
+            out.append({"kind": "chars-per-step", "plan": p.slug, "steps": n, "value": round(chars),
+                        "limit": CHARS_PER_STEP_MAX})
+    chain = serial_chain(spec)
+    if chain:
+        out.append({"kind": "serial-chain", "disjoint": chain})
+    return out
+
+
+def serial_chain(spec: plans.BatchSpec) -> list[list[str]]:
+    """Pairs of work plans that dependencies alone keep apart although their scopes are disjoint,
+    when the dependencies (followed transitively) put every work plan in one line, so no two
+    can run in lanes. Direct lists (17d: each plan names every earlier one) and chains
+    (B→A, C→B) count alike. [] when any two plans are unordered, or every ordered pair shares
+    files."""
+    work = [p for p in spec.plans if not p.verification]
+    deps = {p.slug: set(p.depends_on) for p in work}
+
+    def reach(a: str) -> set[str]:
+        seen, todo = set(), list(deps.get(a, ()))
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(deps.get(d, ()))
+        return seen
+
+    up = {p.slug: reach(p.slug) for p in work}
+    pairs = [(a, b) for i, a in enumerate(work) for b in work[i + 1:]]
+    if len(work) < 2 or any(a.slug not in up[b.slug] and b.slug not in up[a.slug] for a, b in pairs):
+        return []
+
+    def overlap(x: list[str], y: list[str]) -> bool:
+        return any(path_matches(u, [v]) or path_matches(v, [u]) for u in x for v in y)
+
+    scope = {p.slug: [x for st in p.steps for x in st.scope] for p in work}
+    return [[a.slug, b.slug] for a, b in pairs
+            if scope[a.slug] and scope[b.slug] and not overlap(scope[a.slug], scope[b.slug])]
 
 
 # -- human and consumer controls (§2.8, §2.11.1) --------------------------------------------

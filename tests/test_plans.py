@@ -431,3 +431,69 @@ def test_a_write_bullet_under_a_denied_path_is_refused(ilk):
     ilk.project(deny_paths=["migrations/"])
     with pytest.raises(batches.SubmitRejected, match="denied paths"):
         ilk.submit(one_step(instructions="1. **Write** `migrations/0003.py`: the new table"))
+
+
+# -- plan-shape warnings (docs/07 §7.4.1) --------------------------------------------------
+
+def _plans(*specs) -> plans.BatchSpec:
+    """specs: (slug, depends_on, scope, instructions)."""
+    g = [{"name": "unit", "command": "python3 -m pytest tests/a.py"}]
+    return plans.from_dict({"plans": [
+        {"slug": s, "depends_on": d, "steps": [{"title": "t", "instructions": ins, "scope": sc, "gates": g}]}
+        for s, d, sc, ins in specs]})
+
+
+def test_size_warnings_are_per_plan_per_step_and_fire_past_their_limits_only():
+    from ilk2 import batches
+    ok = _plans(("a", [], [f"f{i}.py" for i in range(6)], "x" * 12_000))
+    assert batches.plan_warnings(ok) == []
+    big = _plans(("a", [], [f"f{i}.py" for i in range(7)], "x" * 12_001))
+    assert {(w["kind"], w["value"]) for w in batches.plan_warnings(big)} == {
+        ("files-per-step", 7), ("chars-per-step", 12_001)}
+
+
+def test_a_v1_plan_split_into_small_steps_does_not_warn():
+    # 17e's shape: one 36k-char sub-plan with 11 files of plan-level scope, split into 7 steps.
+    # Each step repeats the preamble and scope; per step the plan is small.
+    pre = "## Objectives\n" + "o" * 34_000 + "\n\n"
+    text = "---\nplan: p\nscope_paths:\n" + "".join(f"  - f{i}.py\n" for i in range(11)) + "---\n\n" + pre + \
+        "## Steps\n\n" + "".join(f"### Step {i} — part {i}\n```yaml\nlocal_checks:\n"
+                                   f"  - command: python -m pytest -q tests/t{i}.py\n```\n" + "s" * 1_000 + "\n\n"
+                                   for i in range(7))
+    p = plans.parse_v1_subplan(text)
+    assert len(p.steps) == 7 and len(p.steps[3].instructions) > 34_000 and len(p.steps[3].scope) == 11
+    from ilk2 import batches
+    assert batches.plan_warnings(plans.BatchSpec(plans=[p])) == []
+    one = plans.parse_v1_subplan(text.replace("### Step", "#### Sub", 6).replace("#### Sub", "### Note"))
+    assert {w["kind"] for w in batches.plan_warnings(plans.BatchSpec(plans=[one]))} == {
+        "files-per-step", "chars-per-step"}          # the same sub-plan as a single step warns
+
+
+def test_serial_chain_counts_transitive_chains_and_needs_a_disjoint_pair():
+    from ilk2 import batches
+    # B→A, C→B: a total order by transitivity; C's scope is disjoint from A's and B's
+    chain = _plans(("a", [], ["x.py"], "i"), ("b", ["a"], ["x.py"], "i"), ("c", ["b"], ["y.py"], "i"))
+    assert batches.serial_chain(chain) == [["a", "c"], ["b", "c"]]
+    # 17d's shape: every plan lists every earlier one, all sharing a file: ordered for a reason
+    shared = _plans(("a", [], ["x.py"], "i"), ("b", ["a"], ["x.py", "y.py"], "i"),
+                    ("c", ["a", "b"], ["x.py"], "i"))
+    assert batches.serial_chain(shared) == []
+    # c is unordered against a and b: lanes can already run it
+    loose = _plans(("a", [], ["x.py"], "i"), ("b", ["a"], ["x.py"], "i"), ("c", [], ["y.py"], "i"))
+    assert batches.serial_chain(loose) == []
+    # a directory scope overlaps the files under it
+    nested = _plans(("a", [], ["tools/"], "i"), ("b", ["a"], ["tools/x.py"], "i"))
+    assert batches.serial_chain(nested) == []
+
+
+def test_warnings_are_recorded_at_submit_and_never_refuse(ilk):
+    ilk.make_repo()
+    ilk.project()
+    g = [{"name": "unit", "command": "python -m pytest -q tests/test_calc.py"}]
+    bid = ilk.submit({"plans": [
+        {"slug": "a", "steps": [{"title": "t", "instructions": "x", "scope": ["calc.py"], "gates": g}]},
+        {"slug": "b", "depends_on": ["a"],
+         "steps": [{"title": "t", "instructions": "y" * 12_001, "scope": ["other.py"], "gates": g}]}]})
+    kinds = sorted(e["payload"]["kind"] for e in ilk.s.events_since(0, bid) if e["kind"] == "submit.warning")
+    assert kinds == ["chars-per-step", "serial-chain"]
+    assert ilk.s.get("batches", bid)["status"] == "queued"

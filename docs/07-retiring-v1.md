@@ -88,8 +88,8 @@ Each check comes with **cross-parser fixtures** from real masters: 17d, and at l
 
 | Warning | Fires when | Threshold (judgment call) | Wrong if |
 |---|---|---|---|
-| `step-files` | A step's declared scope spans more than N files | N = 6. 17d's steps touched 6-11 files. V1's guidance is about 5 | Steps above N prove as fast and as reliable as those below. Measure by band (§7.6) |
-| `step-instructions` | A step's stored instructions run past M characters | M = 25,000. Medians: 14,896 over batch means, 13,923 pooled per step. 17d's steps ran 11,158-31,433, and 3 of 6 were over M | Same as above |
+| `files-per-step` | A plan's distinct scope entries divided by its steps exceed N | N = 6. A V1 sub-plan's steps share its scope and preamble, so this is measured per plan, per step. Over 53 gh-resolve plans whose steps all shipped, it ranks with minutes per step at Spearman 0.48. At 6 it flags 16 plans, 10 of them slow (over 40 min per step), and misses 8 slow ones | It stops tracking minutes per step on new batches |
+| `chars-per-step` | A plan's text (its shared preamble once, plus each step's own section) divided by its steps exceeds M characters | M = 12,000. Spearman 0.45 on the same 53 plans; it flags 15, 10 of them slow, and misses 8. Checked: 17d warns on all 5 work plans, 17e (split by gh-resolve on Oct 17) on none | Same as above |
 | `serial-chain` | The transitive closure of `depends_on` totally orders the plans (direct lists like 17d's, or a chain B→A, C→B…), and at least 2 plans ordered only by dependency have disjoint `scope_paths` | Disjoint pairs are the ones lanes could run | Scopes are under-declared, so "disjoint" pairs really share files. Lane-merge repairs would show it |
 | `brief-size` | Recorded, never warned | The brief is 171-185k characters in 17d, and its relation to minutes is not shown | — |
 
