@@ -157,6 +157,18 @@ _WRITE_BULLET = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(?:\*\*)?(?:Write|Edit)\b", 
 # A sub-plan file name in a V1 registry row (V1 plan_preflight._SUBPLAN_FILENAME_RE)
 _SUBPLAN_FILE = re.compile(r"(20\d{2}-\d{2}-\d{2}[a-z]?-[a-z0-9][a-z0-9-]*\.md)")
 _LINK = re.compile(r"\]\(\./?([^)\s]+\.md)\)")
+# V1's runtime reader (ilk-loop plan_slug.SUBPLAN_REF_RE): a dated file name after start of line,
+# whitespace, a bracket, a parenthesis or a table bar, not inside a subdirectory
+_V1_REF = re.compile(r"(?:^|(?<=[\s(\[|]))(?:\./)?(\d{4}-\d{2}-\d{2}[a-z]?-[a-z0-9][a-z0-9-]*\.md)", re.M)
+
+
+def subplan_names(master_text: str) -> list[str]:
+    """The sub-plans a MASTER names, in order of first appearance: every reference V1's runtime
+    reads, plus Markdown links. Links alone missed the sub-plans of 45 of 422 V1 masters that
+    name them only in their registry table (cross-parser sweep, Oct 17)."""
+    found = sorted([(m.start(1), m.group(1)) for m in _V1_REF.finditer(master_text)] +
+                   [(m.start(1), m.group(1)) for m in _LINK.finditer(master_text)])
+    return [n for n in dict.fromkeys(n for _, n in found) if not n.startswith("MASTER-")]
 
 
 def write_bullets(text: str) -> list[str]:
@@ -309,9 +321,7 @@ def parse_v1_master(master: Path) -> BatchSpec:
     text = master.read_text()
     seen, plans, problems = [], [], []
     reg = _registry_files(text)
-    for name in _LINK.findall(text):
-        if name in seen or name.startswith("MASTER-"):
-            continue
+    for name in subplan_names(text):
         seen.append(name)
         sub = master.parent / name
         if sub.exists():
@@ -339,7 +349,7 @@ def v1_documents(master: Path) -> dict[str, str]:
     except OSError:
         return {}
     docs = {master.name.split(".md")[0] + ".md": text}
-    for name in re.findall(r"\]\(\./?([^)\s]+\.md)\)", text):
+    for name in subplan_names(text):
         sub = master.parent / name
         if name not in docs and sub.is_file():
             docs[name] = sub.read_text()

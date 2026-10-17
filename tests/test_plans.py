@@ -497,3 +497,15 @@ def test_warnings_are_recorded_at_submit_and_never_refuse(ilk):
     kinds = sorted(e["payload"]["kind"] for e in ilk.s.events_since(0, bid) if e["kind"] == "submit.warning")
     assert kinds == ["chars-per-step", "serial-chain"]
     assert ilk.s.get("batches", bid)["status"] == "queued"
+
+
+def test_subplans_named_only_in_the_registry_are_imported_in_v1s_order(tmp_path):
+    # 45 of 422 V1 masters name their sub-plans as plain text in the registry table, with no
+    # Markdown link; V1's runtime reads them (plan_slug.SUBPLAN_REF_RE), ilk2 read only links.
+    body = ("## Sub-plan registry\n\n| # | Sub-plan | Status |\n|---|---|---|\n"
+            "| 1 | 2026-10-17-b.md | pending |\n| 2 | 2026-10-17-a.md | pending |\n\n"
+            "Not a sub-plan: docs/2026-10-01-old.md (in a subdirectory).\n")
+    m = _master(tmp_path, body, {"2026-10-17-a.md": "a", "2026-10-17-b.md": "b"})
+    spec = plans.parse_v1_master(m)
+    assert [p.slug for p in spec.plans] == ["b", "a"] and plans.check(spec) == []
+    assert set(spec.documents) == {m.name, "2026-10-17-a.md", "2026-10-17-b.md"}

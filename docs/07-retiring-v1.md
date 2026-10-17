@@ -82,7 +82,10 @@ Done criterion 1 is this checker coming back clean. Its first output becomes the
 
 **Swept before release:** every V1-claimed batch's master was re-imported and checked at its own base. 0 of 25 would have been refused by the final checks. A first version refused 4, all false positives: a prose placeholder link, and gates that re-run test files created by earlier plans.
 
-Each check comes with **cross-parser fixtures** from real masters: 17d, and at least one master each from kira and ilk-skills. They prove that ilk2 and V1 agree, or differ only on purpose. The imported Markdown also gets a **schema version** in the snapshot (`spec_version`). An ambiguous import is refused, not guessed.
+**Cross-parser check, instead of real-master fixtures (Oct 17).** ilk2 is a public repository (Q9), and real plans can carry issue and tenant detail, so real masters are not copied into its tests. Instead, V1's own readers (`plan_status.extract_subplan_files`, `run_local_checks.step_gate_fence`) and ilk2's were run once over every V1 master on chad-mbp: 422 masters, 1,747 sub-plans, 5,448 steps.
+- **It found a gap.** 45 masters name their sub-plans only as plain text in the registry table, which V1's runtime reads and ilk2's link-only importer missed. ilk2 now reads the same references as V1, plus links (`plans.subplan_names`). After the change, 0 of 422 masters disagree with V1's list or order. The 25 masters ilk2 had claimed import exactly as before.
+- **Gate blocks:** ilk2 reads a gate block V1 cannot in 6 steps (it is more lenient), and V1 reads one ilk2 cannot in 1 step. That step is from May, and ilk2 now refuses that shape instead of skipping it silently.
+- Synthetic fixtures in `tests/test_plans.py` pin each case.
 
 **Warnings, as telemetry, not refusals.** Each is printed by `submit --check`, recorded as a `submit.warning` event, and shown in `ilk2 status`:
 
