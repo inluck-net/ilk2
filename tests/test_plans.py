@@ -354,3 +354,80 @@ def test_submit_check_validates_and_creates_nothing(ilk, capsys, tmp_path):
     sub.write_text(GHR_LIVE_WORK.replace("### Step 0", "no steps here"))
     assert cli.main(["submit", str(good), "--project", "proj", "--check"]) == 2
     assert "no steps" in capsys.readouterr().out
+
+
+# -- structural refusals ported from V1's preflight (docs/07 §7.4.1) ------------------------
+
+SUB_OK = """---
+plan: {slug}
+---
+
+## Steps
+
+### Step 0 — do it
+```yaml
+local_checks:
+  - command: python -m pytest -q tests/test_calc.py
+```
+"""
+
+
+def _master(tmp_path: Path, body: str, subs: dict[str, str]) -> Path:
+    for name, slug in subs.items():
+        (tmp_path / name).write_text(SUB_OK.format(slug=slug))
+    m = tmp_path / "MASTER-2026-10-17-execution-plan.md"
+    m.write_text("---\ntitle: t\nstatus: queued\n---\n\n" + body)
+    return m
+
+
+def test_a_linked_subplan_that_is_missing_is_refused_not_dropped(tmp_path):
+    m = _master(tmp_path, "| # | Sub-plan |\n|---|---|\n| 1 | [a](./2026-10-17-a.md) |\n"
+                          "| 2 | [b](./2026-10-17-b.md) |\n\nSee [the template](./<name>.md).\n",
+                {"2026-10-17-a.md": "a"})
+    spec = plans.parse_v1_master(m)
+    assert [p.slug for p in spec.plans] == ["a"]
+    probs = plans.check(spec)
+    assert any("2026-10-17-b.md, which does not exist" in p for p in probs)
+    assert not any("<name>" in p for p in probs)          # a prose placeholder is not a sub-plan
+
+
+def test_the_registry_and_the_links_must_agree(tmp_path):
+    body = ("## Sub-plan registry\n\n| # | Sub-plan | File |\n|---|---|---|\n"
+            "| 1 | a | `2026-10-17-a.md` |\n| 2 | b | `2026-10-17-b.md` |\n\n"
+            "## Order\n\n[a](./2026-10-17-a.md)\n")
+    m = _master(tmp_path, body, {"2026-10-17-a.md": "a", "2026-10-17-b.md": "b"})
+    probs = plans.check(plans.parse_v1_master(m))
+    assert any("registry lists 2026-10-17-b.md, which the MASTER does not link" in p for p in probs)
+    body_ok = body.replace("[a](./2026-10-17-a.md)", "[a](./2026-10-17-a.md) [b](./2026-10-17-b.md)")
+    assert plans.check(plans.parse_v1_master(_master(tmp_path, body_ok, {}))) == []
+
+
+def test_a_step_whose_local_checks_cannot_be_parsed_is_refused():
+    # Before: the step silently ran the frontmatter's plan-wide checks instead of its own.
+    text = ("---\nplan: p\nlocal_checks:\n  - command: python -m pytest -q tests/test_calc.py\n---\n\n"
+            "## Steps\n\n### Step 0 — bad quoting\n```yaml\nlocal_checks:\n"
+            "  - command: \"python -m pytest -q tests/x.py\n```\n\n"
+            "### Step 1 — json fence\n```json\n{\"local_checks\": [{\"command\": \"pytest\"}]}\n```\n\n"
+            "### Step 2 — none declared\nUses the plan-wide checks.\n")
+    p = plans.parse_v1_subplan(text)
+    probs = plans.check(plans.BatchSpec(plans=[p]))
+    assert sum("cannot be parsed" in x for x in probs) == 2
+    assert any("step 0:" in x for x in probs) and any("step 1:" in x for x in probs)
+    assert not any("step 2:" in x for x in probs)
+
+
+def test_the_snapshot_does_not_carry_import_problems(tmp_path):
+    m = _master(tmp_path, "[a](./2026-10-17-a.md) [b](./2026-10-17-b.md)\n", {"2026-10-17-a.md": "a"})
+    d = plans.parse_v1_master(m).to_dict()
+    assert "problems" not in d and all("problems" not in p for p in d["plans"])
+
+
+def test_a_write_bullet_under_a_denied_path_is_refused(ilk):
+    # Replaces V1's safety-kernel admission: declared writes, not only the scope.
+    import pytest
+    from ilk2 import batches
+    from conftest import one_step
+    ilk.make_repo()
+    ilk.project(deny_paths=["migrations/"])
+    with pytest.raises(batches.SubmitRejected, match="denied paths"):
+        ilk.submit(one_step(instructions="1. **Write** `migrations/0003.py`: the new table"))

@@ -311,11 +311,12 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     deny = list(cfg.deny_paths) + list(deny_paths or [])
     for p in spec.plans:
         for i, st in enumerate(p.steps):
-            # a scope entry inside a denied path; a broader scope is fine, since the attempt-time
-            # check turns any edit under a denied path red
-            bad = [x for x in st.scope if path_matches(x, deny)]
+            # a scope entry or Write/Edit bullet inside a denied path (this replaces V1's
+            # safety-kernel admission, docs/07 §7.4.1); a broader scope is fine, since the
+            # attempt-time check turns any edit under a denied path red
+            bad = [x for x in st.scope + plans.write_bullets(st.instructions) if path_matches(x, deny)]
             if bad:
-                problems.append(f"plan {p.slug} step {i}: scope names denied paths {bad} "
+                problems.append(f"plan {p.slug} step {i}: declares writes to denied paths {bad} "
                                 f"(deny_paths {deny})")
     if not problems and not cfg.setup:
         problems += preflight(spec, repo, base_sha, cfg)

@@ -71,11 +71,16 @@ Done criterion 1 is this checker coming back clean. Its first output becomes the
 **Structural checks, before `submit --check` becomes the planner's preflight.** These checks are ported from what `plan_preflight.py` enforced (Codex review, finding 5). Each one *refuses* submission, because each is a broken plan, not a judgment call:
 - a linked sub-plan file that is missing or cannot be parsed. Today it is silently dropped (`plans.py:271-272`);
 - a mismatch between the master's sub-plan registry table and the sub-plans it links;
-- a declared test path that does not exist at the base;
 - a step that can produce no commit and does not say so (V1's `--allow-empty` convention);
 - a gate executable that is not resolvable (already checked, `plans.py:381-386`);
 - a step whose `local_checks` fence is present but cannot be extracted or parsed. V1 checks this in `plan_preflight.py:310`. Today ilk2 could drop such a gate silently, leaving the step with fewer gates than written;
 - a step whose declared writes (YAML scope plus `Write`/`Edit` bullets) touch the project's `deny_paths`. This **replaces** V1's safety-kernel admission (`plan_preflight.py:389`, `safety_kernel.check_plan_admission`), which applies only to the ilk-skills repo itself. Its `rules` tier becomes the ilk-skills project's `deny_paths`, which ilk2 already enforces on every attempt (`batches.py`, `deny_paths`); the admission check adds the same refusal at submission. Its `kernel` tier (owner-only supervised builds) has no equivalent and needs none, because ilk2 batches on ilk-skills land on `ilk2/b-*` branches that are merged by hand, never unattended.
+
+**Not ported, with the reason (built Oct 17):**
+- **V1's declared-test-path check (AC2).** ilk2 already handles a test file that is absent at the base, and does it at run time. The file may be written by the step itself (red-first), or owed by another plan (`gate.path-owed`, gh-resolve P6). If it is still absent after the step, the step goes red with the path in its evidence. Tests: `test_s8_expected_red_then_green`, `test_a_gate_path_another_plan_creates_is_owed_by_that_plan`, `test_declared_test_path_still_absent_after_step_is_red`. A submit-time refusal was built and then withdrawn: the full suite showed it refused those deliberate patterns (6 tests red).
+- **V1's step-commit feasibility (`--allow-empty`, AC3).** ilk2 accepts a step with no diff at its parent, with no empty commit (`driver.py:1303`).
+
+**Swept before release:** every V1-claimed batch's master was re-imported and checked at its own base. 0 of 25 would have been refused by the final checks. A first version refused 4, all false positives: a prose placeholder link, and gates that re-run test files created by earlier plans.
 
 Each check comes with **cross-parser fixtures** from real masters: 17d, and at least one master each from kira and ilk-skills. They prove that ilk2 and V1 agree, or differ only on purpose. The imported Markdown also gets a **schema version** in the snapshot (`spec_version`). An ambiguous import is refused, not guessed.
 

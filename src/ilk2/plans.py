@@ -73,6 +73,8 @@ class Plan:
     steps: list[Step]
     depends_on: list[str] = field(default_factory=list)
     verification: bool = False
+    # What the importer could not read faithfully; check() refuses the batch on any (docs/07 §7.4.1)
+    problems: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -81,9 +83,14 @@ class BatchSpec:
     # The planner's documents the steps refer to (V1: the MASTER and its sub-plans), by name.
     # The driver gives each attempt a readable copy; workers cannot read the planner's dirs.
     documents: dict[str, str] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("problems")
+        for p in d["plans"]:
+            p.pop("problems", None)
+        return d
 
 
 def adapter_for(command: list[str]) -> str:
@@ -143,6 +150,19 @@ _STEP = re.compile(r"(?m)^### Step (\d+)(?:[ \t]*[—:-]+[ \t]*(.*?))?[ \t]*$")
 _CMD = re.compile(r"""-\s*command:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\n]+?))[ \t]*$"""
                   r"""(?:\s*\n\s*timeout:\s*(\d+))?""", re.M)
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A step declares local_checks: a YAML key line, or a key inside another fence (json)
+_DECLARES_CHECKS = re.compile(r"""(?m)^\s*local_checks:\s*$|"local_checks"\s*:""")
+# A Write/Edit bullet names files a step writes (V1 safety_kernel.check_plan_admission's reader)
+_WRITE_BULLET = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+(?:\*\*)?(?:Write|Edit)\b", re.I)
+# A sub-plan file name in a V1 registry row (V1 plan_preflight._SUBPLAN_FILENAME_RE)
+_SUBPLAN_FILE = re.compile(r"(20\d{2}-\d{2}-\d{2}[a-z]?-[a-z0-9][a-z0-9-]*\.md)")
+_LINK = re.compile(r"\]\(\./?([^)\s]+\.md)\)")
+
+
+def write_bullets(text: str) -> list[str]:
+    """Paths a step's Write/Edit bullets name (backticked)."""
+    return [p for line in text.splitlines() if _WRITE_BULLET.match(line)
+            for p in re.findall(r"`([^`]+)`", line)]
 
 
 def _frontmatter(text: str) -> dict:
@@ -239,11 +259,16 @@ def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
         heads = list(_STEP.finditer(body))
     preamble = body[: heads[0].start()] if heads else body
     plan_gates = _frontmatter_checks(text)
-    steps = []
+    steps, problems = [], []
     for i, h in enumerate(heads):
         sec = body[h.end(): heads[i + 1].start() if i + 1 < len(heads) else len(body)]
         sec = re.split(r"(?m)^## ", sec)[0]
-        gates = _local_checks(sec) or plan_gates
+        own = _local_checks(sec)
+        if not own and _DECLARES_CHECKS.search(sec):
+            # V1 preflight AC5. Without this the plan-wide checks ran in its place, silently.
+            problems.append(f"step {h.group(1)}: declares local_checks that cannot be parsed "
+                            "(bad quoting, or not a YAML block)")
+        gates = own or plan_gates
         # "Remove every xfail" (all of the pinned file's tests must now pass) -> must_pass on the
         # first local_checks path. A partial "Remove AC-1's xfail" needs ids; left to the author.
         must = []
@@ -257,21 +282,51 @@ def parse_v1_subplan(text: str, slug: str | None = None) -> Plan:
     deps = fm.get("depends_on") or []
     return Plan(slug=slug, steps=steps, depends_on=list(deps) if isinstance(deps, list) else [],
                 verification=str(fm.get("plan", "")).endswith("-verify")
-                or str(fm.get("batch_verification", "")).lower() == "true")
+                or str(fm.get("batch_verification", "")).lower() == "true", problems=problems)
+
+
+def _registry_files(master_text: str) -> list[str] | None:
+    """Sub-plan files named in the '## Sub-plan registry' table (rows numbered in the first
+    cell), or None without that section. V1 plan_preflight._extract_table_filenames."""
+    i = master_text.find("## Sub-plan registry")
+    if i < 0:
+        return None
+    rest = master_text[i + len("## Sub-plan registry"):]
+    nxt = re.search(r"(?m)^## ", rest)
+    out: list[str] = []
+    for line in (rest[: nxt.start()] if nxt else rest).splitlines():
+        cells = [c.strip() for c in line.strip().split("|")]
+        if not line.strip().startswith("|") or len(cells) < 3 or not cells[1].isdigit():
+            continue
+        m = _SUBPLAN_FILE.search(" ".join(cells[2:]))
+        if m and m.group(1) not in out and not m.group(1).startswith("MASTER"):
+            out.append(m.group(1))
+    return out
 
 
 def parse_v1_master(master: Path) -> BatchSpec:
     """A V1 MASTER file: its linked sub-plan files, in the order they are linked."""
     text = master.read_text()
-    seen, plans = set(), []
-    for name in re.findall(r"\]\(\./?([^)\s]+\.md)\)", text):
+    seen, plans, problems = [], [], []
+    reg = _registry_files(text)
+    for name in _LINK.findall(text):
         if name in seen or name.startswith("MASTER-"):
             continue
-        seen.add(name)
+        seen.append(name)
         sub = master.parent / name
         if sub.exists():
             plans.append(parse_v1_subplan(sub.read_text()))
-    return BatchSpec(plans=plans, documents=v1_documents(master))
+        elif _SUBPLAN_FILE.fullmatch(name) or name in (reg or []):
+            # Was skipped silently: a smaller batch than planned (Codex review, docs/07 §7.4.1).
+            # Other links (prose placeholders like ./<name>.md, other docs) are skipped as before.
+            problems.append(f"MASTER links {name}, which does not exist")
+    if reg is not None:
+        linked = {n for n in seen if _SUBPLAN_FILE.fullmatch(n)}
+        for n in sorted(set(reg) - linked):
+            problems.append(f"sub-plan registry lists {n}, which the MASTER does not link")
+        for n in sorted(linked - set(reg)):
+            problems.append(f"MASTER links {n}, which the sub-plan registry does not list")
+    return BatchSpec(plans=plans, documents=v1_documents(master), problems=problems)
 
 
 def v1_documents(master: Path) -> dict[str, str]:
@@ -347,7 +402,8 @@ def merge_v1_ceremony(spec: BatchSpec) -> BatchSpec:
 
 def check(spec: BatchSpec, root: Path | None = None, path_dirs: list[str] | None = None) -> list[str]:
     """Every reason to reject the batch at submit, or [] if it may be queued."""
-    problems: list[str] = []
+    problems: list[str] = list(spec.problems)
+    problems += [f"plan {p.slug}: {x}" for p in spec.plans for x in p.problems]
     slugs = [p.slug for p in spec.plans]
     if not spec.plans:
         problems.append("batch has no plans")
