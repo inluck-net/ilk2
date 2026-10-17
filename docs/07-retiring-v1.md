@@ -132,7 +132,7 @@ What changes in `/ilk-plan`, `ilk-spec` and the inbox and Lark planners:
 | Inbox `~/.ilk-data/inbox-projects.json`; Lark `~/.ilk-data/ilk-lark-tickets/config.json`, which holds a credential and a token cache | Moved to the skills' own data folder, with permissions kept, before the archive. The credential is moved and never printed |
 
 New planning rules. The planner fails its own QC on each:
-1. **Step size.** A step is about 25-30 worker-minutes: at most 6 files and 25,000 characters of instructions, split by acceptance-criteria group, with failing tests first in each step. Basis: gh-resolve's fresh-session steps of 24-33 min ([E3](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md)), and gh-resolve-e1's agreement on Oct 17.
+1. **Step size.** A step is about 25-30 worker-minutes: per step, at most 6 files of scope and 12,000 characters of plan text (the §7.4.1 measures). Split by acceptance-criteria group, with failing tests first in each step. Basis: gh-resolve's fresh-session steps of 24-33 min ([E3](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md)), and gh-resolve-e1's agreement on Oct 17.
 2. **Dependencies are justified.** A plan depends on another only when they share files (`scope_paths`) or one needs the other's behaviour, and the master says which for each edge. Basis: 17d's chain was copied from earlier batches (gh-resolve-e1), and lanes help only with disjoint scope (repairs in 15d and 15f/15g).
 3. **No re-reading what the brief preloads.** The planner is told what ilk2's brief contains. A sub-plan's "Before you start" section names only what is *not* preloaded.
 4. **Stale V1 instructions removed:** `docs/plans/` scaffolding and "commit and push" in `ilk-inbox.md` (:31, :109, :119) and `ilk-lark-tickets/SKILL.md` (:175-180).
