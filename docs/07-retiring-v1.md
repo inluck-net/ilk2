@@ -1,6 +1,6 @@
 # 7. Retiring V1 completely
 
-**Status: proposed, revision 3, Oct 17, 2026.** Revised after two Codex reviews: of `32cbb91` (15 findings, 5 of them blockers) and of `8cb89f2` (5 partly resolved, 5 new). All findings were verified against the code and data and accepted (§7.10). Written by the ilk2 build session after batch 17d. Chad reviewed the summary page (`~/Documents/keyreply/chad/ilk-skills/20261017-retire-v1-plan.html`) and asked for this design before any work starts. The tracker is `~/Documents/handoffs/ilk2-retire-v1-handoff.md`.
+**Status: accepted, revision 3, Oct 17, 2026** (Chad: "approved all with default options"; the work is authorized end to end, the archive still needs its separate go, D6). Revised after two Codex reviews: of `32cbb91` (15 findings, 5 of them blockers) and of `8cb89f2` (5 partly resolved, 5 new). All findings were verified against the code and data and accepted (§7.10). Written by the ilk2 build session after batch 17d. Chad reviewed the summary page (`~/Documents/keyreply/chad/ilk-skills/20261017-retire-v1-plan.html`) and asked for this design before any work starts. The tracker is `~/Documents/handoffs/ilk2-retire-v1-handoff.md`.
 
 This document changes two decisions in [document 4](04-v1-relation-and-migration.md):
 - **§4.1:** V1's planning and feedback tools were "kept". Now they become ilk2-native, and V1's other skills are removed.
@@ -311,17 +311,21 @@ In any of those cases, revisit rule 1 before the switch.
 | # | Decision | Proposed | Status |
 |---|---|---|---|
 | D1 | Retire V1 completely | yes | Chad: summary page "looks good", Oct 17 |
-| D2 | Where the client skills live | Stay in ilk-skills, changed only through ilk2 batches, outside RSI's editable surface | Codex agrees; awaiting Chad |
-| D3 | `plan_lint.py` | Hybrid: structural checks into ilk2, authoring heuristics standalone, V1-runner checks dropped | Codex's proposal; awaiting Chad |
-| D4 | Preconditions for the archive | §7.4.6 list | revised after Codex; awaiting Chad |
-| D5 | Order | §7.5: inventory and ilk2 checks first; new planner beside the old; trial; switch; archive | revised after Codex; awaiting Chad |
-| D6 | The archive needs a separate go | yes | Codex agrees; awaiting Chad |
-| D7 | Improvement intake | `ilk2 improvement add`, neutral versioned table (§7.4.3) | Codex's proposal; awaiting Chad |
-| D8 | Q2: Markdown, with ilk2's parser canonical, a versioned schema, and refusals for missing or ambiguous imports | yes | Codex agrees with conditions, now included; awaiting Chad |
-| D9 | Warnings, not refusals, on size; thresholds in §7.4.1 | yes; `brief-size` stays telemetry only | Codex agrees; awaiting Chad |
-| D10 | ilk-pocket is moved by the build session, by hand | yes | new; awaiting Chad |
-| D11 | gh-resolve's V1 retirement is done by its owner session, with §7.4.4 as the contract | yes | new; awaiting Chad |
-| D12 | mac-provision is changed by the build session to install ilk2, with a dry-run test | yes | new (round 2); awaiting Chad |
+| D2 | Where the client skills live | Stay in ilk-skills, changed only through ilk2 batches, outside RSI's editable surface | Codex agrees; **accepted Oct 17** |
+| D3 | `plan_lint.py` | Hybrid: structural checks into ilk2, authoring heuristics standalone, V1-runner checks dropped | Codex's proposal; **accepted Oct 17** |
+| D4 | Preconditions for the archive | §7.4.6 list | revised after Codex; **accepted Oct 17** |
+| D5 | Order | §7.5: inventory and ilk2 checks first; new planner beside the old; trial; switch; archive | revised after Codex; **accepted Oct 17** |
+| D6 | The archive needs a separate go | yes | Codex agrees; **accepted Oct 17** |
+| D7 | Improvement intake | `ilk2 improvement add`, neutral versioned table (§7.4.3) | Codex's proposal; **accepted Oct 17** |
+| D8 | Q2: Markdown, with ilk2's parser canonical, a versioned schema, and refusals for missing or ambiguous imports | yes | Codex agrees with conditions, now included; **accepted Oct 17** |
+| D9 | Warnings, not refusals, on size; thresholds in §7.4.1 | yes; `brief-size` stays telemetry only | Codex agrees; **accepted Oct 17** |
+| D10 | ilk-pocket is moved by the build session, by hand | yes | new; **accepted Oct 17** |
+| D11 | gh-resolve's V1 retirement is done by its owner session, with §7.4.4 as the contract | yes | new; **accepted Oct 17** |
+| D12 | mac-provision is changed by the build session to install ilk2, with a dry-run test | yes | new (round 2); **accepted Oct 17** |
+| D13 | gh-resolve's time: retire its V1 code first; the planner trial then uses gh-resolve's next naturally planned batches (no extra batches) | yes | **accepted Oct 17** |
+| D14 | Improvement rows that target ilk2 reach RSI only after a human marks them `accepted`, ranked below RSI's existing inputs. The `docs/rsi/**` change is made by the build session, not by RSI | yes | **accepted Oct 17** |
+| D15 | `claude-worker`, `claude-manager`, `claude-worker-switch`: moved to a stable location, kept working, not deleted (it is not known whether they are still used by hand) | yes (judgment call: the non-destructive default) | **accepted Oct 17** |
+| — | The global hooks: `no-full-suite` (the only one registered in `~/.claude/settings.json`) stays, re-pointed at a stable path; the 5 linked but unregistered V1 worker hooks go | yes | **accepted Oct 17** |
 
 ## 7.10 Review log
 
