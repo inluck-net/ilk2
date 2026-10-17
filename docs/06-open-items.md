@@ -293,7 +293,7 @@ The attempt cap is one global bound, `bounds.attempt_cap` = 3600 s (Q7, a judgme
 - The build session reviews each shipped branch: the diff, the tests that pin the change, and the docs. It merges to `main` and releases by hand, as for any change. A rejected branch is recorded here with why.
 - Nothing reaches `main` or a release unreviewed.
 
-**Inputs, ranked:** Chad's requirements and steers outrank everything. Then open items in this document. Then defects ilk2 records about itself: needs_human rows, refusals, red attempts with an ilk2 cause, `report` numbers off target.
+**Inputs, ranked:** Chad's requirements and steers outrank everything. Then open items in this document. Then defects ilk2 records about itself: needs_human rows, refusals, red attempts with an ilk2 cause, `report` numbers off target. Last, and only once a person marks them `accepted`: intake rows for project `ilk2` from postmortems and reviews (`ilk2 improvement`, docs/07 §7.4.3; Chad's go Oct 17, D14; weight 5, below every other source).
 
 **Protected kernel.** RSI batches cannot edit `AGENTS.md`, `CLAUDE.md`, `docs/rsi/**` or `.github/**` (the project's `deny_paths`; edits there are red on every attempt). That is the rail that stops a batch loosening its own rules or CI. Tests stay editable, because batches add tests; review is what catches a weakened test in this stage.
 

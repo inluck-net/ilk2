@@ -10,6 +10,8 @@ fingerprint, so a recurring defect is one candidate whose hits grow. Sources, by
   gate-cap      a gate whose full run keeps hitting its time cap                      25
   refusal       a refusal reason that recurs (3+), other than capacity and leases     20
   report        a shipped batch whose base phase took longer than its workers         10
+  improvement   an intake row for project ilk2 that a person marked accepted          5
+                (ilk2 improvement; postmortems and reviews, docs/07 §7.4.3, D14)
 
 Nothing here plans or submits: the planner and the trigger read the candidates (rsi.plan,
 rsi.tick). Finding is idempotent: run it as often as you like.
@@ -27,7 +29,7 @@ from . import clock, paths
 
 WINDOW_S = 7 * 24 * 3600   # judgment call: a week of records; wrong if defects recur more slowly
 WEIGHTS = {"request": 100, "goal": 90, "engine-error": 50, "stall": 40, "needs-human": 30, "gate-cap": 25,
-           "refusal": 20, "report": 10}
+           "refusal": 20, "report": 10, "improvement": 5}
 # A step's own red attempts are the consumer's work, not ilk2's; capacity and leases are the
 # host's state, not defects.
 NOT_DEFECTS_NH = {"attempts", "rsi-review"}  # rsi-review: RSI's own hold for a person, not a defect
@@ -228,6 +230,10 @@ def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidat
             add("report", f"base>dispatch:{b['project_id']}",
                 f"{b['project_id']}: the base phase takes longer than the workers",
                 {"batch": b["id"], "base_min": ph.get("base"), "dispatch_min": ph.get("dispatch")})
+    # Accepted intake rows for ilk2, whatever their age: a person chose them (D14). Lowest weight.
+    for r in s.all("SELECT * FROM improvements WHERE project_id = ? AND status = 'accepted'", PROJECT):
+        add("improvement", r["fingerprint"], r["title"],
+            {"improvement": r["id"], "hits": r["hits"], "at": r["updated_at"]})
     out = list(found.values()) + requests(repo)
     if repo is not None:  # Chad's inputs live with the ilk2 repo's host
         out += issues(s) + goals(s, repo)

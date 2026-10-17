@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS rsi_landings (
   batch_id TEXT PRIMARY KEY, candidate_id TEXT, merge_commit TEXT, pre_merge TEXT, version TEXT,
   previous_version TEXT, status TEXT NOT NULL, note TEXT, at REAL NOT NULL, merged_at REAL,
   released_at REAL, verified_at REAL, pushed_at REAL, rolled_back_at REAL);
+CREATE TABLE IF NOT EXISTS improvements (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  title TEXT NOT NULL, evidence TEXT NOT NULL, hits INTEGER NOT NULL, status TEXT NOT NULL,
+  created_at REAL NOT NULL, updated_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (project_id, fingerprint));
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
