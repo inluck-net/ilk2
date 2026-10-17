@@ -327,3 +327,24 @@ def test_turns_count_main_loop_responses_once_and_their_model_time():
              "message": {"id": "sub1", "content": []}}, 26.0)                        # a subagent
     d._note({"type": "assistant", "message": {"id": "m2", "content": []}}, 40.0)
     assert d.turns == 2 and d.model_s == 35.0                  # 20 s (start→m1) + 15 s (25→40)
+
+
+def test_requests_run_to_their_last_event_and_split_long_ones_tool_time_and_the_first_edit():
+    # docs/07 §7.4.1, evidence E5: a request's large tool_use block arrives minutes after its first
+    # event. model_s stops at the first event; requests run to the last.
+    from ilk2.worker import Dispatch
+    d = Dispatch(proc=None, log_path=None, worktree=None, t0=0.0)
+    d._note({"type": "assistant", "message": {"id": "m1", "content": [{"type": "thinking", "thinking": "x"}]}}, 10.0)
+    d._note({"type": "assistant", "message": {"id": "m1", "content": [{"type": "tool_use", "name": "Read"}]}}, 12.0)
+    d._note({"type": "user", "message": {"content": []}}, 15.0)                      # 3 s of tool
+    d._note({"type": "assistant", "message": {"id": "m2", "content": [{"type": "thinking", "thinking": "y"}]}}, 100.0)
+    d._note({"type": "assistant", "parent_tool_use_id": "t9",
+             "message": {"id": "sub", "content": [{"type": "tool_use", "name": "Write"}]}}, 150.0)  # subagent
+    d._note({"type": "assistant", "message": {"id": "m2", "content": [{"type": "tool_use", "name": "Write"}]}}, 400.0)
+    d._note({"type": "user", "message": {"content": []}}, 402.0)                     # 2 s of tool
+    r = d.requests()
+    assert (r["n"], r["s"], r["long_n"], r["long_s"], r["longest_s"]) == (2, 397.0, 1, 385.0, 385.0)
+    assert d.model_s == 95.0                            # unchanged: to each first event (10 + 85)
+    assert d.tool_s == 5.0
+    assert d.timings["first_edit_s"] == 150.0           # unchanged meaning: the first edit seen at all
+    assert d.timings["first_edit_start_s"] == 15.0      # the main loop's first editing request

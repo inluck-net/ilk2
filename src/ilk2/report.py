@@ -179,6 +179,45 @@ def _pace(atts) -> dict:
     return {"turns": int(turns), "s_per_turn": round(model_s / turns, 1) if turns else None}
 
 
+# The per-attempt record ilk-feedback classifies from (docs/07 §7.4.1, §7.4.3). Bump on any
+# change a reader could notice; additions that old readers can ignore keep the version.
+REPORT_VERSION = 2
+
+
+def _attempt(a, gates: dict) -> dict:
+    """One attempt as JSON evidence, so a classifier never reads ilk2's run directories."""
+    tm = json.loads(a["timings"] or "{}")
+    t = tm.get("timings") or {}
+    req = tm.get("requests") or {}
+
+    def mins(x):
+        return round(x / 60, 1) if x is not None else None
+    return {
+        "n": a["n"], "outcome": a["outcome"], "reason": a["reason"],
+        # what ended the worker: done, timeout (the attempt cap), crashed, api, quota, cancelled.
+        # A timed-out attempt is stored as outcome red when its gates judged the kept work.
+        "termination": tm.get("outcome"), "gates_first": bool(tm.get("gates_first")),
+        "minutes": mins((a["ended_at"] or clock.wall()) - a["created_at"]),
+        "edits": {k: v for k, v in (tm.get("tool_counts") or {}).items()
+                  if k in ("Edit", "Write", "MultiEdit", "NotebookEdit")},
+        "requests": req.get("n"), "long_requests": req.get("long_n"),
+        "long_request_min": mins(req.get("long_s")), "longest_request_min": mins(req.get("longest_s")),
+        "model_min": mins(req.get("s")), "tool_min": mins(tm.get("tool_s")),
+        "first_edit_start_min": mins(t.get("first_edit_start_s")), "first_edit_end_min": mins(t.get("first_edit_s")),
+        "gates": {name: {"adapter": (gates.get(name) or {}).get("adapter"),
+                         "command_digest": _digest((gates.get(name) or {}).get("command")),
+                         "outcome": g.get("outcome"), "new": g.get("new") or [],
+                         "possibly_inherited": g.get("possibly_inherited") or [],
+                         "attributed": g.get("attributed") or []}
+                  for name, g in (tm.get("gates") or {}).items()},
+    }
+
+
+def _digest(command) -> str | None:
+    import hashlib
+    return hashlib.sha256(json.dumps(command).encode()).hexdigest()[:12] if command else None
+
+
 def steps(s, batch_id: str) -> dict:
     """Per-step numbers for one batch, the baseline table later batches compare against
     (docs/evidence/2026-10-14-gh-resolve-p5-batch-baseline.md was this, by hand). Minutes are
@@ -188,6 +227,7 @@ def steps(s, batch_id: str) -> dict:
                     "JOIN plans p ON p.id = st.plan_id WHERE st.batch_id = ? ORDER BY p.ord, st.idx",
                     batch_id):
         every = s.all("SELECT * FROM attempts WHERE step_id = ? ORDER BY created_at", st["id"])
+        gates = {g["name"]: g for g in json.loads(st["gates"] or "[]")}
         # Minutes keep gates-first runs (comparable with the P5 baseline); attempt and red counts
         # leave them out: a measurement with no worker is not an attempt.
         mins = sum(((a["ended_at"] or clock.wall()) - a["created_at"]) for a in every) / 60
@@ -211,10 +251,14 @@ def steps(s, batch_id: str) -> dict:
                          "peak_context_tokens") or 0 for a in atts] or [0]) / 1000),
                      # pace (kira-cloudflare-44, Oct 16): model turns over every attempt of the
                      # step, and the model seconds per turn, so plans can be sized against it
-                     **_pace(atts)})
+                     **_pace(atts),
+                     "attempt_records": [_attempt(a, gates) for a in every]})
     done = [r for r in rows if r["status"] == "accepted"]
     first_try = [r for r in done if r["attempts"] - r["interrupted"] == 1 and r["red"] == 0]
-    return {"batch": batch_id, "steps": rows,
+    return {"batch": batch_id, "report_version": REPORT_VERSION, "steps": rows,
+            "refusals": [{k: f[k] for k in ("reason", "detail", "opened_at", "cleared_at")}
+                         for f in s.all("SELECT * FROM refusals WHERE batch_id = ? ORDER BY opened_at",
+                                        batch_id)],
             "accepted": len(done), "of": len(rows),
             "minutes_per_accepted_step": round(sum(r["minutes"] for r in done) / len(done), 1) if done else None,
             "first_attempt_share": round(len(first_try) / len(done), 2) if done else None,

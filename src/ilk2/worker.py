@@ -34,6 +34,7 @@ PINNED_SETTINGS = {"autoCompactEnabled": True}
 
 API_ERROR = re.compile(r"API Error: (429|5\d\d)|overloaded|rate.?limit", re.I)
 QUOTA = re.compile(r"quota|insufficient.?balance|usage limit|credit balance", re.I)
+LONG_REQUEST_S = 60.0  # a "long request" (evidence E5): thinking plus one large write
 
 
 @dataclass
@@ -166,6 +167,12 @@ class Dispatch:
     # Counted here because a session killed at the cap emits no result with num_turns.
     turns: int = 0
     model_s: float = 0.0
+    # Requests (docs/07 §7.4.1, evidence E5): a main-loop response runs from the last tool result
+    # to its *last* stream event. model_s stops at the first, so it misses the writing of a large
+    # tool_use block: in batch 17d single requests ran 3-8 min and one wrote 46,638 characters.
+    _reqs: dict = field(default_factory=dict)       # message id -> [start, end]
+    tool_s: float = 0.0
+    _last_main: float | None = None
     _turn_ids: set = field(default_factory=set)
     _since_user: float = 0.0
     capped: bool = False
@@ -191,6 +198,9 @@ class Dispatch:
             self.peak_context = max(self.peak_context, pre)
         elif typ == "user":
             self._since_user = t  # a tool result: the next turn's model time starts here
+            if self._last_main is not None:
+                self.tool_s += max(0.0, t - self._last_main)
+                self._last_main = None
         elif typ == "assistant":
             self.timings.setdefault("first_assistant_s", t)
             mid = (ev.get("message") or {}).get("id")
@@ -198,6 +208,9 @@ class Dispatch:
                 self._turn_ids.add(mid)
                 self.turns += 1
                 self.model_s += max(0.0, t - self._since_user)
+            if not ev.get("parent_tool_use_id") and mid:
+                self._reqs.setdefault(mid, [self._since_user, t])[1] = t
+                self._last_main = t
             # main loop only: a subagent's turns (parent_tool_use_id set) have their own context
             u = {} if ev.get("parent_tool_use_id") else ((ev.get("message") or {}).get("usage") or {})
             ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
@@ -212,6 +225,8 @@ class Dispatch:
                     self.timings.setdefault("first_tool_use_s", t)
                     if b.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                         self.timings.setdefault("first_edit_s", t)
+                        if not ev.get("parent_tool_use_id") and mid in self._reqs:
+                            self.timings.setdefault("first_edit_start_s", self._reqs[mid][0])
         elif typ == "result":
             self.result = ev
             self.timings["result_s"] = t
@@ -285,6 +300,12 @@ class Dispatch:
             return "error"
         return "done"
 
+    def requests(self) -> dict:
+        lat = [b - a for a, b in self._reqs.values()]
+        long = [x for x in lat if x > LONG_REQUEST_S]
+        return {"n": len(lat), "s": round(sum(lat), 1), "long_n": len(long), "long_s": round(sum(long), 1),
+                "longest_s": round(max(lat), 1) if lat else None}
+
     def summary(self) -> dict:
         r = self.result or {}
         return {
@@ -297,6 +318,7 @@ class Dispatch:
             "thinking_chars": self.thinking_chars, "thinking_s": round(self.thinking_s, 1),
             "peak_context_tokens": self.peak_context, "compactions": self.compactions,
             "turns": self.turns, "model_s": round(self.model_s, 1),
+            "requests": self.requests(), "tool_s": round(self.tool_s, 1),
             "timings": {k: round(v, 3) for k, v in self.timings.items()},
             "terminated": self.terminated,
         }

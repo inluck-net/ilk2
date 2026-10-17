@@ -123,3 +123,24 @@ def test_batch_report_sums_phase_minutes(ilk):
                                   "gates": 1.1, "scope": 0.0}
     lines = [ln for ln in report.steps_table(r).splitlines() if ln.startswith("Phases (min):")]
     assert lines == ["Phases (min): base 37.0, dispatch 12.3, recover 4.0, gates 1.1"]
+
+
+def test_the_batch_report_carries_a_versioned_record_per_attempt(ilk):
+    # docs/07 §7.4.1: ilk-feedback classifies from this JSON alone, never from run directories.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([BAD], [GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    r = report.steps(ilk.s, bid)
+    assert r["report_version"] == report.REPORT_VERSION and r["refusals"] == []
+    recs = r["steps"][0]["attempt_records"]
+    assert [(x["n"], x["outcome"], x["termination"]) for x in recs] == [(1, "red", "done"), (2, "accepted", "done")]
+    first, second = recs
+    assert first["edits"] and second["edits"]                       # the stub wrote calc.py each time
+    assert first["requests"] >= 1 and first["model_min"] is not None and first["tool_min"] is not None
+    assert first["first_edit_start_min"] is not None and first["first_edit_end_min"] >= first["first_edit_start_min"]
+    g = first["gates"]["unit"]
+    assert g["adapter"] == "pytest" and g["outcome"] == "fail" and len(g["command_digest"]) == 12
+    assert second["gates"]["unit"]["outcome"] == "pass"
+    assert g["command_digest"] == second["gates"]["unit"]["command_digest"]   # same gate across attempts
