@@ -143,7 +143,7 @@ def main() -> None:
     mine = []
     for s in work_steps(db, a.batch):
         n = numstat(repo, s["accepted_commit"])
-        mine.append((s["secs"] / 60, n["ins"]))
+        mine.append((s["secs"] / 60, n["ins"], s["chars"]))
         print(f"| {s['slug']} · {s['idx']} | {s['secs'] / 60:.1f} | {n['files']} | "
               f"{n['ins']} ({n['tests']} / {n['src']} / {n['docs']}) | {s['chars']} |")
 
@@ -185,8 +185,12 @@ def main() -> None:
     for i, name in enumerate(["Minutes per step", "Inserted lines per step"]):
         print(f"| {name} | {m[i]:.1f} | {statistics.median(x[i] for x in per_batch):.1f} | "
               f"{statistics.median(x[i] for x in pooled):.1f} |")
-    print(f"| Instruction chars per step | — | {statistics.median(x[2] for x in per_batch):.0f} | "
+    print(f"| Instruction chars per step | {m[2]:.0f} | {statistics.median(x[2] for x in per_batch):.0f} | "
           f"{statistics.median(x[2] for x in pooled):.0f} |")
+    rate = sum(r[1] for r in mine) / sum(r[0] for r in mine)
+    rates = sorted((x[1] / x[0] for x in per_batch), reverse=True)
+    print(f"\ninserted lines per worker-minute, whole batch: {rate:.1f}; "
+          f"rank {1 + sum(r > rate for r in rates)} of {len(rates) + 1}")
 
 
 if __name__ == "__main__":

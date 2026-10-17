@@ -1,6 +1,6 @@
 # Evidence: where batch 17d's time went (Oct 17)
 
-Batch `b-3bbee3537471` (`v1:MASTER-2026-10-17d-execution-plan`), gh-resolve on chad-mbp, worker model `mimo-v2.6-pro`. **5 work plans and 1 verification plan, 7 steps:** the first work plan has 2 steps, every other plan has 1. Snapshot after the batch shipped, Oct 17 22:30 CST.
+Batch `b-3bbee3537471` (`v1:MASTER-2026-10-17d-execution-plan`), gh-resolve on chad-mbp, worker model `mimo-v2.6-pro`. **5 work plans and 1 verification plan, 7 steps:** the first work plan has 2 steps, every other plan has 1. Snapshot after the batch shipped, Oct 17 22:30 CST; revised the same evening after the second Codex review (phase totals of the shipped batch, whole-batch throughput).
 
 The tables below are the output of `uv run python tools/batch_time.py b-3bbee3537471`. It reads the ilk2 store read-only, `git show --numstat` of each accepted commit, and the worker transcripts under `~/.ilk2/data/runs/<run>/<attempt>/config/projects/`, including each session's `subagents/*.jsonl`. Its method is in its docstring. Codex reproduced the first four steps' durations, first-edit times, turns, insertions and splits independently (review of `32cbb91`).
 
@@ -33,7 +33,7 @@ A request is one model message. A long request is one of more than 60 s. "First 
 | cheap-swept · 0 #2 (resumed) | accepted | 28.7 | 22.9 | 1, 1.2 | 5.1 | 79 | 14 s | 0 | 0.0 → 1.3, 143 |
 | sweep-stops · 0 #1 | accepted | 34.2 | 31.5 | 1, 3.0 | 2.2 | 112 | 13 s | 62 | 7.3 → 8.1, 13,810 |
 
-- **Model requests are 80-96% of every attempt.** Tool time is 1.0-5.1 min per attempt. Gates over the whole batch took 1.4 min, and ilk2's work between steps about 11 min (`ilk2 report --batch`: phases base 7.9, merge 1.6, gates 1.4).
+- **Model requests are 80-96% of every attempt.** Tool time is 1.0-5.1 min per attempt. Over the whole shipped batch, `ilk2 report --batch b-3bbee3537471` gives the phases as dispatch 287.7 min, gates 14.8, base 7.9, merge 2.8 and attribute 0.4. Outside the worker, that is **25.9 min**, most of it the verification plan's full-suite gates and the one-off base measurement.
 - **Long requests dominate the fresh, large steps.** In 4 of 7 attempts, 6-8 long requests took 13-28 min, a third to a half of the attempt. The resumed and small attempts had 1 each.
 - **Median request time stays at 8-14 s across attempts,** and in the transcripts it does not grow with context from 50k to 350k tokens. The rising mean seconds per turn in `ilk2 report` comes from the long requests.
 - **The first-edit figure mixes discovery and writing.**
@@ -52,7 +52,7 @@ There are 23 other gh-resolve batches in the store, with 69 accepted work steps.
 | Inserted lines per step | 2,958 | 981 | 1,012 |
 | Instruction characters per step | 23,159 | 14,896 | 13,923 |
 
-17d's line throughput (inserted lines per worker-minute) was 2nd of 24 batches, measured over its first four steps. That makes it fast per line and slow per step. The steps were large.
+Over all six work steps, 17d wrote 61.7 inserted lines per worker-minute, rank 2 of 24 batches (the script's last line). That makes it fast per line and slow per step. The steps were large.
 
 ## The plan's shape
 
@@ -63,4 +63,4 @@ There are 23 other gh-resolve batches in the store, with 69 accepted work steps.
 
 ## Conclusion
 
-ilk2's orchestration was about 11 min of a 5.23 h batch. The time is the worker writing large steps, one after another. The levers are the shape of the plan (step size and real dependencies) and the worker's long thinking requests (docs/06 "Speed levers… never built"). Neither is a defect in ilk2's execution path. The first-edit metric is a reporting defect.
+Outside the worker, ilk2's phases took 25.9 min of a 5.23 h batch, most of it the final full-suite verification. The time is the worker writing large steps, one after another. The levers are the shape of the plan (step size and real dependencies) and the worker's long thinking requests (docs/06 "Speed levers… never built"). Neither is a defect in ilk2's execution path. The first-edit metric is a reporting defect.
