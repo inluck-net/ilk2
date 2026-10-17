@@ -14,9 +14,12 @@ First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by
 | 4 | [Relation to V1 and migration](04-v1-relation-and-migration.md) | How V2 sits beside V1, how a project moves over, and when we stop |
 | 5 | [Open questions](05-open-questions.md) | What still needs a decision before code |
 | 6 | [Open items after design close](06-open-items.md) | What is still open, and at which phase it gets resolved |
+| 7 | [Retiring V1 completely](07-retiring-v1.md) (proposed, Oct 17) | How V1's planner, feedback and run skills become ilk2-native or go, and when V1's data is archived |
 | E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
 | E2 | [Evidence: what the full suite costs](evidence/2026-10-13-full-suite-cost.md) | Where do full-suite runs cost time in V1's repos, and would splitting into component repos help? |
 | E3 | [Evidence: the gh-resolve P5 batch baseline](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) | How long does each step of a real 15-step batch take on ilk2, and what did the night's fixes change? |
+| E4 | [Evidence: V2 against V1 speed](evidence/2026-10-16-v2-vs-v1-speed.md) | Minutes per step on the projects with a V1 baseline |
+| E5 | [Evidence: where batch 17d's time went](evidence/2026-10-17-batch-17d-where-the-time-went.md) | Why a 7-step gh-resolve batch took about 6 h, and what ilk2 controls in it |
 
 **Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
 - invariant I10, refusal accounting;

@@ -4,6 +4,8 @@ V2 replaces V1's *execution engine* only. V1's planning, feedback and ticket too
 
 ## 4.1 What V2 replaces, keeps and leaves alone
 
+**Proposed change, Oct 17:** [document 7](07-retiring-v1.md) retires the "kept" rows too. The planners become ilk2-native, `ilk-feedback` is rebuilt on ilk2, and the replaced skills are uninstalled.
+
 | V1 component (`ilk-skills/skills/…`) | Non-test lines | Fate under V2 |
 |---|---:|---|
 | `ilk-loop`: runner, driver, gates, ship-integrity | 62,056 | **Replaced** by `ilk2` supervisor, driver and gates |
@@ -188,7 +190,7 @@ V1's engine is off on a host when its launchd scheduler (`net.inluck.ilk.schedul
 **The switch-off, per host, once its rows are retired:**
 1. `ilk2 report` shows the host's ilk2 projects meeting §4.5, and `ilk2 v1 status` lists nothing that still needs V1 (a registered repo ilk2 does not own, a queued or active master, a live runner). A registered path that no longer exists is reported under `stale`, not as a blocker: V1's scheduler skips it (`skip-missing-path`). On rezmac, Oct 14, 5 of 8 per-run resolver registrations were like that.
 2. Disable, do not delete: `ilk2 v1 off --apply` (refused while `status` lists anything) boots out `net.inluck.ilk.scheduler` and moves its plist to `~/Library/LaunchAgents/disabled-by-ilk2/`. `ilk2 v1 on --apply` moves it back and bootstraps it.
-3. V1's data (`~/.ilk-data`) and releases (`~/.ilk`) stay as they are: history, baselines (`ilk2 report --v1-baseline`) and rollback.
+3. V1's data (`~/.ilk-data`) and releases (`~/.ilk`) stay as they are: history, baselines (`ilk2 report --v1-baseline`) and rollback. *Proposed change, Oct 17: [document 7](07-retiring-v1.md) §7.4.4 freezes the baselines into ilk2 and archives both, as a last stage gated on Chad's go.*
 4. V1's planning skills (`/ilk-plan`, `ilk-spec`, inbox and lark tickets) keep working: they write masters into V1's plans dir, and ilk2 claims the queued ones of the projects it owns.
 
 **Order:** chad-mbp first (ilk-skills takeover now; fleet b at P5 live), then rezmac (P6).
