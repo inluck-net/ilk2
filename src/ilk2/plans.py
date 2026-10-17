@@ -23,6 +23,7 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+SPEC_VERSION = 1   # bump when a reader of stored snapshots would read them differently
 ADAPTERS = {"pytest", "vitest", "shell", "script"}  # "script": a package script not yet resolved
 TEST_ADAPTERS = {"pytest", "vitest"}
 DEFAULT_GATE_CAP_S = 600
@@ -84,9 +85,13 @@ class BatchSpec:
     # The driver gives each attempt a readable copy; workers cannot read the planner's dirs.
     documents: dict[str, str] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
+    # Which reader built the spec: "json", or "v1-markdown" (docs/07 §7.4.1, D8). Recorded with
+    # SPEC_VERSION in the snapshot, so a later reader knows what it is looking at.
+    source: str = "json"
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["spec_version"] = SPEC_VERSION
         d.pop("problems")
         for p in d["plans"]:
             p.pop("problems", None)
@@ -336,7 +341,7 @@ def parse_v1_master(master: Path) -> BatchSpec:
             problems.append(f"sub-plan registry lists {n}, which the MASTER does not link")
         for n in sorted(linked - set(reg)):
             problems.append(f"MASTER links {n}, which the sub-plan registry does not list")
-    return BatchSpec(plans=plans, documents=v1_documents(master), problems=problems)
+    return BatchSpec(plans=plans, documents=v1_documents(master), problems=problems, source="v1-markdown")
 
 
 def v1_documents(master: Path) -> dict[str, str]:

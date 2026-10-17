@@ -509,3 +509,12 @@ def test_subplans_named_only_in_the_registry_are_imported_in_v1s_order(tmp_path)
     spec = plans.parse_v1_master(m)
     assert [p.slug for p in spec.plans] == ["b", "a"] and plans.check(spec) == []
     assert set(spec.documents) == {m.name, "2026-10-17-a.md", "2026-10-17-b.md"}
+
+
+def test_the_snapshot_records_its_reader_and_spec_version(tmp_path):
+    m = _master(tmp_path, "[a](./2026-10-17-a.md)\n", {"2026-10-17-a.md": "a"})
+    d = plans.parse_v1_master(m).to_dict()
+    assert (d["source"], d["spec_version"]) == ("v1-markdown", plans.SPEC_VERSION)
+    j = plans.from_dict({"plans": [{"slug": "a", "steps": [{"title": "t", "instructions": "x"}]}]}).to_dict()
+    assert j["source"] == "json"
+    assert plans.from_dict(d).plans[0].slug == "a"          # a snapshot still loads

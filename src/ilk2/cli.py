@@ -228,6 +228,16 @@ def main(argv: list[str] | None = None) -> int:
                     "(default: the 'ilk2' project's repo)")
     rs.add_argument("--all", action="store_true", help="candidates: every status, not only open")
     rs.add_argument("--evidence", action="store_true", help="candidates: include each one's evidence")
+    im = sub.add_parser("improvement", help="findings about a project: postmortems, reviews (docs/07 §7.4.3)")
+    im.add_argument("op", choices=["add", "list", "set"])
+    im.add_argument("--project")
+    im.add_argument("--source", help="add: postmortem, review, human or v1-backlog")
+    im.add_argument("--fingerprint", help="add: the dedup key; the same finding again adds a hit")
+    im.add_argument("--title")
+    im.add_argument("--evidence", default="{}", help="add: a JSON object")
+    im.add_argument("--id", help="set: the improvement id")
+    im.add_argument("--status", help="list: filter; set: open, accepted, rejected or done")
+    im.add_argument("--reason", default="", help="set: why (journalled)")
     v1p = sub.add_parser("v1", help="V1's scheduler on this host (docs/04 §4.9, P7)")
     v1p.add_argument("op", choices=["status", "off", "on", "inventory"],
                      help="inventory: what on this host still resolves into V1 (docs/07 §7.4.0)")
@@ -437,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
             elif f.name.startswith("MASTER-"):
                 spec = plans.parse_v1_master(f)
             else:
-                spec = plans.BatchSpec(plans=[plans.parse_v1_subplan(f.read_text())])
+                spec = plans.BatchSpec(plans=[plans.parse_v1_subplan(f.read_text())], source="v1-markdown")
             try:
                 bid = batches.submit(s, a.project, spec, base=a.base, priority=a.priority,
                                      consumer_ref=a.consumer_ref,
@@ -561,6 +571,20 @@ def main(argv: list[str] | None = None) -> int:
                                                             "status", "batch_id")},
                                       **({"evidence": json.loads(r["evidence"])} if a.evidence else {})}
                                      for r in rows]}, True)
+        elif a.cmd == "improvement":
+            from . import improvements as imp
+            try:
+                if a.op == "add":
+                    out = imp.add(s, a.project, a.source, a.fingerprint or "", a.title or "",
+                                  json.loads(a.evidence))
+                elif a.op == "set":
+                    out = imp.set_status(s, a.id or "", a.status or "", "human", a.reason)
+                else:
+                    out = {"improvements": imp.rows(s, a.project, a.status)}
+            except (imp.IntakeError, ValueError) as e:
+                _out({"error": "rejected", "problems": [str(e)]}, True)
+                return 2
+            _out(out, True)
         elif a.cmd == "v1" and a.op == "inventory":
             from . import inventory
             out = inventory.scan()
