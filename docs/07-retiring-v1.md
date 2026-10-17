@@ -1,6 +1,6 @@
 # 7. Retiring V1 completely
 
-**Status: proposed, Oct 17, 2026, for review (Codex).** Written by the ilk2 build session after batch 17d. Chad reviewed the summary page (`~/Documents/keyreply/chad/ilk-skills/20261017-retire-v1-plan.html`) and asked for this design before any work starts. The tracker is `~/Documents/handoffs/ilk2-retire-v1-handoff.md`.
+**Status: proposed, revision 2, Oct 17, 2026.** Revised after the Codex review of `32cbb91` (15 findings, 5 of them blockers, all verified against the code and data and accepted; §7.10). Written by the ilk2 build session after batch 17d. Chad reviewed the summary page (`~/Documents/keyreply/chad/ilk-skills/20261017-retire-v1-plan.html`) and asked for this design before any work starts. The tracker is `~/Documents/handoffs/ilk2-retire-v1-handoff.md`.
 
 This document changes two decisions in [document 4](04-v1-relation-and-migration.md):
 - **§4.1:** V1's planning and feedback tools were "kept". Now they become ilk2-native, and V1's other skills are removed.
@@ -10,180 +10,301 @@ It also proposes an answer to Q2 in [document 5](05-open-questions.md).
 
 ## 7.1 Why
 
-- **The engine moved, the planner did not.** ilk2 has run every project since Oct 15 (V1's scheduler is off on both hosts, P7). But every plan ilk2 runs is still written by V1's `/ilk-plan`, for V1's engine. All 12 ilk skills and 19 ilk commands installed for Claude Code, Codex and Cursor resolve to the V1 release `~/.ilk/releases/v0.9.198`. Of their files, 0 mention ilk2 apart from one test path.
-- **The planner's rules exist, and nothing enforces them.** Batch 17d (gh-resolve, Oct 17) took about 6 h for 7 steps ([evidence](evidence/2026-10-17-batch-17d-where-the-time-went.md)). ilk2's orchestration was about 11 min of that. The rest was the worker writing steps 3 times the median size (2,972 inserted lines per step, against 981 over the other 23 gh-resolve batches), in a strictly serial chain.
-  - V1's own sizing rules forbid steps like these: a sub-plan body of about 200 lines or less and about 5 files or fewer (`decomposition-principles.md:84-96`), and an edit surface within half the iteration window (`lint_step_window_fit`, `plan_lint.py:1754`).
-  - The rules live in V1's linter. The planner runs it at its own discretion. ilk2 only checks that a plan parses and its gates are well formed (`plans.py:348-392`).
-- **V1's preflight checks the wrong parser.** `/ilk-plan` runs `plan_preflight.py` before a master goes from `draft` to `queued` (`ilk-plan.md:1022-1040`). It imports V1's `plan_status`, `run_local_checks` and `safety_kernel` (`plan_preflight.py:29-37`). So it proves that V1 could read the plan, and ilk2 is the one that reads it.
+- **The engine moved; the shared planner did not.** ilk2 has run every project since Oct 15 (V1's scheduler is off on both hosts, P7). The interactive planner every session uses is still V1's `/ilk-plan`, written for V1's engine.
+  - All 15 of 15 gh-resolve batches created since Oct 15 were V1 masters that ilk2 claimed. The other 10 of the 25 ilk2 batches in that period were submitted directly (3 ilk2 RSI, 5 kira-dev, 2 kira-live).
+  - On both hosts, Claude Code, Codex and Cursor each have 12 ilk skills and 19 ilk commands installed. All of them resolve to the V1 release `v0.9.198`, which mentions ilk2 in one upgrade test only.
+- **V1's sizing guidance is prose, and nothing enforces it.** Batch 17d (gh-resolve) ran 5.23 h for 6 work steps ([evidence E5](evidence/2026-10-17-batch-17d-where-the-time-went.md)). ilk2's orchestration was about 11 min of that. The rest was the worker writing steps of about 3 times the median size (2,958 inserted lines per step against a median of 981 over the other 23 gh-resolve batches), in a strictly serial chain.
+  - `decomposition-principles.md:84-96` asks for a sub-plan of about 200 lines and typically about 5 files or fewer.
+  - The linter's `lint_step_window_fit` (`plan_lint.py:1754`) compares counts with minutes and found 0 issues across 17d's six sub-plans. 17d's steps touched 6-11 files.
+  - ilk2 checks only that a plan parses and its gates are well formed (`plans.py:348-392`).
+- **V1's preflight checks with the wrong parser.** `/ilk-plan` runs `plan_preflight.py` before a master goes from `draft` to `queued` (`ilk-plan.md:1022-1040`). Its readers are V1's: `plan_lint` and `plan_status` (`plan_preflight.py:29-37`), `run_local_checks` (:321) and `safety_kernel` (:390). It proves that V1 could read the plan, but ilk2 is the one that reads it.
+- **ilk2's import is lenient where V1's preflight was strict.** `parse_v1_master` silently skips a linked sub-plan file that is missing (`plans.py:271-272`). A missing file therefore gives a smaller batch instead of an error.
 - **Stale V1 instructions mislead every session.** The run commands (`/ilk`, `/ilk-status`, `/ilk-doctor`…) answer questions about an engine that is off. The installer's auto-plan block in `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and `~/.cursor/rules/ilk-auto-plan.mdc` routes all work through V1's `/ilk-plan`.
-- **Every fix is a handoff.** Today a planning finding needs a message to the consumer session, which then briefs its own planner agents differently. The rule never reaches the next project.
 
 ## 7.2 Goal and done criteria
 
-**Goal:** no V1 code is needed to plan, run, observe or debug work on either host.
+**Goal:** no V1 code or data is needed to plan, run, observe or debug work on either host.
 
 **Done when**, on chad-mbp and rezmac:
-1. Of the installed skills, commands and hooks in Claude Code, Codex and Cursor, 0 resolve into `~/.ilk/` or into V1's `ilk-loop` code.
-2. A batch planned by the new `/ilk-plan` reaches ilk2 through `ilk2 submit`, with no `~/.ilk-data` claim, and ships. This has happened for at least 3 batches across at least 2 projects.
-3. `ilk-feedback` writes a postmortem for an ilk2 batch from `ilk2 report` and `ilk2 events` alone.
-4. `ilk2` has no runtime read of `~/.ilk-data` or `~/.ilk` (`v1.data_root()` and its callers removed or inert, §7.4.4). The V1 baselines are frozen inside ilk2.
-5. `~/.ilk`, `~/.ilk-data` and V1's launchd plists are archived on both hosts.
+1. **The installed-artifact manifest (§7.4.0) resolves clean on both hosts.** 0 skills, commands, hooks, settings blocks, PATH entries, tool links, worker homes or launchd items resolve into `~/.ilk`, `~/.ilk-data` or V1 code in the ilk-skills clone. Anything that remains is on a reviewed allow-list, with the reason.
+2. **The new planner submits directly.** At least 3 batches planned by the new `/ilk-plan`, across at least 2 projects, reached ilk2 through `ilk2 submit`, with no `~/.ilk-data` claim, and shipped.
+3. **`ilk-feedback` needs only ilk2's JSON.** It wrote a postmortem for an ilk2 batch using only versioned ilk2 JSON (`ilk2 report`, `status` and `events`), with no reads of ilk2's run directories.
+4. **No consumer reads V1.** gh-resolve and ilk-pocket have 0 runtime reads of V1 data or code, or a reviewed allow-list that proves each remaining reference inert (§7.4.4).
+5. **ilk2 no longer reads V1 at runtime.** ilk2 has no runtime read of `~/.ilk-data` or `~/.ilk`, the V1 baselines are frozen inside ilk2, and that release is installed on both hosts.
+6. **V1's trees are archived** under §7.4.6's rules, with a documented restore drill.
 
 ## 7.3 What changes, by component
 
 | Component | [Document 4](04-v1-relation-and-migration.md) §4.1 | Now |
 |---|---|---|
-| `/ilk`, `ilk-loop`, `/ilk-run`, `/ilk-stop`, `/ilk-status`, `/ilk-doctor`, `/ilk-schedule`, `/ilk-park`, `/ilk-resume`, launcher, runner, watchdog | Replaced by ilk2 | **Uninstalled** (stage 1). The ilk2 equivalents are `ilk2 status`, `report`, `events`, `doctor`, `park`, `resume` and `cancel` |
-| `ilk-ship`, `ilk-upgrade` | Mostly replaced | **Uninstalled** (stage 1). Batches ship through the driver. ilk2 has `ilk2 release`. A consumer's own release tagging stays the consumer's |
-| `ilk-self-improve` | Paused for ilk2 | **Uninstalled** (stage 1). ilk2's own improvement is RSI (`docs/rsi/`) |
-| `/ilk-plan`, `ilk-spec` | Kept unchanged | **Made ilk2-native** (stage 2b, §7.4.2) |
-| inbox and Lark ticket planners | Kept | **Made ilk2-native** (stage 2b). Their ticket adapters (`scripts/cli.py`) stay, and their data moves out of `~/.ilk-data` |
-| `ilk-feedback` | Kept, adapted later | **Rebuilt on ilk2** (stage 3, §7.4.3) |
-| `ilk-handover`, `/ilk-file` | Not listed | **Kept as they are** (stage 1 checks for V1 paths) |
-| Hooks linked into `~/.claude/hooks` from the dev clone (no-full-suite, no-duplicate-read, no-live-clone-edit, no-foreign-plan-edit, no-sealed-read, worker-write-scope) | Not listed | **Reviewed in stage 1.** Each is kept (re-pointed at a release, not the dev clone), moved into ilk2's worker template, or dropped. They apply to interactive sessions today, not only to V1 workers |
-| Auto-plan routing block (`conventions/auto-plan-routing.md`, `auto_use_ilk_plan`) | Not listed | **Rewritten for the ilk2-native planner** in stage 2b. Removed from V1's installer in stage 1 only if stage 2b is not ready, so sessions are never left without a planning route |
+| `/ilk`, `/ilk-run`, `/ilk-stop`, `/ilk-status`, `/ilk-doctor`, `/ilk-schedule`, `/ilk-park`, `/ilk-resume`, launcher, runner, watchdog | Replaced by ilk2 | **Uninstalled at the switch** (§7.4.5). The ilk2 equivalents are `ilk2 status`, `report`, `events`, `doctor`, `park`, `resume` and `cancel` |
+| `ilk-loop` (the skill folder) | Replaced by ilk2 | **Uninstalled last, at the switch.** Until then the old planner and feedback import its scripts (`ilk_paths`, `loop_status`, `timing`, `plan_lint`, `plan_preflight`…), so removing it earlier breaks them |
+| `ilk-ship`, `ilk-upgrade`, `ilk-self-improve` | Mostly replaced / paused | **Uninstalled at the switch.** ilk2 has `ilk2 release` and RSI |
+| `/ilk-plan`, `ilk-spec`, inbox and Lark ticket planners | Kept unchanged | **Rebuilt ilk2-native** beside the old ones (§7.4.2), then switched in |
+| `ilk-feedback` | Kept, adapted later | **Rebuilt on ilk2's JSON** (§7.4.3), then switched in |
+| `ilk-handover`, `/ilk-file` | Not listed | **Kept.** The inventory checks them for V1 paths |
+| Hooks in `~/.claude/hooks` (6, linked from the dev clone) | Not listed | **Each one is decided in the inventory**: kept and re-pointed at a release, moved into ilk2's worker template, or dropped. They affect interactive sessions too |
+| Auto-plan routing block (`conventions/auto-plan-routing.md`, `auto_use_ilk_plan`) | Not listed | **Rewritten for the new planner and switched in the same step as the planner.** Sessions always have a planning route |
+| PATH links `claude-worker`, `claude-manager`, `claude-worker-switch` (into the dev clone, chad-mbp); `tools/migration` links in all three hosts | Not listed | **Decided in the inventory** (they are V1 worker tooling; ilk2 has its own worker template) |
+| gh-resolve's V1 code paths (106 non-test references in 21 files under `tools/gh_resolve`) | Not listed | **Retired in gh-resolve, by its owner** (§7.4.4) |
+| ilk-pocket (`net.inluck.ilk-pocket-agent`, running on both hosts, data root `~/.ilk-data`, 22 references in its Python) | Not listed | **Moved to its own data root** (§7.4.4) |
 
 ## 7.4 Design
 
-### 7.4.1 Stage 2a: ilk2 checks plans at submission (in this repo)
+### 7.4.0 Inventory and manifest (first)
 
-`ilk2 submit` already validates a spec (`plans.check`, `plans.py:348`). Stage 2a adds **warnings**. They are printed by `submit --check`, recorded as `submit.warning` events, and shown in `ilk2 status`. Each comes with its basis:
+This step builds one **installed-artifact manifest** per host and a checker that resolves every entry's real target. It runs before anything is removed. It covers:
+- skills, commands and hooks in Claude Code, Codex and Cursor;
+- the settings blocks: the auto-plan block, and hook registrations in `settings.json`;
+- PATH entries and `tools/*` links;
+- V1 worker and manager homes;
+- every launchd file whose label or content matches `ilk` or `.ilk-data`, in any folder on both hosts, including rezmac's older scheduler plist backups and `net.inluck.ilk-pocket-agent`;
+- the consumer repos that read V1 (gh-resolve, ilk-pocket), as counts of runtime references.
+
+Done criterion 1 is this checker coming back clean. Its first output becomes the baseline in the tracker.
+
+### 7.4.1 ilk2 checks plans at submission (in this repo)
+
+**Structural checks, before `submit --check` becomes the planner's preflight.** These checks are ported from what `plan_preflight.py` enforced (Codex review, finding 5). Each one *refuses* submission, because each is a broken plan, not a judgment call:
+- a linked sub-plan file that is missing or cannot be parsed. Today it is silently dropped (`plans.py:271-272`);
+- a mismatch between the master's sub-plan registry table and the sub-plans it links;
+- a declared test path that does not exist at the base;
+- a step that can produce no commit and does not say so (V1's `--allow-empty` convention);
+- a gate executable that is not resolvable (already checked, `plans.py:381-386`).
+
+Each check comes with **cross-parser fixtures** from real masters: 17d, and at least one master each from kira and ilk-skills. They prove that ilk2 and V1 agree, or differ only on purpose. The imported Markdown also gets a **schema version** in the snapshot (`spec_version`). An ambiguous import is refused, not guessed.
+
+**Warnings, as telemetry, not refusals.** Each is printed by `submit --check`, recorded as a `submit.warning` event, and shown in `ilk2 status`:
 
 | Warning | Fires when | Threshold (judgment call) | Wrong if |
 |---|---|---|---|
-| `step-size` | A step's declared scope spans more than N files, or its stored instructions are more than M characters | N = 6 files, M = 30,000 characters. Basis: 17d's steps touched 7-10 files with 25,317-character instructions on average. The other 23 gh-resolve batches averaged 941-32,598 per batch, median 14,266. Warning only, because 17d itself sat under M | Large steps prove as fast per line and as reliable as small ones. Measure minutes per accepted step by size band after 2 weeks |
-| `serial-chain` | Every plan after the first depends on every earlier plan, and at least 2 plan pairs have disjoint `scope_paths` | Pairs with disjoint scope are the ones lanes could run | Scopes are under-declared, so "disjoint" pairs really share files. Lane-merge repairs would show it |
-| `brief-size` | The rendered brief for a step is more than K characters | K = 200,000. 17d ran 171-185k | Brief size shows no relation to minutes per step |
+| `step-files` | A step's declared scope spans more than N files | N = 6. 17d's steps touched 6-11 files. V1's guidance is about 5 | Steps above N prove as fast and as reliable as those below. Measure by band (§7.6) |
+| `step-instructions` | A step's stored instructions run past M characters | M = 25,000. Medians: 14,896 over batch means, 13,923 pooled per step. 17d's steps ran 11,158-31,433, and 3 of 6 were over M | Same as above |
+| `serial-chain` | Every plan after the first depends on every earlier plan, and at least 2 plan pairs have disjoint `scope_paths` | Disjoint pairs are the ones lanes could run | Scopes are under-declared, so "disjoint" pairs really share files. Lane-merge repairs would show it |
+| `brief-size` | Recorded, never warned | The brief is 171-185k characters in 17d, and its relation to minutes is not shown | — |
 
-Warnings never refuse a batch. A refusal would stall unattended consumers (gh-resolve submits from its own processes) over a threshold that is a judgment call. Promoting a warning to a refusal is a later decision, made with measurements.
+Warnings never refuse a batch. A refusal would stall unattended consumers (gh-resolve submits from its own processes) on thresholds that are judgment calls. The planner fails its own QC on the same rules (§7.4.2); ilk2 only reports.
 
-Stage 2a also fixes the **first-edit metric**. `report` records when the first editing request *starts* and the longest single request per attempt, alongside today's figure. Today's figure is stamped when the editing request ends, so it counts writing time as discovery ([evidence](evidence/2026-10-17-batch-17d-where-the-time-went.md), "Inside an attempt").
+**Timing evidence in the JSON.** `ilk2 report --batch --json` gains, per attempt:
+- request count, long-request count and minutes, tool minutes;
+- the first editing request's start and end;
+- the termination cause, taken from `timings.outcome`. 17d's timed-out attempt is stored as outcome `red` with `timings.outcome: timeout`.
 
-`ilk2 submit --check` becomes the planner's preflight. It parses with ilk2's own parser, which is the parser that matters. That replaces `plan_preflight.py`.
+This replaces today's first-edit figure, which is stamped at the end of the editing request and so counts writing as discovery (E5). It also lets ilk-feedback work without reading run directories (finding 11). `tools/batch_time.py` is the reference method the report has to agree with.
 
-### 7.4.2 Stage 2b: an ilk2-native planner (in ilk-skills, as ilk2 batches)
+### 7.4.2 The ilk2-native planner (in ilk-skills, as ilk2 batches)
 
-**Q2, proposed answer:** keep V1's Markdown layout (a MASTER plus one file per sub-plan) as the format people and planners write. ilk2 already imports it (`parse_v1_subplan` and `parse_v1_master`, `plans.py:226-310`). Change only **how the plan is delivered** and **which rules are enforced**. A JSON form stays for machine submitters such as gh-resolve, as Q2's default already says. Basis: the Markdown format holds months of planning conventions, and the slowness was in the content, not the format. Wrong if ilk2 finds V1 fields it cannot map, with more than a handful of import special cases; then define an ilk2 format.
+**Q2, proposed answer:** keep V1's Markdown layout (a MASTER plus one file per sub-plan) as the authoring format. Make ilk2's parser the canonical one, with a versioned schema and refusals for missing or ambiguous imports (§7.4.1). The normalized SQLite snapshot stays canonical once a batch is submitted (Q3). A JSON form stays for machine submitters, as Q2's default says. Basis: the Markdown format holds months of planning conventions, and the slowness was in the content, not the format. Wrong if ilk2 needs many special cases to map V1 fields; then define an ilk2 format.
+
+**`plan_lint.py`, a hybrid** (Codex D3):
+- The structural, submission-critical checks move into ilk2 (§7.4.1).
+- The authoring heuristics stay in a standalone checker in the planner's folder: test quality, red-first shape, degrade discipline, scope coverage.
+- V1-runner checks are dropped: verify-sub-plan machinery, gate budgets read from `~/.ilk-data`, `supervised_only`, `ilk_profile`.
+- The unit-mismatched `lint_step_window_fit` is replaced by the measured file and instruction rules of §7.4.1.
 
 What changes in `/ilk-plan`, `ilk-spec` and the inbox and Lark planners:
 
 | Today (V1 dependency, `ilk-plan.md` line) | ilk2-native |
 |---|---|
-| `ilk_paths.py` resolves project root, key and plans dir (:44-77) | The project is looked up from the repo root in ilk2's registry. Plans are drafted in a working folder outside any project repo, under `~/.ilk2/` |
-| Master written to `~/.ilk-data/projects/<key>/plans/`, released by `status: queued`, claimed by ilk2's supervisor tick (:419-426) | `ilk2 submit --project P <master>` after `ilk2 submit --check` passes. The claim path stays readable until stage 4 for old masters |
-| `plan_preflight.py`, which checks V1's parser (:1022-1040) | `ilk2 submit --check` (stage 2a) |
-| `plan_lint.py` (6,020 lines, 52 checks) | **Kept as a standalone checker**, moved out of `ilk-loop` into the planner's own folder. Its plan-quality checks stay: gate correctness, red-first, scope, test-quality, step window. Its V1-runner checks are dropped: verify-sub-plan machinery, gate budgets read from `~/.ilk-data`, `supervised_only`, `ilk_profile`. Judgment call: porting it into ilk2 would roughly double this stage. Wrong if a check must run at submission, in which case it moves into 2a |
+| `ilk_paths.py` resolves project root, key and plans dir (:44-77) | The project is looked up in ilk2's registry by repo root. Drafts go in a folder under `~/.ilk2/`, outside any repo |
+| Master written to `~/.ilk-data/projects/<key>/plans/`, released by `status: queued`, claimed by ilk2's supervisor (:419-426) | `ilk2 submit --check`, then `ilk2 submit --project P <master>` |
+| `plan_preflight.py` (:1022-1040) | `ilk2 submit --check`, with the structural checks of §7.4.1 |
 | `register_project.py` (:1000-1014) | `ilk2 project add`, once per project |
-| `worker_mcp.py list` reads V1's worker home (:167-195) | The MCP allow-list in ilk2's worker template |
-| `loop_status.py`, "`/ilk` to start" text (:1087-1120) | `ilk2 status --batch` |
-| Verify sub-plan built from `ship_audit` and V1 baseline files (:465-485) | ilk2's verification plan: the full suite judged against the base, with attribution, already built (docs/02 §2.5.4, §2.5.7) |
+| `worker_mcp.py list`, which reads V1's worker home (:167-195) | The MCP allow-list in ilk2's worker template |
+| `loop_status.py`; "`/ilk` to start" (:1087-1120) | `ilk2 status --batch` |
+| Verify sub-plan from `ship_audit` and V1 baseline files (:465-485) | ilk2's verification plan: the full suite judged against the base, with attribution (docs/02 §2.5.4, §2.5.7) |
 | `.ilk-launch.json` keys (:376, 459, 996) | ilk2 project settings |
-| Runner-written frontmatter (`current_subplan`, `base_sha`, `pause_after_ship`) | Not written. ilk2 records base and progress in its store |
-| Inbox data `~/.ilk-data/inbox-projects.json`; Lark `~/.ilk-data/ilk-lark-tickets/config.json` | Moved to the skills' own data folder before stage 4 |
+| Runner-written frontmatter (`current_subplan`, `base_sha`, `pause_after_ship`) | Not written |
+| Inbox `~/.ilk-data/inbox-projects.json`; Lark `~/.ilk-data/ilk-lark-tickets/config.json`, which holds a credential and a token cache | Moved to the skills' own data folder, with permissions kept, before the archive. The credential is moved and never printed |
 
-New planning rules, enforced by the planner and checked by 2a:
-1. **Step size.** A step is about 25-30 worker-minutes: split by acceptance-criteria group, with failing tests first in each step. Basis: gh-resolve's fresh-session merged steps of 24-33 min ([E3](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md)), and gh-resolve-e1's agreement on Oct 17.
-2. **Dependencies are justified.** A plan depends on another only when they share files (`scope_paths`) or one needs the other's behaviour, and the master says which for each edge. Plans with disjoint scope have no edge and run in lanes. Basis: 17d's chain was copied from earlier batches (gh-resolve-e1), and lanes help only with disjoint scope (repairs in 15d and in the 15f/15g merge).
-3. **No re-reading what the brief preloads.** The planner is told what ilk2's brief contains: the step, its sub-plan, and windows of the files and tests it names. A sub-plan's "Before you start" section names only what is *not* preloaded. Basis: 17d's workers re-read preloaded files because their sub-plans told them to.
-4. **Stale V1 instructions removed:** `docs/plans/` scaffolding and "commit and push" in `ilk-inbox.md` (:31, :109, :119) and in `ilk-lark-tickets/SKILL.md` (:175-180).
+New planning rules. The planner fails its own QC on each:
+1. **Step size.** A step is about 25-30 worker-minutes: at most 6 files and 25,000 characters of instructions, split by acceptance-criteria group, with failing tests first in each step. Basis: gh-resolve's fresh-session steps of 24-33 min ([E3](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md)), and gh-resolve-e1's agreement on Oct 17.
+2. **Dependencies are justified.** A plan depends on another only when they share files (`scope_paths`) or one needs the other's behaviour, and the master says which for each edge. Basis: 17d's chain was copied from earlier batches (gh-resolve-e1), and lanes help only with disjoint scope (repairs in 15d and 15f/15g).
+3. **No re-reading what the brief preloads.** The planner is told what ilk2's brief contains. A sub-plan's "Before you start" section names only what is *not* preloaded.
+4. **Stale V1 instructions removed:** `docs/plans/` scaffolding and "commit and push" in `ilk-inbox.md` (:31, :109, :119) and `ilk-lark-tickets/SKILL.md` (:175-180).
 
-**Rollout:** one project first (gh-resolve, its next batch). Its batches are compared with 17d and with the median in §7.6 before the auto-plan block points every session at the new planner.
+**Built beside the old planner.** The new skills are installed under temporary names (for example `/ilk2-plan`) next to the old ones. Codex and Cursor get them too. They are smoke-tested on both hosts and trialled on gh-resolve (§7.6). Only then are they switched in (§7.4.5).
 
-### 7.4.3 Stage 3: ilk-feedback on ilk2 (in ilk-skills)
+### 7.4.3 ilk-feedback on ilk2, and an improvement intake (ilk-skills and ilk2)
 
-ilk-feedback reads V1's run files: `last-launch.json`, `.ilk-loop.log`, per-iteration logs and `last-exit.json` (SKILL.md:55-90).
+ilk-feedback today reads V1's run files: `last-launch.json`, the `.ilk-loop.log` summary and per-iteration logs (`ilk-feedback/SKILL.md:55-90`), and the run's `last-exit.json` (SKILL.md:95-105). The rebuilt version:
+- reads only versioned ilk2 JSON: `ilk2 report --batch --json` with the timing fields of §7.4.1, `ilk2 status --batch --json` and `ilk2 events --batch --json`;
+- classifies each batch with the subset of V1's taxonomy that ilk2's evidence supports:
+  - **timeout-bound:** `timings.outcome: timeout` or the attempt cap, not the attempt outcome alone;
+  - **stuck-no-progress:** judged attempts with no edits (`report.py:40`);
+  - **api-flaky and api-blocked:** `api` outcomes and refusals;
+  - **quota-exhausted:** the `quota` outcome. It is kept distinct from budget-exhausted, as V1 does;
+  - **interrupted;**
+  - **local-checks-stuck:** repeated `red` on one gate;
+- drops the V1-only labels: shipped-unverified, self-hosting-drift and the selfmod merge labels;
+- writes postmortems under `~/.ilk2/`.
 
-The rebuilt version:
-- reads `ilk2 report --batch --json`, `ilk2 status --batch --json` and `ilk2 events --batch --json`;
-- reads the worker transcripts under `~/.ilk2/data/runs/` for turn timing, the way the 17d evidence was measured.
+**An improvement intake (D7, Codex finding 13).** The V1 backlog `~/.ilk-data/ilk-skills-improvements/candidates.json` loses all its readers at the switch. It is replaced by a neutral, versioned contract in ilk2:
 
-It classifies each batch with the subset of V1's taxonomy that ilk2's outcomes support:
-- timeout-bound, from `timeout` and the attempt cap;
-- stuck-no-progress, from judged attempts with no edits (`report.py:40`);
-- api-flaky and api-blocked, from `api` outcomes and refusals;
-- budget-exhausted, from `quota`;
-- interrupted;
-- local-checks-stuck, from repeated `red` on one gate.
+`ilk2 improvement add --project P --source postmortem|review|human --fingerprint F --evidence <json> [--api-version 1]`
 
-V1-only labels are dropped: shipped-unverified, self-hosting-drift, and the selfmod merge labels.
+- It is backed by an `improvements` table: project, source, fingerprint (the dedup key), evidence, status and an audit history.
+- RSI consumes the rows that target project `ilk2`, as one more ranked input below Chad's requests and goals (`docs/06` "RSI"). RSI's protected inputs (`docs/rsi/**`) are unchanged.
+- The ilk-skills project, and any other project, reads its own rows with `ilk2 improvement list --project P`.
+- Open V1 candidates are imported once, with their fingerprints.
 
-Postmortems are written under `~/.ilk2/`.
+### 7.4.4 Consumers off V1 (gh-resolve and ilk-pocket)
 
-**The improvement backlog** (`~/.ilk-data/ilk-skills-improvements/candidates.json`) loses its readers in stage 1: self-improve, watchdog and scheduler. **Open (D7):** its new destination. Proposal: postmortem findings about ilk2 go into the RSI inputs the way any defect does (`docs/06` "RSI", ranked inputs). Findings about a planner or skill become a row in the ilk-skills project's backlog. ilk-feedback does not write into ilk2's RSI tables directly, because RSI's inputs are governed (`docs/rsi/**`, protected kernel).
+**gh-resolve**, done by its owner session, with this design as the contract:
+- `tools/gh_resolve` has 106 non-test references to `.ilk-data`, `ILK_DATA_HOME`, `ILK_DATA_DIR`, `.ilk/current`, `ilk-loop` or `park_master.py`, in 21 files. Examples:
+  - `reconcile.py:404` reads `~/.ilk-data/projects`;
+  - `verify.py:842` points `_ILK_SCRIPTS` at the ilk-skills clone's `ilk-loop/scripts`.
+- Some sit on V1-engine branches that are unreachable with `engine: ilk2`, which both hosts run (`~/.gh-resolve-data/config.json:220`). Others still scan plans, sentinels and registries, or call V1 scripts.
+- **Done when** contract tests with `engine: ilk2` cover reconciliation, reap, GC, verification, liveness and plan lookup, and the grep shows 0 runtime matches or a reviewed allow-list where each remaining match is shown inert.
 
-### 7.4.4 Stage 4: removing the rollback (both hosts, by hand)
+**ilk-pocket:**
+- `net.inluck.ilk-pocket-agent` runs on both hosts. Its plist logs to `~/.ilk-data/pocket/agent.log`. Its config defaults `ILK_DATA_HOME` to `~/.ilk-data` (`ilk_pocket/config.py:11`), with 22 references across its Python.
+- Steps:
+  1. choose a new data root for it;
+  2. migrate its state, including registry data, without printing it;
+  3. update its plist and restart the agent;
+  4. smoke-test it on each host before the archive.
+- Owner: the build session, by hand. It is not an ilk2 project. Its repo change is small, and its launchd change is host state.
 
-Preconditions, all of them:
-- stages 1-3 have shipped;
-- done criteria 1-3 hold;
-- 2 weeks have passed with no `ilk2 v1 on` (judgment call matching the length of §4.6's comparison window; no earlier than Oct 29);
-- Chad gives a separate go. This step removes the only rollback (`ilk2 v1 on --apply`), and AGENTS.md reserves it.
+### 7.4.5 The switch (per host, reversible)
 
-Order:
-1. **Freeze the V1 baselines.** `ilk2 report --v1-baseline` parses V1's `.ilk-loop.log` live (`v1.py:183-228`). Each project's baseline is computed once and stored in ilk2: a store table, or a JSON file under `docs/evidence/`. `--v1-baseline` then reads the frozen copy.
-2. **Remove ilk2's V1 reads.**
-   - Remove the supervisor's `claim_v1` tick (`supervisor.py:97, 176-196`) and the claim path (`v1.py:164-180`). By now no queued master is left in V1's plans folders, because `v1 status` checks that.
-   - Clear `v1_key` from project configs.
-   - Remove `ilk2 v1 status/on/off`, `project take-over`, `give_back` and `export --v1`.
-   - Keep `_v1_tooling` gate stripping (`batches.py:202-217`) while old masters are still importable. Keep `~/.ilk-data` in the worker's private dirs (`worker.py:77`); it is harmless.
-   - Each removal has a test.
-3. **Archive on each host:** `~/.ilk`, `~/.ilk-data`, `~/Library/LaunchAgents/disabled-by-ilk2/net.inluck.ilk.*`, V1's worker and manager homes (if present), and the stray `~/.agents/skills/ilk-handover` link.
-   - Each goes to a dated archive folder, never deleted, and is verified by a copy on the other host (the same rule `keyreply-docs tidy` follows).
-   - Credentials inside V1 homes are not printed, copied off-host or read. They are archived as they are.
-4. **Mark the ilk-skills repo:** V1's `ilk-loop`, `ilk-watchdog`, `ilk-launcher`, `ilk-runner`, `ilk-ship` and `ilk-upgrade` code moves to an archive branch or tag, with a README saying where V1 went.
+All conditions:
+- the new planner and feedback have passed their smoke tests on both hosts;
+- the gh-resolve trial has reported (§7.6);
+- §7.4.4 is done.
+
+Then, one host at a time:
+1. Install the new planner, `ilk-spec`, inbox and Lark skills, and feedback, under their final names.
+2. Rewrite the auto-plan block to point at the new planner.
+3. Uninstall the old commands and skills, `ilk-loop` last.
+4. Apply the inventory's decisions on hooks, PATH and tool links.
+5. Run the manifest checker.
+
+All of this happens in one install run. **Reversible:** V1's installer at `v0.9.198` reinstates everything, and nothing on disk is deleted.
+
+### 7.4.6 Removing the rollback (both hosts; separate go)
+
+**Preconditions, all of them** (Codex finding 7):
+- the switch is done on both hosts, and done criteria 1-4 hold;
+- ilk2's V1 reads are removed in a release installed on both hosts;
+- 2 weeks have passed with no `ilk2 v1 on` (judgment call, matching §4.6's window; no earlier than Oct 29);
+- both supervisors are idle, with no queued or claimed V1 import and no draft, paused or blocked master that anyone still intends to run;
+- the frozen baselines' checksums are verified;
+- archive space is checked;
+- a restore drill is written down, and rehearsed on one small tree;
+- **Chad gives a separate go.** This removes the only rollback (`ilk2 v1 on --apply`), and AGENTS.md reserves it.
+
+**Order:**
+1. **Freeze the V1 baselines.** `ilk2 report --v1-baseline` parses V1's `.ilk-loop.log` live (`v1.py:183-228`). Each project's baseline is computed once and stored in ilk2, in a table with a checksum. `--v1-baseline` then reads the frozen copy.
+2. **Remove ilk2's V1 reads** (ilk2 release):
+   - the supervisor's `claim_v1` tick (`supervisor.py:97, 176-196`) and the claim path (`v1.py:164-180`);
+   - `v1_key` in project configs;
+   - `ilk2 v1 status/on/off`, `project take-over`, `give_back` and `export --v1`.
+
+   Keep `_v1_tooling` gate stripping (`batches.py:202-217`) and the `~/.ilk-data` entry in the worker's private dirs (`worker.py:77`), both harmless. Each removal has a test.
+3. **Archive, one host first, verified, then the other.**
+   - **Credential-bearing trees are archived locally only,** with their permissions and a checksum manifest, and are never copied off-host. These are V1 worker and manager homes, the Lark config and token cache under `~/.ilk-data`, and ilk-pocket's registry data if any remains.
+   - **Non-secret history is replicated to the other host as a second copy,** from an explicit, scrubbed allow-list: plans, logs, postmortems and close records.
+   - Sizes measured Oct 17: `~/.ilk-data` 11 GB on chad-mbp and 3.2 GB on rezmac; `~/.ilk` 92 MB on each. Worker homes are not yet measured. The archive is benchmarked on one tree before the full run.
+4. **Mark the ilk-skills repo:** V1's `ilk-loop`, `ilk-watchdog`, `ilk-launcher`, `ilk-runner`, `ilk-ship` and `ilk-upgrade` code moves to an archive tag, with a README saying where V1 went.
 
 ## 7.5 Order and size
 
 ```mermaid
 flowchart LR
-  S1["1 · uninstall replaced skills<br/>review hooks"] --> S4
-  S2a["2a · ilk2 submit warnings<br/>first-edit metric"] --> S2b["2b · ilk2-native planner<br/>gh-resolve first"]
-  S2b --> S4["4 · freeze baselines, remove V1 reads,<br/>archive (separate go, ≥ Oct 29)"]
-  S3["3 · ilk-feedback on ilk2"] --> S4
+  S0["7.4.0 inventory<br/>+ manifest checker"] --> SW
+  S1["7.4.1 ilk2: structural checks,<br/>warnings, timing JSON"] --> S2["7.4.2 new planner<br/>(beside the old)"]
+  S1 --> S3["7.4.3 feedback on ilk2<br/>+ improvement intake"]
+  S2 --> T["gh-resolve trial<br/>(§7.6)"]
+  T --> SW["7.4.5 switch<br/>per host, reversible"]
+  S3 --> SW
+  S4["7.4.4 gh-resolve + ilk-pocket<br/>off V1"] --> SW
+  SW --> AR["7.4.6 archive<br/>separate go, ≥ Oct 29"]
 ```
 
-| Stage | Repo | Batches · steps (estimate) | Depends on |
+| Part | Repo | Batches | Steps (total for the part) |
 |---|---|---|---|
-| 1 | ilk-skills (install manifest, auto-plan, hooks) | 1 · 2-3 | — |
-| 2a | ilk2 | 1 · 3-4 | — |
-| 2b | ilk-skills | 1-2 · 5-7 | 2a |
-| 3 | ilk-skills | 1 · 3 | — |
-| 4 | ilk2 (step 2) + both hosts | 1 · 2 in ilk2, plus about 1 h by hand | 1, 2b, 3; 2 weeks; Chad's go |
+| 7.4.0 inventory and checker | ilk2 | 1 | 2 |
+| 7.4.1 structural checks, warnings, timing JSON | ilk2 | 1-2 | 5-6 |
+| 7.4.2 new planner | ilk-skills | 2 | 6-8 |
+| 7.4.3 feedback, plus improvement intake | ilk-skills, ilk2 | 2 (one per repo) | 3 + 2 |
+| 7.4.4 gh-resolve off V1 | gh-resolve (its owner) | 1-2 | 4-6 |
+| 7.4.4 ilk-pocket off V1 | ilk-pocket | by hand | about 1 h |
+| 7.4.5 switch | install, both hosts | by hand | about 1 h per host |
+| 7.4.6 ilk2 V1 reads removed | ilk2 | 1 | 2-3 |
+| 7.4.6 archive | both hosts | by hand | benchmarked first; not estimated yet |
 
-The estimates are from code size and the script calls found in the planner files. At 30-40 minutes per step that is about 12-16 worker-hours.
+**Arithmetic:** 8-10 batches with 24-30 steps in total. At 30-40 worker-minutes per step, that is 12-20 worker-hours, plus about 3 h by hand plus the archive.
+
+**Wall time:** the gh-resolve trial needs about 3 of gh-resolve's own batches (§7.6), and the archive waits until Oct 29 at the earliest. So the end date is set by those two, not by the build.
 
 ## 7.6 How we know it worked
 
-- **Stage 2b is measured, not assumed.** The new planner's first 3 batches are compared with 17d and with the median of the other 23 gh-resolve batches (981 inserted lines and 29.7 min per accepted step), using the same method as the 17d evidence. Reported: minutes per accepted step; the share of steps above 40 min; how often attempts hit the cap; lanes used; batch wall time. The comparison accounts for step size, so smaller steps do not look faster per step only because they are smaller: batch wall time and minutes per 1,000 inserted lines are also reported.
-- **Wrong if:** batch wall time does not fall, or minutes per 1,000 inserted lines rise by more than 20%. Smaller steps would then cost more in session starts than they save. Revisit rule 1.
+The new planner is trialled on gh-resolve's next 3 batches, before the switch. The aim is to learn whether the planning rules help, not just whether smaller steps look better per step (Codex finding 12).
+
+**Reported for each trial batch, and for gh-resolve's last 10 batches before it:**
+- total worker minutes and critical-path wall time (submitted to shipped, with lanes);
+- startup, model, long-request, tool and gate minutes;
+- accepted acceptance-criteria groups, touched files and inserted lines;
+- red and repair rates, attempts at the cap, lane utilisation.
+
+**The comparison** is a regression over gh-resolve's historical batches. Worker minutes are predicted from batch scope: touched files, acceptance-criteria groups and plans. The question is whether the trial batches fall below the prediction. Raw wall time is reported as it is. Line throughput is reported, but it is not the main measure, because bulk-generated tests inflate it.
+
+**Wrong if:**
+- the trial batches sit on or above the regression line;
+- the share of attempts at the cap does not fall;
+- red and repair rates rise.
+
+In any of those cases, revisit rule 1 before the switch.
 
 ## 7.7 Risks
 
-- **The ilk-skills project has never run an ilk2 batch.** It is registered (`ilk2 project` id `ilk-skills`), with 0 batches in the store and 0 `ilk2/b-*` branches in the clone. Stages 1, 2b and 3 are its first. Its gates (V1's suite is about 200k test lines) are unproven on ilk2.
-  - **Mitigation:** stage 1 is small and goes first, as a shakedown. Fix its gate set before 2b.
-- **Bootstrap.** Stage 2b's batch is itself planned by the old `/ilk-plan`. It follows the new step-size rule by hand.
-- **The planner is shared by every project.** A bad planner change reaches every project's next batch.
-  - **Mitigation:** roll out on gh-resolve first. The auto-plan block switches only after §7.6.
-- **Hooks are global.** Unlinking a V1 hook changes interactive sessions too, for example no-full-suite.
-  - **Mitigation:** stage 1 lists each hook's current effect before any change.
-- **rezmac.** rezmac's installs must follow the same stages. Stage 1's apply runs on both hosts. The tracker records each host's state.
+- **The ilk-skills project has never run an ilk2 batch.** It is registered, with 0 batches and 0 `ilk2/b-*` branches, and its tests are about 196k lines. Mitigation: the first planner batch is small, and the project's gate set is fixed before the larger ones.
+- **Bootstrap.** The new planner's own batches are planned by the old `/ilk-plan`. They follow the new rules by hand.
+- **The shared planner reaches every project.** Mitigations: it is built beside the old one, trialled on one project, and switched in per host, reversibly.
+- **Hooks and PATH links are global.** Mitigation: the inventory lists each one's effect before any change.
+- **Credentials.** The Lark config and token cache and the V1 worker homes contain credentials. They are moved or archived with their permissions, and never printed, read or copied off-host.
 
 ## 7.8 Out of scope
 
-- The worker's model and effort settings per project (docs/06 "Speed levers from docs/03 §3.4 that were never built"). That lever addresses the long thinking turns and is separate. gh-resolve asked for the step-size rule to be measured first.
+- The worker's model and effort settings per project (docs/06 "Speed levers from docs/03 §3.4 that were never built"). That lever addresses the long requests, and it is separate. gh-resolve asked for the step-size rule to be measured first.
 - The 3600 s attempt cap. It stays (Q7). In 17d, the attempt that timed out kept its work and resumed.
-- An ilk2-specific plan format (see Q2 above).
+- An ilk2-specific plan format (Q2, §7.4.2).
 
 ## 7.9 Decisions
 
 | # | Decision | Proposed | Status |
 |---|---|---|---|
-| D1 | Retire V1 completely, in these stages | yes | Chad: summary page "looks good", Oct 17 |
-| D2 | Where the client skills live | Stay in ilk-skills and change only through ilk2 batches. Moving them into ilk2 would put the planner where RSI can edit it, which would need the protected kernel | awaiting review |
-| D3 | `plan_lint.py` standalone, or ported into ilk2 | standalone (§7.4.2) | awaiting review |
-| D4 | Exit criterion before stage 4 | stages 1-3 shipped, done criteria 1-3, 2 weeks with no `v1 on` | awaiting review |
-| D5 | Start order | 1 and 2a in parallel, then 2b; 3 at any time | awaiting review |
-| D6 | Stage 4 needs a separate go | yes | awaiting review |
-| D7 | Destination of the improvement backlog | §7.4.3 proposal | awaiting review |
-| D8 | Q2: keep Markdown and change delivery to `ilk2 submit` | yes (§7.4.2) | awaiting review |
-| D9 | Thresholds of the 2a warnings | §7.4.1 table, warnings only | awaiting review |
+| D1 | Retire V1 completely | yes | Chad: summary page "looks good", Oct 17 |
+| D2 | Where the client skills live | Stay in ilk-skills, changed only through ilk2 batches, outside RSI's editable surface | Codex agrees; awaiting Chad |
+| D3 | `plan_lint.py` | Hybrid: structural checks into ilk2, authoring heuristics standalone, V1-runner checks dropped | Codex's proposal; awaiting Chad |
+| D4 | Preconditions for the archive | §7.4.6 list | revised after Codex; awaiting Chad |
+| D5 | Order | §7.5: inventory and ilk2 checks first; new planner beside the old; trial; switch; archive | revised after Codex; awaiting Chad |
+| D6 | The archive needs a separate go | yes | Codex agrees; awaiting Chad |
+| D7 | Improvement intake | `ilk2 improvement add`, neutral versioned table (§7.4.3) | Codex's proposal; awaiting Chad |
+| D8 | Q2: Markdown, with ilk2's parser canonical, a versioned schema, and refusals for missing or ambiguous imports | yes | Codex agrees with conditions, now included; awaiting Chad |
+| D9 | Warnings, not refusals, on size; thresholds in §7.4.1 | yes; `brief-size` stays telemetry only | Codex agrees; awaiting Chad |
+| D10 | ilk-pocket is moved by the build session, by hand | yes | new; awaiting Chad |
+| D11 | gh-resolve's V1 retirement is done by its owner session, with §7.4.4 as the contract | yes | new; awaiting Chad |
+
+## 7.10 Review log
+
+**Codex, of `32cbb91` (revision 1), Oct 17: 15 findings, all accepted after checking.**
+
+| # | Finding | Severity | Checked | Change |
+|---|---|---|---|---|
+| 1 | Stage 1 uninstalled `ilk-loop` while the old planner and feedback still import its scripts | blocker | yes (`ilk-plan.md` script calls, read in this session) | Built beside; one switch, per host, `ilk-loop` last (§7.4.2, §7.4.5) |
+| 2 | ilk-pocket writes to `~/.ilk-data` and runs on both hosts | blocker | yes: plist line 14, `config.py:11`, 22 references, `launchctl list` on both hosts | §7.4.4 |
+| 3 | gh-resolve has a large V1 runtime surface | blocker | yes: 106 references in 21 non-test files; `reconcile.py:404`, `verify.py:842` | §7.4.4, done criterion 4 |
+| 4 | "A copy on the other host" conflicted with the credential rule | blocker | yes (logic) | Local archive for credential trees; scrubbed allow-list replicated (§7.4.6) |
+| 5 | `submit --check` lacked preflight's structural checks | blocker | yes: `plans.py:271-272` skips missing files | Structural refusals, fixtures and a schema version (§7.4.1) |
+| 6 | The inventory missed PATH links, tool links and launchd files | should-fix | yes: 3 PATH links into the dev clone | Manifest (§7.4.0) |
+| 7 | The archive preconditions did not prove safety | should-fix | yes (`v1.py:245` scope) | §7.4.6 list |
+| 8 | "Every plan is written by V1" was false | should-fix | yes: 15 V1-claimed and 10 direct of 25 since Oct 15 | §7.1 |
+| 9 | Several 17d facts were wrong (plan count, file range, per-step characters, medians, request count, "took 6 h") | should-fix | yes: `tools/batch_time.py` reproduces Codex's 14,896 / 13,923 and 150 (+13) | E5 regenerated from the script after the batch shipped (5.23 h) |
+| 10 | V1's linter did not forbid 17d | should-fix | accepted (Codex ran `lint_step_window_fit`: 0 findings) | §7.1, §7.4.2 |
+| 11 | Feedback's done criterion contradicted its design; quota and timeout were mapped wrong | should-fix | yes: 17d's timeout is `red` with `timings.outcome: timeout` | Timing JSON (§7.4.1); mapping fixed (§7.4.3) |
+| 12 | §7.6 could not isolate the planner's effect | should-fix | yes (logic) | Regression on scope; more measures (§7.6) |
+| 13 | D7 had no intake contract | should-fix | yes (`rsi.py` reads only defined sources) | `ilk2 improvement add` (§7.4.3) |
+| 14 | The estimates did not reconcile | note | yes; archive sizes measured as 11 GB + 3.2 GB + 2 × 92 MB | Totals per part, with the arithmetic (§7.5) |
+| 15 | Citation ranges were wrong | note | yes | Fixed in §7.1 and §7.4.3 |
