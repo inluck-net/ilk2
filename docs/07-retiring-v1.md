@@ -327,7 +327,7 @@ In any of those cases, revisit rule 1 before the switch.
 | D7 | Improvement intake | `ilk2 improvement add`, neutral versioned table (§7.4.3) | Codex's proposal; **accepted Oct 17** |
 | D8 | Q2: Markdown, with ilk2's parser canonical, a versioned schema, and refusals for missing or ambiguous imports | yes | Codex agrees with conditions, now included; **accepted Oct 17** |
 | D9 | Warnings, not refusals, on size; thresholds in §7.4.1 | yes; `brief-size` stays telemetry only | Codex agrees; **accepted Oct 17** |
-| D10 | ilk-pocket is moved by the build session, by hand | yes | new; **accepted Oct 17** |
+| D10 | ilk-pocket: ~~moved to its own data root~~ **retired** | It turned out to be V1's phone remote control, not just a user of V1's data, and dormant: last commit Jul 29, agent log last written Oct 3 (chad-mbp) and Aug 17 (rezmac), no audit log on 0 of 2 hosts. Agent disabled on both hosts Oct 18 (plist in `disabled-by-ilk2/`, reversible); repo marked retired; its references allow-listed; data archived with V1 | **Chad, Oct 18: "retire ilk-pocket"** |
 | D11 | gh-resolve's V1 retirement is done by its owner session, with §7.4.4 as the contract | yes | new; **accepted Oct 17** |
 | D12 | mac-provision is changed by the build session to install ilk2, with a dry-run test | yes | new (round 2); **accepted Oct 17** |
 | D13 | gh-resolve's time: retire its V1 code first; the planner trial then uses gh-resolve's next naturally planned batches (no extra batches) | yes | **accepted Oct 17** |
