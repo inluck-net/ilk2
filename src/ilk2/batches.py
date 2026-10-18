@@ -124,6 +124,16 @@ def path_matches(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def redacted(cfg: "ProjectConfig") -> dict:
+    """A project's settings for display (`ilk2 project show`): every field, but environment
+    values are replaced by "<set>", since they can carry credentials (AGENTS.md)."""
+    d = asdict(cfg)
+    d["env_set"] = {k: "<set>" for k in d.get("env_set") or {}}
+    if isinstance(d.get("setup"), dict) and isinstance(d["setup"].get("env"), dict):
+        d["setup"] = {**d["setup"], "env": {k: "<set>" for k in d["setup"]["env"]}}
+    return d
+
+
 def project_add(s: Store, project_id: str, repo_root: Path, config: ProjectConfig,
                 default_branch: str = "main") -> None:
     s.insert("projects", {"id": project_id, "repo_root": str(repo_root.resolve()),

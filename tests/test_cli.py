@@ -21,3 +21,21 @@ def test_module_runs_as_a_script():
     )
     assert result.returncode == 0
     assert result.stdout.strip() == f"ilk2 {__version__}"
+
+
+def test_project_show_prints_settings_with_env_values_redacted(ilk, capsys):
+    # gh-resolve-65, Oct 18: the planner needs a project's verify_command; there was no command,
+    # so it was read from the store. Environment values can be credentials: keys only.
+    import json as _json
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project(verify_command=["python", "-m", "pytest"], env_set={"API_TOKEN": "s3cret"},
+                setup={"command": ["true"], "env": {"PW": "hunter2"}})
+    capsys.readouterr()
+    assert cli.main(["project", "show", "proj"]) == 0
+    out = capsys.readouterr().out
+    d = _json.loads(out)
+    assert d["config"]["verify_command"] == ["python", "-m", "pytest"]
+    assert d["config"]["env_set"] == {"API_TOKEN": "<set>"} and d["config"]["setup"]["env"] == {"PW": "<set>"}
+    assert "s3cret" not in out and "hunter2" not in out
+    assert cli.main(["project", "show", "nope"]) == 2

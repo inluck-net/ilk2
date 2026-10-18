@@ -222,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     pa.add_argument("--take-over", action="store_true",
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
+    psub.add_parser("show", help="a project's settings (env values redacted)").add_argument("project_id")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
     rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log"])
     rs.add_argument("--repo", help="the ilk2 repo, for Chad's docs/rsi/requests.json "
@@ -370,6 +371,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if a.cmd == "project":
             from . import v1
+            if a.pcmd == "show":
+                proj = s.one("SELECT * FROM projects WHERE id = ?", a.project_id)
+                if proj is None:
+                    _out({"error": "unknown-project", "project": a.project_id}, True)
+                    return 2
+                _out({"project": proj["id"], "repo_root": proj["repo_root"],
+                      "default_branch": proj["default_branch"],
+                      "config": batches.redacted(batches.project_config(s, a.project_id))}, True)
+                return 0
             if a.pcmd == "remove":
                 proj = s.get("projects", a.project_id)
                 live = s.one("SELECT COUNT(*) n FROM batches WHERE project_id = ? AND status NOT IN "
