@@ -48,6 +48,10 @@ class WorkerConfig:
     hook: bool = True
     hook_python: str = sys.executable
     permission_mode: str = "bypassPermissions"
+    # Per project (docs/03 §3.4, the levers never built until Oct 18): the worker's model and
+    # effort, passed as claude's --model / --effort. None leaves the template's choice.
+    model: str | None = None
+    effort: str | None = None
 
 
 @dataclass
@@ -177,6 +181,7 @@ class Dispatch:
     _since_user: float = 0.0
     capped: bool = False
     cancelled: bool = False
+    requested: dict = field(default_factory=dict)   # the project's --model / --effort, if any
     terminated: dict | None = None
     _last: float = 0.0
 
@@ -310,6 +315,7 @@ class Dispatch:
         r = self.result or {}
         return {
             "session_id": self.session_id, "init_model": self.init_model,
+            "requested_model": self.requested.get("model"), "effort": self.requested.get("effort"),
             "outcome": self.outcome(), "returncode": self.proc.returncode,
             "num_turns": r.get("num_turns"), "duration_ms": r.get("duration_ms"),
             "duration_api_ms": r.get("duration_api_ms"),
@@ -331,6 +337,10 @@ def dispatch(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, prompt: str
             "--strict-mcp-config", "--settings", json.dumps(PINNED_SETTINGS)]
     if resume:
         argv += ["--resume", resume]
+    if cfg.model:
+        argv += ["--model", cfg.model]
+    if cfg.effort:
+        argv += ["--effort", cfg.effort]
     if cfg.sandbox:
         argv = ["/usr/bin/sandbox-exec", "-f", str(files.logs / "sandbox.sb"), *argv]
     log = files.logs / ("resume.jsonl" if resume else "start.jsonl")
@@ -347,7 +357,9 @@ def dispatch(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, prompt: str
         proc.stdin.close()
     except BrokenPipeError:
         pass
-    return Dispatch(proc=proc, log_path=log, worktree=worktree, t0=t0)
+    d = Dispatch(proc=proc, log_path=log, worktree=worktree, t0=t0)
+    d.requested = {"model": cfg.model, "effort": cfg.effort}
+    return d
 
 
 # -- the brief (§2.6) ------------------------------------------------------------------------

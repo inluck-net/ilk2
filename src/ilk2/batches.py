@@ -18,6 +18,9 @@ DEFAULT_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 META_MAX = 16_384
 
 
+WORKER_EFFORTS = ("low", "medium", "high", "xhigh", "max")   # claude --effort's levels
+
+
 @dataclass
 class ProjectConfig:
     path_prelude: list[str] = field(default_factory=lambda: list(DEFAULT_PATH))
@@ -72,6 +75,10 @@ class ProjectConfig:
     # batch-verify plan's gates call V1's own tooling (~/.ilk/current scripts writing V1
     # records); on import they are replaced by this command (gh-resolve's P5 master, Oct 13).
     verify_command: list[str] | None = None
+    # The worker's model and effort (docs/03 §3.4; built Oct 18 after batch 18a's retrospective).
+    # None keeps the worker template's model and claude's default effort. Recorded per attempt.
+    worker_model: str | None = None
+    worker_effort: str | None = None   # one of WORKER_EFFORTS
     # Step k of a plan continues step k-1's session (Oct 13: 19 of 27.5 min of a gh-resolve step
     # went to re-exploring). Judgment call: on, unless that session passed carry_max_context.
     carry_session: bool = True

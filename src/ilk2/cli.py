@@ -414,6 +414,10 @@ def main(argv: list[str] | None = None) -> int:
                         changes[k] = json.loads(v)
                     except ValueError:
                         changes[k] = v  # a bare string
+                if changes.get("worker_effort") not in (None, *batches.WORKER_EFFORTS):
+                    _out({"error": "rejected", "problems": [
+                        f"worker_effort must be one of {list(batches.WORKER_EFFORTS)} or null"]}, True)
+                    return 2
                 for k, v in changes.items():
                     setattr(cfg, k, v)
                 s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))},

@@ -1420,3 +1420,39 @@ def test_a_new_regression_in_a_plan_wide_check_is_still_red_and_named(ilk):
     ev = ilk.s.one("SELECT evidence FROM attempts WHERE evidence IS NOT NULL ORDER BY created_at LIMIT 1")
     assert "new since the batch base" in ev["evidence"] and "a new one this step made" in ev["evidence"]
     assert "prd inventory" not in ev["evidence"].split("new since the batch base")[1].split("\n")[0]
+
+
+def _stub_args(ilk) -> list[list[str]]:
+    log = Path(str(ilk.script_path) + ".calls")
+    return [json.loads(line).get("args", []) for line in log.read_text().splitlines()]
+
+
+def test_a_projects_worker_model_and_effort_reach_the_worker_and_are_recorded(ilk):
+    # docs/03 §3.4's levers, built Oct 18 after batch 18a's retrospective: per project, the
+    # worker's model and effort. Unset, the worker command is exactly as before.
+    ilk.make_repo()
+    ilk.project(worker_model="mimo-test", worker_effort="low")
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    args = _stub_args(ilk)[0]
+    assert args[args.index("--model") + 1] == "mimo-test" and args[args.index("--effort") + 1] == "low"
+    tm = json.loads(ilk.s.one("SELECT timings FROM attempts")["timings"])
+    assert (tm["requested_model"], tm["effort"]) == ("mimo-test", "low")
+
+
+def test_without_the_settings_the_worker_command_has_no_model_or_effort(ilk):
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    assert ilk.drive_inprocess(ilk.submit(one_step())) == "shipped"
+    args = _stub_args(ilk)[0]
+    assert "--model" not in args and "--effort" not in args
+
+
+def test_project_set_refuses_an_unknown_effort(ilk, capsys):
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project()
+    assert cli.main(["project", "set", "proj", "worker_effort=fast"]) == 2
+    assert cli.main(["project", "set", "proj", "worker_effort=low"]) == 0

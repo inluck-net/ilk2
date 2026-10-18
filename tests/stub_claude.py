@@ -60,7 +60,7 @@ def main():
             with open(log, "a") as f:
                 f.write(json.dumps({"prompt": prompt}) + "\n")
             with open(p + ".calls", "a") as f:  # the overall log tests read too
-                f.write(json.dumps({"prompt": prompt, "cwd": os.getcwd()}) + "\n")
+                f.write(json.dumps({"prompt": prompt, "cwd": os.getcwd(), "args": args}) + "\n")
             seq = script["by_cwd"][key]
             script = seq[min(n, len(seq) - 1)]
         else:
@@ -69,7 +69,7 @@ def main():
         log = p + ".calls"
         n = sum(1 for _ in open(log)) if os.path.exists(log) else 0
         with open(log, "a") as f:
-            f.write(json.dumps({"prompt": prompt}) + "\n")
+            f.write(json.dumps({"prompt": prompt, "args": args}) + "\n")
         seq = script["calls"]
         script = seq[min(n, len(seq) - 1)]
     sid = resume or str(uuid.uuid4())
