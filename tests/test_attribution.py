@@ -260,3 +260,23 @@ def test_a10_blocked_repair_blocks_the_batch(ilk):
     assert r0["status"] == "pending" and r0["attempt_count"] == 0
     assert ilk.stub_calls() == 7  # break, declares, 5 repair attempts; never the independent step
     assert [r["reason"] for r in ilk.s.open_human_rows(bid)] == ["attempts"]
+
+
+# -- A10 by edge: several tests one step broke get one repair ----------------------------------
+
+def test_a10_failures_attributed_to_one_edge_share_one_repair(ilk):
+    # gh-resolve 18a, Oct 18: one step broke six tests in one pins file, and the gate run that
+    # found them added six repair plans, each briefed on one test. One repair names all six.
+    files = {**FILES, "tests/test_b2.py": "from b import B\ndef test_b2():\n    assert B == 1\n"}
+    setup(ilk, files)
+    both_b = gate("tests/test_calc.py", "tests/test_b.py", "tests/test_b2.py", name="both")
+    ilk.script([BREAK], [note(1)], [note(2)], [FIX], [note(3)])
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("break b")]},
+        {"slug": "q", "steps": [step("q0"), step("q1 declares the b tests", both_b), step("q2")]}]})
+    assert ilk.drive_inprocess(bid) == "shipped"
+    rp = repair_plans(ilk, bid)
+    assert len(rp) == 1, [dict(x) for x in rp]
+    st = ilk.s.one("SELECT * FROM steps WHERE plan_id = ?", rp[0]["id"])
+    assert sorted(json.loads(st["must_pass"])) == ["tests/test_b.py::test_b", "tests/test_b2.py::test_b2"]
+    assert ilk.s.one("SELECT COUNT(*) n FROM repairs WHERE batch_id = ?", bid)["n"] == 2

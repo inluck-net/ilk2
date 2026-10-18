@@ -1151,6 +1151,9 @@ class Driver:
         a repair plan (deduplicated); the rest stay judged against the current step."""
         from .attribution import Attributor, repair_brief
         out = []
+        # Failures one step broke, found by one gate run, share one repair: gh-resolve 18a, Oct
+        # 18, one step broke six tests in a pins file and got six repairs briefed on one each.
+        groups: dict[tuple, list] = {}
         with self.phase("attribute", step=step["id"], gate=gate.name):
             at = Attributor(self)
             for tid in inherited:
@@ -1159,19 +1162,34 @@ class Driver:
                 out.append(a)
                 self.event("attribution", test=tid, **a.to_dict())
                 if a.result == "attributed":
-                    self.add_repair(a, gate, repair_brief(self.s, self.root, a, gate, f.message))
+                    groups.setdefault((a.step_id, tuple(a.edge)), []).append(
+                        (a, repair_brief(self.s, self.root, a, gate, f.message)))
+            for items in groups.values():
+                self.add_repair([a for a, _ in items], gate, "\n\n".join(b for _, b in items))
         self.s.update("runs", self.run_id, {"phase": "gates", "phase_started_mono": clock.mono()},
                       actor="driver", reason="phase gates")
         return out
 
-    def add_repair(self, a, gate: Gate, brief: str) -> None:
-        clean, failing = a.edge
-        row = self.s.one("SELECT plan_id FROM repairs WHERE batch_id = ? AND test_id = ? AND "
-                         "fingerprint = ? AND edge_clean = ? AND edge_failing = ?", self.batch_id,
-                         a.test_id, a.fingerprint, clean, failing)
-        if row:  # A10: the same failure on the same edge joins the existing repair
-            self.event("repair.joined", plan=row["plan_id"], test=a.test_id)
+    def add_repair(self, attrs: list, gate: Gate, brief: str) -> None:
+        """One repair plan for failures attributed to the same step and edge (A10). A failure
+        already repaired on that edge joins its existing repair instead."""
+        new = []
+        for a in attrs:
+            clean, failing = a.edge
+            row = self.s.one("SELECT plan_id FROM repairs WHERE batch_id = ? AND test_id = ? AND "
+                             "fingerprint = ? AND edge_clean = ? AND edge_failing = ?", self.batch_id,
+                             a.test_id, a.fingerprint, clean, failing)
+            if row:  # A10: the same failure on the same edge joins the existing repair
+                self.event("repair.joined", plan=row["plan_id"], test=a.test_id)
+            else:
+                new.append(a)
+        if not new:
             return
+        a, ids = new[0], [x.test_id for x in new]
+        clean, failing = a.edge
+        if len(new) > 1:
+            brief = (f"These {len(new)} tests broke on the same change (one cause is likely): "
+                     + ", ".join(ids) + "\n\n" + brief)
         n = self.s.one("SELECT COUNT(*) n FROM plans WHERE batch_id = ? AND repair_of_step_id "
                        "IS NOT NULL", self.batch_id)["n"] + 1
         slug = f"repair-{n}"
@@ -1180,23 +1198,24 @@ class Driver:
         # any other open failure turned it red (gh-resolve P5 batch, Oct 14). A later full run
         # (the step's own gate, or a verification step) still catches what the repair breaks.
         if gate.adapter == "vitest":
-            narrowed = replace(gate, command=vitest.with_test_ids(gate.command, [a.test_id]))
+            narrowed = replace(gate, command=vitest.with_test_ids(gate.command, ids))
         elif gate.adapter == "pytest":
-            narrowed = replace(gate, command=gates.with_test_ids(gate.command, [a.test_id],
+            narrowed = replace(gate, command=gates.with_test_ids(gate.command, ids,
                                                                  drop=("--deselect", "-k")))
         else:
             narrowed = gate
         batches.amend(self.s, self.batch_id, [{
             "op": "add_plan", "slug": slug, "repair_of_step_id": a.step_id,
-            "steps": [{"title": f"Repair {a.test_id}", "instructions": brief,
-                       "gates": [asdict(narrowed)], "must_pass": [a.test_id]}]}],
+            "steps": [{"title": f"Repair {ids[0]}" + (f" and {len(ids) - 1} more" if len(ids) > 1 else ""),
+                       "instructions": brief, "gates": [asdict(narrowed)], "must_pass": ids}]}],
             expect_version=b["version"], actor="driver", reason="regression-attributed")
         with self.s.tx() as c:
-            c.execute("INSERT INTO repairs(batch_id, test_id, fingerprint, edge_clean, edge_failing, "
-                      "plan_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (self.batch_id, a.test_id, a.fingerprint, clean, failing,
-                       f"{self.batch_id}.{slug}", clock.wall()))
-        self.event("repair.added", plan=slug, test=a.test_id, repair_of=a.step_id)
+            for x in new:
+                c.execute("INSERT INTO repairs(batch_id, test_id, fingerprint, edge_clean, edge_failing, "
+                          "plan_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (self.batch_id, x.test_id, x.fingerprint, *x.edge,
+                           f"{self.batch_id}.{slug}", clock.wall()))
+        self.event("repair.added", plan=slug, test=a.test_id, tests=ids, repair_of=a.step_id)
 
     def red_first(self, gate_list: list[Gate], must_pass: list[str], parent: str,
                   aid: str, step=None) -> list[str]:
