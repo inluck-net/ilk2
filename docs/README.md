@@ -20,6 +20,7 @@ First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by
 | E3 | [Evidence: the gh-resolve P5 batch baseline](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) | How long does each step of a real 15-step batch take on ilk2, and what did the night's fixes change? |
 | E4 | [Evidence: V2 against V1 speed](evidence/2026-10-16-v2-vs-v1-speed.md) | Minutes per step on the projects with a V1 baseline |
 | E5 | [Evidence: where batch 17d's time went](evidence/2026-10-17-batch-17d-where-the-time-went.md) | Why a 7-step gh-resolve batch took about 6 h, and what ilk2 controls in it |
+| E6 | [Evidence: batch 18a's retrospective](evidence/2026-10-18-batch-18a-retrospective.md) | Why a 20-step batch took 13 h, and the ilk2 levers ranked by evidence |
 
 **Revision, Oct 12 (later the same day):** two changes from Chad's review question on stuck loops and slowness:
 - invariant I10, refusal accounting;
