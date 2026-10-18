@@ -435,19 +435,34 @@ REF_PAD = 10
 # step, windows from 3 large files filled the whole 150k preload and pushed out the gate's test
 # files and the ranges the sub-plan names. Wrong if workers then re-read windows they lost.
 WINDOWS_PER_FILE_CAP = 25_000
-_REF = re.compile(r"([\w./-]+\.\w+):(\d+)(?:-(\d+))?")
+# A path, or a bare range in its own code span (`:6199-6252`), on one line, in order. A bare
+# range belongs to the nearest path before it on that line (gh-resolve-65, Oct 18: plans write
+# "`tools/x/reap.py` `_fn` `:6199-6252`", and those ranges preloaded nothing).
+_PATH_OR_RANGE = re.compile(r"(?P<path>[\w./-]+\.\w+)(?::(?P<a>\d+)(?:-(?P<b>\d+))?)?"
+                            r"|(?<![\w.)/:])`?:(?P<ba>\d+)(?:-(?P<bb>\d+))?")
 
 
 def named_ranges(root: Path, instructions: str) -> dict[str, list[tuple[int, int]]]:
-    """`path:start-end` and `path:line` references in a step's text, for files that exist:
-    0-based [a, b) spans padded by REF_PAD lines and merged per file."""
+    """`path:start-end` and `path:line` references in a step's text, for files that exist, and a
+    bare `:start-end` after a path on the same line: 0-based [a, b) spans padded by REF_PAD lines
+    and merged per file."""
     out: dict[str, list[tuple[int, int]]] = {}
-    for path, a, b in _REF.findall(instructions):
-        p = root / path
-        if not p.is_file():
-            continue
+
+    def add(path: str, a: str, b: str | None) -> None:
         lo, hi = int(a), int(b or a)
         out.setdefault(path, []).append((max(0, lo - 1 - REF_PAD), hi + REF_PAD))
+
+    for line in instructions.splitlines():
+        last = None
+        for m in _PATH_OR_RANGE.finditer(line):
+            if m.group("path"):
+                if not (root / m.group("path")).is_file():
+                    continue
+                last = m.group("path")
+                if m.group("a"):
+                    add(last, m.group("a"), m.group("b"))
+            elif last:
+                add(last, m.group("ba"), m.group("bb"))
     for path, spans in out.items():
         merged: list[tuple[int, int]] = []
         for a, b in sorted(spans):

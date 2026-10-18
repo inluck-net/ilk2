@@ -348,3 +348,20 @@ def test_requests_run_to_their_last_event_and_split_long_ones_tool_time_and_the_
     assert d.tool_s == 5.0
     assert d.timings["first_edit_s"] == 150.0           # unchanged meaning: the first edit seen at all
     assert d.timings["first_edit_start_s"] == 15.0      # the main loop's first editing request
+
+
+def test_a_bare_range_after_a_path_on_the_same_line_is_preloaded(tmp_path):
+    # gh-resolve-65, Oct 18: plans write "`tools/x/reap.py` `_fn` `:6199-6252`" (path and range
+    # in separate code spans); only `path:line` matched, so those ranges preloaded nothing.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/gh.py").write_text("\n".join(f"g_{i} = {i}" for i in range(1, 301)))
+    (tmp_path / "pkg/reap.py").write_text("\n".join(f"r_{i} = {i}" for i in range(1, 301)))
+    text = ("- `pkg/gh.py`: `stamp` `:44-50` (the footer), `_parse` / `_is` `:108-110`.\n"
+            "- `pkg/reap.py` `_post` `:200-201`. Copy its shape.\n"
+            "- A range with no path before it on its line `:5-6` names nothing.\n"
+            "- Unchanged: `pkg/reap.py:250`; a time 12:30 is not a range.")
+    got = worker.named_ranges(tmp_path, text)
+    pad = worker.REF_PAD
+    assert got["pkg/gh.py"] == [(43 - pad, 50 + pad), (107 - pad, 110 + pad)]
+    assert got["pkg/reap.py"] == [(199 - pad, 201 + pad), (249 - pad, 250 + pad)]
+    assert set(got) == {"pkg/gh.py", "pkg/reap.py"}
