@@ -275,7 +275,7 @@ flowchart LR
 
 The new planner is trialled on gh-resolve's next 3 batches, before the switch. The aim is to learn whether the planning rules help, not just whether smaller steps look better per step (Codex finding 12).
 
-**Scope is measured before planning,** so the planner under test cannot shape it (Codex round 2). For each batch it is the tickets in scope and the acceptance-criteria groups *requested* in the source the plan was made from (the issue, spec or inbox entry), counted by a script before the planner runs. Touched files, plan count and inserted lines are outcomes of the planner, so they are reported but never used as controls.
+**Scope is measured before planning,** so the planner under test cannot shape it (Codex round 2). For each batch it is the tickets in scope and the acceptance-criteria groups *requested* in the source the plan was made from (the issue, spec or inbox entry). The planner counts them from the source before it drafts anything, writes them in the MASTER, and passes them to ilk2 as `submit --meta '{"scope": {...}}'`, where `ilk2 status` returns them. *Changed Oct 18 (trial #2 feedback): counting "AC groups" in free text is a judgment, not a measurement a script can make reliably, so it is recorded once, before planning, instead of computed by a script. Wrong if the counts drift toward the plans; then a second reader counts a sample blind.* Touched files, plan count and inserted lines are outcomes of the planner, so they are reported but never used as controls.
 
 **The model is declared before the trial** (judgment call):
 - It is fitted on every gh-resolve batch on ilk2 whose source can be recovered, which is all 24 to date if their sources are still readable.
