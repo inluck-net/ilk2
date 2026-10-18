@@ -282,6 +282,14 @@ kira-cloudflare-44 measured support piece A's step 0 timing out at the 3600 s at
 
 The attempt cap is one global bound, `bounds.attempt_cap` = 3600 s (Q7, a judgment call). Open: the mechanisms are ilk2's to build; which model and settings each project uses is Chad's decision.
 
+
+**Built Oct 18, and what the evidence says (after batch 18a's retrospective, Chad's go):**
+- **Per-project `worker_model` / `worker_effort`** → claude `--model` / `--effort`, recorded per attempt (`57ceb30`).
+- **`--effort` cannot turn MiMo's thinking off.** V1 measured on Oct 11 that the CLI sends `thinking: adaptive` with effort high to MiMo Pro whatever the setting. MiMo's own API supports an explicit `thinking: disabled`, which the CLI cannot send without a proxy (ilk-skills `a4aa2f26`, `loop-execution-performance-design.md`, "Measured provider control mismatch"). A probe through ilk2's worker path, Oct 18 (one read-only question, 2 runs each, all correct): v2.6-pro 28.1 / 24.0 s, the same with effort low 24.9 / 18.3 s, thinking characters not consistently lower. Not a usable lever without a proxy; parked.
+- **The model is the strong lever.** V1, Sep 23 (ilk-skills `retro-2026-09-23-scheduler-runs-crawl-on-mimo-v26.md`): over the same week, v2.5-pro ran 8.6 s/turn (n=42 iterations) against v2.6-pro's 22.1 (n=54). v2.6 writes 3.5x more and thinks 6-7x more per turn. A trial back on v2.5 ran 6.5 s/turn and about 3 min per step commit, against 12-22 on v2.6. The Oct 10 bench (v2.5-pro 2.6 s/turn, v2.6-pro 5.0) and the Oct 18 probe (v2.5-pro 16.2 / 11.7 s, fastest both runs) agree.
+- **Open: why the worker went back to v2.6 after Sep 23.** No commit or document in ilk-skills records it. A quality reason would change the trade-off. Chad's knowledge.
+- **Next (Chad's go, Oct 18): an A/B on ilk-skills** (`worker_model=mimo-v2.5-pro`) once this release is installed, against its own six v2.6 batches of Oct 18 (8.6-13.6 min per step, 14 of 14 steps first-attempt). Measure minutes per step, first-attempt share and review findings.
+
 ## RSI: ilk2 improves itself (Chad, Oct 14: "Reviewed RSI first")
 
 **What it is.** ilk2 runs batches on its own repository, as the ilk2 project `ilk2` on chad-mbp. A batch's step gates are ilk2's full suite (`pytest -n 4`, about 2 min), with red-first checks on the step's new tests. A setup hook (`uv sync --locked`) builds each worktree's virtualenv from the shared uv cache.
