@@ -22,10 +22,12 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import clock, paths
+from .store import StoreError
 
 WINDOW_S = 7 * 24 * 3600   # judgment call: a week of records; wrong if defects recur more slowly
 WEIGHTS = {"request": 100, "goal": 90, "engine-error": 50, "stall": 40, "needs-human": 30, "gate-cap": 25,
@@ -85,13 +87,29 @@ def requests(repo: Path | None) -> list[Candidate]:
 
 
 ISSUES = {"repo": "inluck-net/ilk2", "label": "rsi:req", "author": "chad007"}
+# launchd's PATH lacks Homebrew: a bare `gh` failed on all 144 supervisor ticks Oct 16-19 (docs/08)
+GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
+
+
+def gh_path() -> str:
+    import shutil
+    return shutil.which("gh") or next((g for g in GH_FALLBACKS if Path(g).is_file()), "gh")
 
 
 def issues(s) -> list[Candidate]:
+    """issues() for a direct caller: a failure is an event and no issues (see _issues)."""
+    try:
+        return _issues(s)
+    except Exception as e:  # noqa: BLE001
+        s.event("rsi.issues-failed", {"error": str(e)[:300]})
+        return []
+
+
+def _issues(s) -> list[Candidate]:
     """Chad's requests as GitHub issues (Chad, Oct 16): open issues labelled rsi:req on the ilk2
     repo, by Chad's account only, read only (RSI never comments, labels or closes). The issue
     body is the acceptance check; an empty one is skipped. An unreachable GitHub is an event,
-    never a failed tick: the other sources still count (judgment call)."""
+    never a failed tick: the other sources still count (judgment call). Raises on failure."""
     import subprocess
     from .supervisor import host_config
     try:
@@ -99,17 +117,13 @@ def issues(s) -> list[Candidate]:
             return []
     except (OSError, ValueError):
         return []
-    try:
-        p = subprocess.run(["gh", "issue", "list", "--repo", ISSUES["repo"], "--label",
-                            ISSUES["label"], "--author", ISSUES["author"], "--state", "open",
-                            "--json", "number,title,body,author", "--limit", "50"],
-                           capture_output=True, text=True, timeout=60)
-        if p.returncode:
-            raise RuntimeError(p.stderr.strip()[-300:])
-        rows = json.loads(p.stdout or "[]")
-    except Exception as e:  # noqa: BLE001
-        s.event("rsi.issues-failed", {"error": str(e)[:300]})
-        return []
+    p = subprocess.run([gh_path(), "issue", "list", "--repo", ISSUES["repo"], "--label",
+                        ISSUES["label"], "--author", ISSUES["author"], "--state", "open",
+                        "--json", "number,title,body,author", "--limit", "50"],
+                       capture_output=True, text=True, timeout=60)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip()[-300:])
+    rows = json.loads(p.stdout or "[]")
     out = []
     for r in rows:
         if (r.get("author") or {}).get("login") != ISSUES["author"] or not (r.get("body") or "").strip():
@@ -167,7 +181,47 @@ def _metric(g: dict):
 
 
 def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidate]:
+    """Every source's candidates. A broken requests or goals file raises here (fails closed,
+    never "none"); the trigger uses find_sources, which records it and runs the rest."""
+    cands, _, errors = find_sources(s, repo, now)
+    for name in ("records", "requests", "goals"):
+        if name in errors:
+            raise errors[name]
+    return cands
+
+
+STORE_ERRORS = (StoreError, sqlite3.Error)  # the store itself failing fails the whole tick
+
+
+def find_sources(s, repo: Path | None = None, now: float | None = None):
+    """(candidates, {source: "ok" or its error}, {source: exception}). Each source runs on its
+    own, so one that fails is recorded and the others still count (docs/08 §8.6)."""
     now = clock.wall() if now is None else now
+    status: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def run(name, fn) -> list[Candidate]:
+        try:
+            got = fn()
+        except STORE_ERRORS:
+            raise
+        except Exception as e:  # noqa: BLE001 - one source's failure is that source's
+            status[name] = f"{type(e).__name__}: {e}"[:300]
+            errors[name] = e
+            s.event(f"rsi.{name}-failed" if name == "issues" else "rsi.source-failed",
+                    {"source": name, "error": status[name]})
+            return []
+        status[name] = "ok"
+        return got
+
+    out = run("records", lambda: _records(s, now)) + run("requests", lambda: requests(repo))
+    if repo is not None:  # Chad's inputs live with the ilk2 repo's host
+        out += run("issues", lambda: _issues(s)) + run("goals", lambda: goals(s, repo))
+    return sorted(out, key=lambda c: -score(c.source, len(c.evidence))), status, errors
+
+
+def _records(s, now: float) -> list[Candidate]:
+    """Candidates from ilk2's own records (runs, needs_human, gates, refusals, reports, intake)."""
     since = now - WINDOW_S
     found: dict[str, Candidate] = {}
 
@@ -234,10 +288,7 @@ def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidat
     for r in s.all("SELECT * FROM improvements WHERE project_id = ? AND status = 'accepted'", PROJECT):
         add("improvement", r["fingerprint"], r["title"],
             {"improvement": r["id"], "hits": r["hits"], "at": r["updated_at"]})
-    out = list(found.values()) + requests(repo)
-    if repo is not None:  # Chad's inputs live with the ilk2 repo's host
-        out += issues(s) + goals(s, repo)
-    return sorted(out, key=lambda c: -score(c.source, len(c.evidence)))
+    return list(found.values())
 
 
 def score(source: str, hits: int) -> float:
@@ -307,6 +358,7 @@ PROJECT = "ilk2"               # the ilk2 project that builds ilk2
 DAILY_CAP = 3                  # judgment call: the review queue is the limit; wrong if reviews keep up easily
 REVIEW_CAP = 2                 # unreviewed shipped RSI branches before the trigger waits
 PLAN_CAP_S = 30 * 60           # one planning session
+GOAL_DAILY_CAP = 1             # judgment call (docs/08 §8.7): a goal round needs about a day of samples; wrong if goals should run in parallel
 SUITE_GATE = {"name": "suite", "cap_s": 900,
               "command": [".venv/bin/python", "-m", "pytest", "-q", "-n", "4", "-p",
                           "no:cacheprovider", "tests"]}
@@ -425,31 +477,57 @@ def pending(s) -> list:
     return out
 
 
-def today_count(s, now: float) -> int:
-    """RSI-found batches in the last 24 h that were not cancelled (requests are not counted)."""
+def kind(source: str) -> str:
+    """A candidate's allowance (docs/08 §8.7): Chad's requests, goals, or defects (the rest)."""
+    return source if source in ("request", "goal") else "defect"
+
+
+def today_count(s, now: float, of: str = "defect") -> int:
+    """RSI batches of one kind in the last 24 h that were not cancelled. The kind is the batch's
+    meta.rsi_source; a batch from before it was recorded counts as a defect unless its candidate
+    is a request (a host-prefixed id such as rezmac/goal:x keeps its real source this way)."""
     n = 0
     for b in s.all("SELECT snapshot FROM batches WHERE project_id = ? AND consumer_ref LIKE "
                    "'rsi-auto-%' AND status != 'cancelled' AND created_at > ?", PROJECT, now - 86400):
         try:
-            cand = (json.loads(b["snapshot"]).get("meta") or {}).get("rsi_candidate") or ""
+            meta = json.loads(b["snapshot"]).get("meta") or {}
         except (TypeError, ValueError):
-            cand = ""
-        n += not str(cand).startswith("request:")
+            meta = {}
+        src = meta.get("rsi_source")
+        if src is None:
+            src = "request" if str(meta.get("rsi_candidate") or "").startswith("request:") else "defect"
+        n += kind(src) == of
     return n
 
 
 def tick(s, now: float | None = None) -> dict:
-    """One trigger pass; its outcome is kept in meta 'rsi_last_tick' for the panel."""
-    out = _tick(s, now)
+    """One trigger pass; its outcome is kept in meta 'rsi_last_tick' for the panel. Each pass
+    records rsi.tick-started, then rsi.tick-completed (with each source's result) or
+    rsi.tick-failed, under one tick_id: health.py watches them from outside (docs/08 §8.6)."""
+    import os
+    import uuid
+    tick_id = uuid.uuid4().hex[:12]
+    s.event("rsi.tick-started", {"tick_id": tick_id, "pid": os.getpid()})
+    sources: dict[str, str] = {}
+    try:
+        out = _tick(s, now, sources)
+    except BaseException as e:
+        try:
+            s.event("rsi.tick-failed", {"tick_id": tick_id, "error": f"{type(e).__name__}: {e}"[:500]})
+        except Exception:  # noqa: BLE001 - the store itself may be what failed
+            pass
+        raise
     with s.tx() as c:
         c.execute("INSERT INTO meta(key, value) VALUES ('rsi_last_tick', ?) ON CONFLICT(key) DO "
                   "UPDATE SET value = excluded.value",
                   (json.dumps({"at": clock.wall(), "did": out.get("did"), "why": out.get("why"),
                                "batch": out.get("batch")}),))
-    return out
+    s.event("rsi.tick-completed", {"tick_id": tick_id, "did": out.get("did"), "why": out.get("why"),
+                                   "sources": sources})
+    return out | {"sources": sources}
 
 
-def _tick(s, now: float | None = None) -> dict:
+def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
     """Find, then, if the trigger may, plan and submit the top open candidate. Every exit says
     why it did nothing (a quiet trigger must be tellable from a stuck one)."""
     from . import batches
@@ -475,12 +553,19 @@ def _tick(s, now: float | None = None) -> dict:
                    now - 2 * PLAN_CAP_S):
         # a tick that died mid-plan: the candidate goes back to open, never stuck
         s.update("rsi_candidates", r["id"], {"status": "open"}, actor="rsi", reason="stale planning")
-    rec = record(s, find(s, repo, now), now)
+    sources = {} if sources is None else sources
+    found, status, _ = find_sources(s, repo, now)
+    sources.update(status)
+    rec = record(s, found, now)
     for host in hosts():
         try:
             got = record(s, remote(host), now)
             rec = {k: rec.get(k, 0) + got.get(k, 0) for k in rec}
+            sources[f"remote:{host}"] = "ok"
+        except STORE_ERRORS:
+            raise
         except Exception as e:  # noqa: BLE001 - an unreachable host is reported, never fatal
+            sources[f"remote:{host}"] = f"{type(e).__name__}: {e}"[:300]
             s.event("rsi.remote-failed", {"host": host, "error": str(e)[:300]})
     if s.one("SELECT 1 FROM rsi_candidates WHERE status = 'planning'"):
         # one plan at a time: a manual tick and the supervisor's would plan two candidates at
@@ -492,15 +577,29 @@ def _tick(s, now: float | None = None) -> dict:
     waiting = pending(s)
     if len(waiting) >= REVIEW_CAP:
         return {"did": "nothing", "why": f"{len(waiting)} RSI branches wait for review", **rec}
-    top = next(iter(candidates(s)), None)
-    if top is None:
+    open_ = candidates(s)
+    if not open_:
         return {"did": "nothing", "why": "no open candidate", **rec}
     # Judgment call (Oct 15): the cap limits RSI's self-found work, so Chad's requests skip it,
     # and a cancelled batch uses no slot (the first request's batch was cancelled for a planner
     # brief defect, and the cap then held the second request for half a day). Wrong if Chad
-    # wants RSI's total volume capped.
-    if top["source"] != "request" and today_count(s, now) >= DAILY_CAP:
-        return {"did": "nothing", "why": f"daily cap {DAILY_CAP} reached", **rec}
+    # wants RSI's total volume capped. Goals and defects have separate allowances, and a capped
+    # candidate yields to the next one whose allowance is free (docs/08 §8.7).
+    caps = {"goal": GOAL_DAILY_CAP, "defect": DAILY_CAP}
+    used: dict[str, int] = {}
+    top = None
+    for c in open_:
+        k = kind(c["source"])
+        if k != "request":
+            used.setdefault(k, today_count(s, now, k))
+            if used[k] >= caps[k]:
+                continue
+        top = c
+        break
+    if top is None:
+        why = "; ".join(f"daily cap {caps[k]} reached" if k == "defect" else f"goal cap {caps[k]} reached"
+                        for k in sorted(used))
+        return {"did": "nothing", "why": why, **rec}
     s.update("rsi_candidates", top["id"], {"status": "planning", "planned_at": now}, actor="rsi",
              reason="tick")
     s.event("rsi.planning", {"candidate": top["id"], "title": top["title"]})
@@ -513,7 +612,8 @@ def _tick(s, now: float | None = None) -> dict:
         n = s.one("SELECT COUNT(*) n FROM batches WHERE consumer_ref LIKE 'rsi-auto-%'")["n"] + 1
         try:
             bid = batches.submit(s, PROJECT, plans_mod.from_dict(res["spec"]),
-                                 consumer_ref=f"rsi-auto-{n}", meta={"rsi_candidate": top["id"]})
+                                 consumer_ref=f"rsi-auto-{n}",
+                                 meta={"rsi_candidate": top["id"], "rsi_source": top["source"]})
         except batches.SubmitRejected as e:
             res = {"shelve": "submit rejected: " + "; ".join(e.problems)[:500]}
         else:

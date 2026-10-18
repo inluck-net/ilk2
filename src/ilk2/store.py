@@ -46,7 +46,11 @@ NEEDS_HUMAN_REASONS = {
     # `ilk2 apply`: a requested commit does not apply to a step's worktree.
     "apply-failed",
     "rsi-review", "rsi-rollback",   # unattended RSI landing (rsi_land.py)
+    "rsi-health", "rsi-goal",       # RSI watched from outside, and standing goals (docs/08)
 }
+# Rows that stay active once acked: acking an ongoing condition must not spawn a second row,
+# and recovery clears the acked one (docs/08 §8.6).
+ACTIVE_WHEN_ACKED = {"rsi-health", "rsi-goal"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -144,6 +148,8 @@ CREATE TABLE IF NOT EXISTS improvements (
 CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS events_kind ON events(kind, cursor);
+CREATE INDEX IF NOT EXISTS batches_project ON batches(project_id, created_at);
 """
 
 
@@ -360,7 +366,8 @@ class Store:
         if reason not in NEEDS_HUMAN_REASONS:
             raise StoreError(f"unknown needs_human reason {reason!r}")
         with self.tx() as c:
-            existing = c.execute("SELECT id FROM needs_human WHERE state = 'open' AND reason = ? "
+            states = "('open', 'acked')" if reason in ACTIVE_WHEN_ACKED else "('open')"
+            existing = c.execute(f"SELECT id FROM needs_human WHERE state IN {states} AND reason = ? "
                                  "AND batch_id IS ?" + ("" if batch_id else " AND consumer_ref IS ?"),
                                  (reason, batch_id) if batch_id else (reason, batch_id, consumer_ref)
                                  ).fetchone()
@@ -399,6 +406,21 @@ class Store:
                               (clock.wall(), r["id"]))
                     n += 1
             return n
+
+    def clear_needs_human_reason(self, reason: str, project_id: str | None,
+                                 consumer_ref: str | None = None) -> int:
+        """Clear rows that have no batch, by reason and project, and by consumer ref when given:
+        health clears its own, a goal only its own (consumer_ref "goal:<id>"). Acked rows of
+        ACTIVE_WHEN_ACKED reasons are cleared too."""
+        states = "('open', 'acked')" if reason in ACTIVE_WHEN_ACKED else "('open')"
+        sql = (f"UPDATE needs_human SET state = 'cleared', cleared_at = ? WHERE state IN {states} "
+               "AND batch_id IS NULL AND reason = ? AND project_id IS ?")
+        args: list = [clock.wall(), reason, project_id]
+        if consumer_ref is not None:
+            sql += " AND consumer_ref = ?"
+            args.append(consumer_ref)
+        with self.tx() as c:
+            return c.execute(sql, args).rowcount
 
     def open_human_rows(self, batch_id: str | None = None) -> list[sqlite3.Row]:
         if batch_id:

@@ -35,8 +35,8 @@ SOAK_S = 24 * 3600        # judgment call: a day of real batches before rezmac (
 # does red). Machinery: RSI may fix its own code, but such a batch always lands by review
 # (Chad, Oct 16: "go as what you recommended").
 GOVERNANCE = ["AGENTS.md", "CLAUDE.md", "docs/rsi/**", ".github/**"]
-MACHINERY = ["src/ilk2/rsi.py", "src/ilk2/rsi_land.py", "src/ilk2/release.py",
-             "tests/test_rsi.py", "tests/test_rsi_land.py"]
+MACHINERY = ["src/ilk2/rsi.py", "src/ilk2/rsi_land.py", "src/ilk2/release.py", "src/ilk2/health.py",
+             "tests/test_rsi.py", "tests/test_rsi_land.py", "tests/test_health.py"]
 KERNEL = GOVERNANCE + MACHINERY
 TRAILER = "ilk2-rsi"
 

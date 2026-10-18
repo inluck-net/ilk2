@@ -386,3 +386,102 @@ def test_a_goal_off_its_target_is_a_candidate(ilk, tmp_path, monkeypatch):
     got = [c for c in rsi.find(ilk.s, tmp_path) if c.source == "goal"]
     assert [c.id for c in got] == ["goal:kira-speed"]                     # waste is on target
     assert "is 30.1, target <= 20" in got[0].title and got[0].evidence[0]["host"] == "rezmac"
+
+
+# -- docs/08 stage A: inputs that report themselves, tick events, allowances ------------------
+
+def test_gh_is_found_off_path_as_under_launchd(ilk, tmp_path, monkeypatch):
+    # Oct 16-19: launchd's PATH lacks Homebrew, and every supervisor tick failed to run `gh`.
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_issues": True}))
+    fake_gh(tmp_path, monkeypatch, [{"number": 7, "title": "t", "body": "b", "author": {"login": "chad007"}}])
+    monkeypatch.setattr(rsi, "GH_FALLBACKS", (str(tmp_path / "bin" / "gh"),))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")                    # no gh on PATH
+    assert [c.id for c in rsi.find(ilk.s, tmp_path) if c.source == "request"] == ["request:gh-7"]
+
+
+def test_a_failed_source_is_recorded_and_the_others_still_count(ilk, tmp_path, monkeypatch):
+    from ilk2 import paths as p_
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)                                                  # a records candidate
+    (ilk.repo / "docs" / "rsi").mkdir(parents=True)
+    (ilk.repo / "docs" / "rsi" / "requests.json").write_text("{not json")
+    (ilk.repo / "docs" / "rsi" / "goals.json").write_text("[broken")
+    (p_.home() / "host.json").write_text(json.dumps({"rsi_issues": True}))
+    fake_gh(tmp_path, monkeypatch, [], rc=1)
+    ilk.script(spec_write(PLAN))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "submitted", out                          # the stall still got planned
+    src = out["sources"]
+    assert src["records"] == "ok"
+    assert src["requests"].startswith("JSONDecodeError") and src["goals"].startswith("JSONDecodeError")
+    assert src["issues"].startswith("RuntimeError")
+    (done,) = [e for e in ilk.s.events_since(0) if e["kind"] == "rsi.tick-completed"]
+    assert done["payload"]["sources"] == src
+
+
+def test_every_tick_records_its_start_and_how_it_ended(ilk, monkeypatch):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    rsi.tick(ilk.s)                                                # a tick that does nothing
+    ev = [e for e in ilk.s.events_since(0) if e["kind"].startswith("rsi.tick-")]
+    assert [e["kind"] for e in ev] == ["rsi.tick-started", "rsi.tick-completed"]
+    assert ev[0]["payload"]["tick_id"] == ev[1]["payload"]["tick_id"]
+    assert ev[1]["payload"]["why"] == "no open candidate"
+
+    def boom(*a, **k):
+        raise RuntimeError("core broke")
+    monkeypatch.setattr(rsi, "_tick", boom)
+    with pytest.raises(RuntimeError):
+        rsi.tick(ilk.s)
+    ev = [e for e in ilk.s.events_since(0) if e["kind"].startswith("rsi.tick-")][2:]
+    assert [e["kind"] for e in ev] == ["rsi.tick-started", "rsi.tick-failed"]
+    assert ev[0]["payload"]["tick_id"] == ev[1]["payload"]["tick_id"]
+    assert "core broke" in ev[1]["payload"]["error"]
+
+
+def candidate(ilk, cid, source, score):
+    now = clock.wall()
+    ilk.s.insert("rsi_candidates", {"id": cid, "source": source, "title": f"{source} {cid}",
+                                    "evidence": "[]", "hits": 1, "score": score, "status": "open",
+                                    "first_seen": now, "last_seen": now})
+
+
+def test_goals_and_defects_have_separate_allowances_and_a_capped_one_yields(ilk, monkeypatch):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    monkeypatch.setattr(rsi, "pending", lambda s: [])
+    monkeypatch.setattr(rsi, "find_sources", lambda s, repo, now: ([], {}, {}))
+    candidate(ilk, "goal:speed", "goal", 95)
+    candidate(ilk, "stall:x", "stall", 45)
+    used = {"goal": 1, "defect": 0}
+    monkeypatch.setattr(rsi, "today_count", lambda s, now, of="defect": used[of])
+    monkeypatch.setattr(rsi, "plan", lambda s, cand, *a, **k: {"done": f"planned {cand['id']}"})
+    assert rsi.tick(ilk.s)["candidate"] == "stall:x"               # the goal's allowance is used
+    candidate(ilk, "stall:y", "stall", 45)
+    ilk.s.update("rsi_candidates", "goal:speed", {"status": "open"}, actor="t", reason="t")
+    used.update(goal=0, defect=3)
+    assert rsi.tick(ilk.s)["candidate"] == "goal:speed"            # the defects' is used
+    used.update(goal=1)
+    ilk.s.update("rsi_candidates", "goal:speed", {"status": "open"}, actor="t", reason="t")
+    assert rsi.tick(ilk.s)["why"] == "daily cap 3 reached; goal cap 1 reached"
+
+
+def test_a_batch_counts_toward_its_sources_allowance_even_from_another_host(ilk, monkeypatch):
+    ilk.make_repo()
+    ilk2_project(ilk)
+    monkeypatch.setattr(rsi, "find_sources", lambda s, repo, now: ([], {}, {}))
+    candidate(ilk, "rezmac/goal:speed", "goal", 95)                # a host-prefixed goal
+    ilk.script(spec_write(PLAN))
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "submitted", out
+    meta = json.loads(ilk.s.get("batches", out["batch"])["snapshot"])["meta"]
+    assert meta["rsi_source"] == "goal"
+    now = clock.wall()
+    assert (rsi.today_count(ilk.s, now, "goal"), rsi.today_count(ilk.s, now, "defect")) == (1, 0)
+    snap = json.loads(ilk.s.get("batches", out["batch"])["snapshot"])
+    del snap["meta"]["rsi_source"]                                 # a batch from before the field
+    ilk.s.update("batches", out["batch"], {"snapshot": json.dumps(snap)}, actor="t", reason="t")
+    assert (rsi.today_count(ilk.s, now, "goal"), rsi.today_count(ilk.s, now, "defect")) == (0, 1)
