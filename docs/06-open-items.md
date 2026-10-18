@@ -273,6 +273,12 @@ On rezmac kira-live #8644 (b-5206fa7e6324), step 0's commit ca183b96b also edite
 - **Proposed (a):** a shell gate from the sub-plan frontmatter (plan-wide, a regression check) passes when it was red at the base and its normalised output is unchanged, and the brief says so. A step's own local_checks stay absolute, since those are its acceptance checks. Judgment call: plan-wide vs step-level as the line between regression and acceptance; wrong if plans put acceptance checks in the frontmatter.
 - **Alternative (b), on gh-resolve's side:** render such checks only when green at the base.
 
+### Attribution when a batch changes its gate's specification (found Oct 18, batch 18a)
+
+18a's verification step found 44 new failures and attributed 0. The batch had changed the gate's specification (its test configuration), so there was no comparable base (docs/02 §2.5.4), and every failure fell to the one verification worker: 94.2 min over 3 attempts ([E6](evidence/2026-10-18-batch-18a-retrospective.md)).
+- **Idea:** when the specification changed, also measure the base under the head's configuration (overlay the head's config files in a diagnostic worktree), so failures can still be walked back to the step that caused them and repaired there.
+- **Open:** the cost of that second measurement, and whether per-step repairs beat one worker fixing all of them together. Neither is measured. Not built.
+
 ### Speed levers from docs/03 §3.4 that were never built (found Oct 16)
 
 kira-cloudflare-44 measured support piece A's step 0 timing out at the 3600 s attempt cap. It made 154 tool calls, spent about 3150 s in model turns at ~20 s per turn, and made its first edit at 1007 s; all its gates passed on the kept work. docs/03 §3.4 promises three levers that would address this, and none is built:
