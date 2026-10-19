@@ -280,3 +280,24 @@ def test_a10_failures_attributed_to_one_edge_share_one_repair(ilk):
     st = ilk.s.one("SELECT * FROM steps WHERE plan_id = ?", rp[0]["id"])
     assert sorted(json.loads(st["must_pass"])) == ["tests/test_b.py::test_b", "tests/test_b2.py::test_b2"]
     assert ilk.s.one("SELECT COUNT(*) n FROM repairs WHERE batch_id = ?", bid)["n"] == 2
+
+
+# -- docs/09 V2: a verification step that opened repairs re-verifies after them ---------------
+
+def test_a_verification_step_that_opened_repairs_is_accepted_only_after_a_green_rerun(ilk):
+    # Codex round 7 / gh-resolve-65, Oct 19: an all-attributed failure set read as green, so the
+    # verification step was accepted at once, and the repairs ran only their narrowed tests:
+    # nothing ran the full suite on the repaired tree. "Every red was explained" is not "green".
+    setup(ilk)
+    ilk.script([BREAK], [FIX])
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("break b")]},
+        {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
+    assert ilk.drive_inprocess(bid) == "shipped"
+    (rp,) = repair_plans(ilk, bid)
+    repaired = order_of(ilk, "step.accepted", step=f"{rp['id']}.0")
+    verified = order_of(ilk, "step.accepted", step=f"{bid}.v.0")
+    assert repaired and verified and repaired[0] < verified[0]      # accepted after the repair
+    runs = ilk.s.all("SELECT outcome FROM attempts WHERE step_id = ? ORDER BY n, created_at",
+                     f"{bid}.v.0")
+    assert [r["outcome"] for r in runs] == ["measured", "accepted"]  # suite again after repair

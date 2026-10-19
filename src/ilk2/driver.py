@@ -702,6 +702,18 @@ class Driver:
                 # join the repair it is (test_attribution A5/A7/A9/A10, Oct 14).
                 red, verdicts = self.run_gates(step, aid, gate_list, expect_red, parent, must_pass,
                                                attribute=not repair)
+            if red is None and plan["verification"] and self.s.one(
+                    "SELECT 1 FROM plans WHERE batch_id = ? AND repair_of_step_id IS NOT NULL AND "
+                    "status != 'shipped'", self.batch_id):
+                # Green only because every failure was attributed: the repairs this run opened
+                # (or joined) run their narrowed tests, so this step stays pending and runs the
+                # full suite again once they ship (the barrier, next_step). "Every red was
+                # explained" is not "the repaired tree is green" (docs/09 V2; Codex round 7).
+                self.end_attempt(aid, "measured", "failures attributed to repairs; the suite runs "
+                                 "again after them", {"gates_first": True}, gates_out=verdicts)
+                self.s.update("steps", step["id"], {"attempt_count": n - 1}, actor="driver",
+                              reason="gates first: not counted")
+                return
             if red is None and (plan["verification"] or (repair and not kept)):
                 # A repair whose test already passes has nothing left to repair: gh-resolve P6,
                 # Oct 14, verification found one bad line that three tests flag, and added three
