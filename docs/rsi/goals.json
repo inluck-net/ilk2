@@ -1,0 +1,6 @@
+[
+  {"id": "rsi-inputs-readable", "project": "ilk2", "metric": "rsi_input_failures_last_tick",
+   "max": 0, "window_days": 7, "min_samples": 1},
+  {"id": "gh-resolve-step-minutes", "project": "gh-resolve", "metric": "minutes_per_accepted_step",
+   "max": 24, "window_days": 7, "min_samples": 20}
+]

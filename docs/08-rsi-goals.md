@@ -273,6 +273,18 @@ Judgment calls:
 
 The "working RSI" check is in two parts. Stage A's alarm catches ticks that stop or fail. Stage B's `rsi-inputs-readable` goal catches an input RSI cannot read.
 
+**Measured and set, Oct 19** (B2's own metrics, read-only on chad-mbp's store; `docs/rsi/goals.json`):
+
+| Goal | 1 day | 7 days | Target |
+|---|---|---|---|
+| `rsi-inputs-readable` (ilk2) | 0 (10 ticks) | 0 (10 ticks) | max 0 (met) |
+| `gh-resolve-step-minutes` | 29.11 (51 steps) | 29.72 (192 steps) | max 24, `min_samples` 20 |
+| hand steering per batch (gh-resolve) | 0.0 (5 batches) | 1.84 (31 batches) | not set |
+
+Judgment calls:
+- **24** is 20% under 29.72, per the rule above.
+- **Hand steering is left out.** Its 7-day value is older batches with heavy manual intervention, ageing out; the last day is 0.0. Wrong if hand-steering returns in new batches; then it is added.
+
 ## 8.9 Review log
 
 All findings below were checked against the code before being accepted.
