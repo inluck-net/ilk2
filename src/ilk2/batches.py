@@ -8,6 +8,7 @@ with the driver side holding it while the batch is queued or active.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -339,6 +340,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         problems += preflight(spec, repo, base_sha, cfg)
     if problems:
         raise SubmitRejected(problems)
+    path_warns = gate_path_warnings(spec, repo, base_sha)
     if check_only:
         return ""
     bid = new_id("b")
@@ -388,7 +390,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         lease.init_driver(s, str(root), base_sha)
         s.event("submitted", {"priority": priority, "plans": len(spec.plans),
                               "steps": sum(len(p.steps) for p in spec.plans)}, batch_id=bid)
-        for w in plan_warnings(spec):
+        for w in plan_warnings(spec) + path_warns:
             s.event("submit.warning", w, batch_id=bid)
     return bid
 
@@ -429,6 +431,43 @@ def plan_warnings(spec: plans.BatchSpec) -> list[dict]:
     chain = serial_chain(spec)
     if chain:
         out.append({"kind": "serial-chain", "disjoint": chain})
+    return out
+
+
+def gate_path_warnings(spec: plans.BatchSpec, repo: Path, base_sha: str | None) -> list[dict]:
+    """Test paths a gate names that are absent at the base and that no plan of the batch
+    declares in its scope. At the base such a path is 0 tests, but after any step it is
+    "declared, absent after the step", so the gate is red every time (gh-resolve 2026-10-19b:
+    gates named tests that existed only on a running batch's branch, and --check said ok).
+    A warning, not a refusal: a scope list can be incomplete (judgment call; wrong if such
+    gates keep reaching runs, then refuse)."""
+    if not base_sha:
+        return []
+    from .gates import _split_missing
+    files = set(gitops.git(repo, "ls-tree", "-r", "--name-only", base_sha, check=False).splitlines())
+    dirs = {str(Path(f).parent) for f in files}
+    for d in list(dirs):
+        dirs.update(str(x) for x in Path(d).parents)
+    scopes = [x for p in spec.plans for st in p.steps for x in st.scope]
+    out, seen = [], set()
+    for p in spec.plans:
+        for st in p.steps:
+            for g in st.gates:
+                if g.adapter != "pytest" or not g.declares_tests:
+                    continue
+
+                def exists(rel: str, cwd: str = g.cwd or ".") -> bool:
+                    full = os.path.normpath(os.path.join(cwd, rel))
+                    return full in files or full in dirs
+
+                _, missing = _split_missing(g.command, Path(g.cwd or "."), exists)
+                for m in missing:
+                    full = os.path.normpath(os.path.join(g.cwd or ".", m.split("::")[0]))
+                    if (p.slug, g.name, full) in seen or path_matches(full, scopes):
+                        continue
+                    seen.add((p.slug, g.name, full))
+                    out.append({"kind": "gate-path-absent", "plan": p.slug, "gate": g.name,
+                                "path": full, "base": base_sha[:12]})
     return out
 
 

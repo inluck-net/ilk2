@@ -123,8 +123,11 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], cap_s: int) -> tuple[in
         return None, out or "", True, time.monotonic() - t0
 
 
-def _split_missing(command: list[str], cwd: Path) -> tuple[list[str], list[str]]:
-    """Drop positional test paths that do not exist (yet): they measure as '0 tests' (§2.5.4)."""
+def _split_missing(command: list[str], cwd: Path, exists=None) -> tuple[list[str], list[str]]:
+    """Drop positional test paths that do not exist (yet): they measure as '0 tests' (§2.5.4).
+    `exists(path)` decides existence relative to cwd; the default reads the disk (submit passes
+    one that reads the base commit's tree)."""
+    exists = exists or (lambda rel: (cwd / rel).exists())
     kept, missing = [], []
     takes_value = TAKES_VALUE
     skip_next = False
@@ -139,7 +142,7 @@ def _split_missing(command: list[str], cwd: Path) -> tuple[list[str], list[str]]
             continue
         looks_path = not a.startswith("-") and ("/" in a or a.endswith(".py")) and i > 0 \
             and a not in ("python", "python3") and not a.endswith("/python3")
-        if looks_path and not (cwd / a.split("::")[0]).exists():
+        if looks_path and not exists(a.split("::")[0]):
             missing.append(a)
             continue
         kept.append(a)

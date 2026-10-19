@@ -518,3 +518,28 @@ def test_the_snapshot_records_its_reader_and_spec_version(tmp_path):
     j = plans.from_dict({"plans": [{"slug": "a", "steps": [{"title": "t", "instructions": "x"}]}]}).to_dict()
     assert j["source"] == "json"
     assert plans.from_dict(d).plans[0].slug == "a"          # a snapshot still loads
+
+
+def test_a_gate_on_a_test_absent_at_the_base_that_no_plan_creates_is_a_warning(ilk, capsys):
+    # gh-resolve 2026-10-19b: gates named tests that existed only on a running batch's branch;
+    # --check said ok, and after any step such a gate is "declared, absent" (red every time).
+    import json as j
+    from ilk2 import batches, cli
+    ilk.make_repo()
+    ilk.project()
+    gate = [{"name": "unit", "command": "python -m pytest -q tests/test_calc.py tests/test_74a.py"}]
+    spec = {"plans": [{"slug": "a", "steps": [{"title": "t", "instructions": "x", "scope": ["calc.py"],
+                                                "gates": gate}]}]}
+    f = ilk.tmp / "spec.json"
+    f.write_text(j.dumps(spec))
+    assert cli.main(["submit", "--check", "--project", "proj", str(f)]) in (0, None)
+    out = j.loads(capsys.readouterr().out)
+    assert [(w["kind"], w["path"]) for w in out["warnings"]] == [("gate-path-absent", "tests/test_74a.py")]
+    spec["plans"][0]["steps"][0]["scope"].append("tests/test_74a.py")     # a plan creates it
+    f.write_text(j.dumps(spec))
+    assert cli.main(["submit", "--check", "--project", "proj", str(f)]) in (0, None)
+    assert "warnings" not in j.loads(capsys.readouterr().out)
+    bid = ilk.submit({"plans": [{"slug": "a", "steps": [{"title": "t", "instructions": "x",
+                                                          "scope": ["calc.py"], "gates": gate}]}]})
+    kinds = [e["payload"]["kind"] for e in ilk.s.events_since(0, bid) if e["kind"] == "submit.warning"]
+    assert kinds == ["gate-path-absent"] and ilk.s.get("batches", bid)["status"] == "queued"

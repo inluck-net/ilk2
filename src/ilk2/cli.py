@@ -478,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
                 base_sha = gitops.rev(repo, a.branch or a.base or proj["default_branch"])
                 bb = batches.base_behind(repo, base_sha, proj["default_branch"]) if base_sha else None
                 warn = batches.base_warning(bb)
-                warns = ([warn] if warn else []) + batches.plan_warnings(spec)
+                warns = ([warn] if warn else []) + batches.plan_warnings(spec) + \
+                    batches.gate_path_warnings(spec, repo, base_sha)
                 _out({"ok": True, "plans": len(spec.plans),
                       "steps": sum(len(p.steps) for p in spec.plans), "base_behind": bb,
                       **({"warnings": warns} if warns else {})}, True)
