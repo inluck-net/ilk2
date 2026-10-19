@@ -2,7 +2,7 @@
 
 **Status:** revision 8, Oct 19, 2026. Codex reviewed revisions 1-7 the same day, and every finding was checked against the code and accepted (8.9).
 - **Stage A: accepted, built and committed Oct 19** (`3152cff`). It is released on chad-mbp once gh-resolve's trial batch `b-da5e3354a7d1` ships (Chad: "release after trial #3").
-- **Stage B: rework in rounds 5-7.** Its fixes are folded in here. It is split into **B1** (landing intent, lock and resolution) and **B2** (the goal ledger). The next review is proposed against B1's code rather than on paper (8.9, round 7).
+- **Stage B: rework in rounds 5-7.** Its fixes are folded in here. It is split into **B1** (landing intent, lock and resolution) and **B2** (the goal ledger). **B1 is built** (Oct 19, Chad: "do your recommendations"), and its next review is against its code. B2 is next.
 
 **Asked by Chad, Oct 19:** "is the RSI still working? not a single auto improving batch for a few days", then "can we set this expected working RSI as the goal of the RSI itself, so that it can find all these defects/problems/reasons and get them handled properly".
 
@@ -150,7 +150,7 @@ The row is inserted before planning starts. Each later field is written once. Ev
   - **`--discarded`:** the batch's merge is not in `main` at all (never merged, or `main` reset). It records the landing as `abandoned`.
 
   All three clear the batch's `rsi-review` row.
-- **Review rows stay active once acked.** `rsi-review` joins `ACTIVE_WHEN_ACKED` (stage A, `src/ilk2/store.py:51`). It is cleared, open or acked, on every terminal resolution: a resolved keep (when its canary passes), `abandoned`, a hand merge closed as `landed-by-hand`, and a goal reset. Today `clear_needs_human()` clears only `open` rows (`src/ilk2/store.py:398`).
+- **Review rows stay active once acked.** `rsi-review` joins `ACTIVE_WHEN_ACKED` (stage A, `src/ilk2/store.py:51`). It is cleared, open or acked, on every terminal resolution: a resolved keep (when Chad resolves it; a later canary failure opens its own `rsi-rollback` row), `abandoned`, a hand merge closed as `landed-by-hand`, and a goal reset. Today `clear_needs_human()` clears only `open` rows (`src/ilk2/store.py:398`).
 - **Visibility.**
   - `pending()` includes `merge-interrupted` landings even when the branch is already in `main`; today ancestry drops them (`src/ilk2/rsi.py:463`).
   - The panel's held query adds `merge-interrupted` to `review` (`src/ilk2/xbar.py:347-348`), and the pending payload carries the landing's status, so the panel shows it as needing attention.

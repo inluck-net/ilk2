@@ -469,10 +469,15 @@ def pending(s) -> list:
     repo = Path(proj["repo_root"])
     main = gitops.rev(repo, "main")
     out = []
+    landing = {r["batch_id"]: r["status"] for r in s.all("SELECT batch_id, status FROM rsi_landings")}
     for b in s.all("SELECT * FROM batches WHERE project_id = ? AND status = 'shipped' AND "
                    "consumer_ref LIKE 'rsi-%' ORDER BY created_at", PROJECT):
+        st = landing.get(b["id"])
+        if st == "abandoned":
+            continue  # resolved by a person: never lands, never fills the review queue
         head = gitops.rev(repo, b["branch"])
-        if head and main and not gitops.is_ancestor(repo, head, main):
+        # an interrupted merge is in main but unverified: it waits for a person (docs/08 B1)
+        if st == "merge-interrupted" or (head and main and not gitops.is_ancestor(repo, head, main)):
             out.append(b)
     return out
 
@@ -574,6 +579,8 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
     if s.one("SELECT 1 FROM batches WHERE project_id = ? AND status IN ('queued', 'active', "
              "'parked', 'blocked')", PROJECT):
         return {"did": "nothing", "why": "an ilk2 batch is in flight", **rec}
+    if s.one("SELECT 1 FROM rsi_landings WHERE status = 'merge-interrupted'"):
+        return {"did": "nothing", "why": "an interrupted merge waits for resolution", **rec}
     waiting = pending(s)
     if len(waiting) >= REVIEW_CAP:
         return {"did": "nothing", "why": f"{len(waiting)} RSI branches wait for review", **rec}

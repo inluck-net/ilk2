@@ -50,7 +50,7 @@ NEEDS_HUMAN_REASONS = {
 }
 # Rows that stay active once acked: acking an ongoing condition must not spawn a second row,
 # and recovery clears the acked one (docs/08 §8.6).
-ACTIVE_WHEN_ACKED = {"rsi-health", "rsi-goal"}
+ACTIVE_WHEN_ACKED = {"rsi-health", "rsi-goal", "rsi-review"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -232,7 +232,10 @@ class Store:
                     c.execute(stmt)
             c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
             # Added columns (ALTER TABLE only adds; old releases ignore them).
-            for table, col, decl in (("runs", "plan_id", "TEXT"),):  # lanes (docs/06, Oct 14)
+            for table, col, decl in (("runs", "plan_id", "TEXT"),   # lanes (docs/06, Oct 14)
+                                     # the landing lock's owner (docs/08 B1)
+                                     ("rsi_landings", "merge_pid", "INTEGER"),
+                                     ("rsi_landings", "merge_proc_start", "TEXT")):
                 have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
                 if col not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -397,10 +400,12 @@ class Store:
 
     def clear_needs_human(self, batch_id: str, reasons: set[str] | None = None) -> int:
         with self.tx() as c:
-            rows = c.execute("SELECT id, reason FROM needs_human WHERE batch_id = ? AND state = 'open'",
-                             (batch_id,)).fetchall()
+            rows = c.execute("SELECT id, reason, state FROM needs_human WHERE batch_id = ? AND "
+                             "state IN ('open', 'acked')", (batch_id,)).fetchall()
             n = 0
             for r in rows:
+                if r["state"] == "acked" and r["reason"] not in ACTIVE_WHEN_ACKED:
+                    continue
                 if reasons is None or r["reason"] in reasons:
                     c.execute("UPDATE needs_human SET state = 'cleared', cleared_at = ? WHERE id = ?",
                               (clock.wall(), r["id"]))

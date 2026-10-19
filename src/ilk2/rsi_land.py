@@ -39,6 +39,15 @@ MACHINERY = ["src/ilk2/rsi.py", "src/ilk2/rsi_land.py", "src/ilk2/release.py", "
              "tests/test_rsi.py", "tests/test_rsi_land.py", "tests/test_health.py"]
 KERNEL = GOVERNANCE + MACHINERY
 TRAILER = "ilk2-rsi"
+# The landing lock (docs/08 B1): one landing between merge and the end of its canary. A held
+# landing waits for a person; merge-interrupted is also a hard stop for every landing stage.
+LOCKING = ("merging", "merged", "released", "merge-interrupted")
+HELD = ("review", "merge-interrupted")
+RESOLVE = "ilk2 rsi resolve {bid} --keep | --reverted <revert-commit> | --discarded"
+
+
+class ResolveError(Exception):
+    pass
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
@@ -148,6 +157,8 @@ def merge(s, b, repo: Path, cfg) -> dict:
     if weak:
         return _review(s, b, f"removes tests or asserts: {weak[:10]}")
     cand = _candidate(b)
+    if not _acquire(s, b, cand, main):
+        return {"did": "nothing", "why": "another landing holds the lock"}
     msg = (f"Merge RSI batch {b['id']} ({b['consumer_ref']}), landed unattended\n\n"
            f"{TRAILER}-batch: {b['id']}\n{TRAILER}-candidate: {cand}\n{TRAILER}-branch: {b['branch']}\n")
     out = _git(repo, "merge", "--no-ff", "-m", msg, b["branch"], check=False)
@@ -160,12 +171,110 @@ def merge(s, b, repo: Path, cfg) -> dict:
         if gitops.rev(repo, "HEAD") == merged:
             _git(repo, "reset", "-q", "--keep", main)  # undo only our own merge
         return _review(s, b, f"the suite is red on the merged commit: {tail[-600:]}")
-    with s.tx() as c:
-        c.execute("INSERT OR REPLACE INTO rsi_landings(batch_id, candidate_id, merge_commit, "
-                  "pre_merge, status, at, merged_at) VALUES (?, ?, ?, ?, 'merged', ?, ?)",
-                  (b["id"], cand, merged, main, clock.wall(), clock.wall()))
+    _set(s, b["id"], status="merged", merge_commit=merged, merged_at=clock.wall())
     s.event("rsi.merged", {"batch": b["id"], "candidate": cand, "commit": merged}, batch_id=b["id"])
     return {"did": "merged", "batch": b["id"], "commit": merged}
+
+
+def _acquire(s, b, cand, main: str) -> bool:
+    """Take the landing lock just before `git merge`: in one transaction, no landing may be
+    merging, merged, released or interrupted, and this batch may have no row of any status.
+    The row records its process, so a merge that dies mid-verification is told apart from a
+    hand merge (docs/08 B1)."""
+    import os
+    from . import procs
+    pid = os.getpid()
+    start = procs.start_time(pid)  # no I/O inside the transaction
+    with s.tx() as c:
+        busy = c.execute(f"SELECT 1 FROM rsi_landings WHERE status IN ({','.join('?' * len(LOCKING))}) "
+                         "OR batch_id = ?", (*LOCKING, b["id"])).fetchone()
+        if busy:
+            return False
+        c.execute("INSERT INTO rsi_landings(batch_id, candidate_id, pre_merge, status, at, "
+                  "merge_pid, merge_proc_start) VALUES (?, ?, ?, 'merging', ?, ?, ?)",
+                  (b["id"], cand, main, clock.wall(), pid, start))
+    return True
+
+
+def interrupted(s) -> list[str]:
+    """A merging landing whose process is gone becomes merge-interrupted: main may hold an
+    unverified merge, so nothing lands or plans until a person resolves it."""
+    from . import procs
+    out = []
+    for r in s.all("SELECT * FROM rsi_landings WHERE status = 'merging'"):
+        if procs.is_same_process(r["merge_pid"], r["merge_proc_start"]):
+            continue
+        _set(s, r["batch_id"], status="merge-interrupted",
+             note="the merging process died before the merge was verified")
+        s.event("rsi.merge-interrupted", {"batch": r["batch_id"], "pid": r["merge_pid"]},
+                batch_id=r["batch_id"])
+        s.open_needs_human("rsi-review", f"RSI batch {r['batch_id']}: its merge was interrupted "
+                           "before verification; main may hold an unverified merge",
+                           RESOLVE.format(bid=r["batch_id"]), batch_id=r["batch_id"])
+        out.append(r["batch_id"])
+    return out
+
+
+def _merge_of(repo: Path, head: str, main: str) -> str | None:
+    """The merge commit on main whose second parent is the batch's head, if any."""
+    for c in _git(repo, "rev-list", "--merges", "--ancestry-path", f"{head}..{main}",
+                  check=False).split():
+        if _git(repo, "rev-parse", f"{c}^2", check=False) == head:
+            return c
+    return None
+
+
+def resolve(s, bid: str, *, keep: bool = False, reverted: str | None = None,
+            discarded: bool = False, by: str = "human") -> dict:
+    """A person resolves a held landing (docs/08 B1). keep: verify main's head as it is now,
+    and if main has not moved meanwhile, send the landing through the normal release and
+    canary. reverted: the merge is in main and the given commit undoes it. discarded: the merge
+    is not in main. Every resolution is an rsi.resolved event, and clears the review row."""
+    from . import batches, rsi
+    if sum([keep, reverted is not None, discarded]) != 1:
+        raise ResolveError("give exactly one of --keep, --reverted <commit>, --discarded")
+    row = _row(s, bid)
+    if row is None or row["status"] not in HELD:
+        raise ResolveError(f"{bid} has no held landing (status: {row['status'] if row else 'none'})")
+    b = s.get("batches", bid)
+    repo = Path(s.one("SELECT repo_root FROM projects WHERE id = ?", rsi.PROJECT)["repo_root"])
+    head, main = gitops.rev(repo, b["branch"]), gitops.rev(repo, "main")
+    in_main = bool(head and main and gitops.is_ancestor(repo, head, main))
+    ev: dict = {"batch": bid, "by": by, "main": main, "head": head}
+    if keep:
+        if not in_main:
+            raise ResolveError(f"{bid}'s merge is not in main: nothing to keep (use --discarded)")
+        ok, tail = verify(repo, main, batches.project_config(s, rsi.PROJECT))
+        if not ok:
+            s.event("rsi.resolve-refused", ev | {"how": "keep", "verification": tail[-500:]},
+                    batch_id=bid)
+            return {"did": "nothing", "why": f"verification is red on main {main[:12]}: {tail[-300:]}"}
+        if gitops.rev(repo, "main") != main:
+            return {"did": "nothing", "why": "main moved during verification; run resolve again"}
+        merge_commit = _merge_of(repo, head, main) or main
+        _set(s, bid, status="merged", merge_commit=merge_commit, merged_at=clock.wall(),
+             note=f"kept by {by} after verifying {main}")
+        ev |= {"how": "keep", "verified": main, "merge_commit": merge_commit, "verification": "green"}
+    elif reverted is not None:
+        m = _merge_of(repo, head, main) if in_main else None
+        c = gitops.rev(repo, reverted)
+        if not m:
+            raise ResolveError(f"{bid}'s merge is not in main (use --discarded)")
+        if not c or not gitops.is_ancestor(repo, m, c) or not gitops.is_ancestor(repo, c, main):
+            raise ResolveError(f"{reverted} must be in main and after the merge {m[:12]}")
+        touched = _git(repo, "diff", "--name-only", f"{m}^1", m, check=False).split()
+        if _git(repo, "diff", "--name-only", f"{m}^1", c, "--", *touched, check=False).strip():
+            raise ResolveError(f"{reverted} does not undo the merge {m[:12]}: its changes remain")
+        _set(s, bid, status="abandoned", merge_commit=m, note=f"reverted by {c} ({by})")
+        ev |= {"how": "reverted", "merge_commit": m, "revert": c}
+    else:
+        if in_main:
+            raise ResolveError(f"{bid}'s merge is in main: use --keep or --reverted <commit>")
+        _set(s, bid, status="abandoned", note=f"discarded by {by}")
+        ev |= {"how": "discarded"}
+    s.clear_needs_human(bid, {"rsi-review"})
+    s.event("rsi.resolved", ev, batch_id=bid)
+    return {"did": "resolved", "batch": bid, "how": ev["how"]}
 
 
 def release_landed(s, row, repo: Path) -> dict:
@@ -254,6 +363,11 @@ def land(s, now: float | None = None) -> dict:
     if not cfg.rsi_land:
         return {"did": "nothing", "why": "rsi_land is off: branches wait for review"}
     repo = Path(proj["repo_root"])
+    interrupted(s)
+    if s.one("SELECT 1 FROM rsi_landings WHERE status = 'merge-interrupted'"):
+        return {"did": "nothing", "why": "an interrupted merge waits: ilk2 rsi resolve"}
+    if s.one("SELECT 1 FROM rsi_landings WHERE status = 'merging'"):
+        return {"did": "nothing", "why": "a merge is in progress"}
     # One landing between merge and the end of its canary, so a canary judges one change.
     row = s.one("SELECT * FROM rsi_landings WHERE status IN ('merged', 'released') ORDER BY at LIMIT 1")
     if row and row["status"] == "merged":

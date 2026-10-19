@@ -365,3 +365,18 @@ def test_queued_batches_are_not_counted_as_running():
     assert "▶ running (2) · queued (2)" in out
     ids = [ln.split()[0] for ln in out.splitlines() if ln.startswith("b-")]
     assert ids == ["b-a1", "b-a2", "b-q1", "b-q2"]               # running first
+
+
+def test_an_interrupted_merge_needs_attention_on_the_panel(ilk, capsys, monkeypatch):
+    # docs/08 B1: merge-interrupted is a hold, not an ordinary queue entry.
+    from test_rsi import ilk2_project
+    from ilk2 import clock, rsi
+    ilk.make_repo()
+    ilk2_project(ilk, rsi_land=True)
+    monkeypatch.setattr(rsi, "pending", lambda s: [{"id": "b-9", "branch": "ilk2/b-9",
+                                                   "consumer_ref": "rsi-auto-1"}])
+    with ilk.s.tx() as c:
+        c.execute("INSERT INTO rsi_landings(batch_id, status, at) VALUES ('b-9', 'merge-interrupted', ?)",
+                  (clock.wall(),))
+    assert xbar.main() == 0
+    assert "b-9 [rsi-auto-1] ilk2: RSI branch ilk2/b-9 needs review" in capsys.readouterr().out

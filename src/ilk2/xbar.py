@@ -344,12 +344,14 @@ def main() -> int:
                     landing_on, repo = cfg.rsi_land, proj["repo_root"] if proj else None
                 except Exception:  # noqa: BLE001 - no ilk2 project row: the brake reads off
                     landing_on, repo = False, None
-                held = {r["batch_id"] for r in s.all(
-                    "SELECT batch_id FROM rsi_landings WHERE status = 'review'")}
+                landing = {r["batch_id"]: r["status"] for r in s.all(
+                    "SELECT batch_id, status FROM rsi_landings")}
+                held = {k for k, v in landing.items() if v in ("review", "merge-interrupted")}
                 lt = s.one("SELECT value FROM meta WHERE key = 'rsi_last_tick'")
                 st["rsi"] = {"pending": [{"batch": b["id"], "branch": b["branch"],
                                           "ref": b["consumer_ref"],
-                                          "review": (b["id"] in held) or not landing_on}
+                                          "review": (b["id"] in held) or not landing_on,
+                                          "landing": landing.get(b["id"])}
                                          for b in rsi.pending(s)],
                              "last_tick": json.loads(lt["value"]) if lt else None,
                              "open": len(rsi.candidates(s)),

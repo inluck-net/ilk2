@@ -224,7 +224,12 @@ def main(argv: list[str] | None = None) -> int:
     psub.add_parser("take-over").add_argument("project_id")
     psub.add_parser("show", help="a project's settings (env values redacted)").add_argument("project_id")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
-    rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log"])
+    rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log", "resolve"])
+    rs.add_argument("target", nargs="?", help="resolve: the batch whose held landing to resolve")
+    rs.add_argument("--keep", action="store_true",
+                    help="resolve: verify main as it is, then release and canary the merge")
+    rs.add_argument("--reverted", metavar="COMMIT", help="resolve: the commit on main that undoes the merge")
+    rs.add_argument("--discarded", action="store_true", help="resolve: the merge is not in main")
     rs.add_argument("--repo", help="the ilk2 repo, for Chad's docs/rsi/requests.json "
                     "(default: the 'ilk2' project's repo)")
     rs.add_argument("--all", action="store_true", help="candidates: every status, not only open")
@@ -574,6 +579,17 @@ def main(argv: list[str] | None = None) -> int:
             elif a.op == "land":
                 from . import rsi_land
                 _out(rsi_land.land(s), True)
+            elif a.op == "resolve":
+                from . import rsi_land
+                if not a.target:
+                    _out({"error": "resolve needs a batch id"}, True)
+                    return 2
+                try:
+                    _out(rsi_land.resolve(s, a.target, keep=a.keep, reverted=a.reverted,
+                                          discarded=a.discarded), True)
+                except rsi_land.ResolveError as e:
+                    _out({"error": str(e)}, True)
+                    return 2
             elif a.op == "log":
                 from . import rsi_land
                 _out({"landings": rsi_land.log(s)}, True)

@@ -201,3 +201,104 @@ def test_a_host_that_already_has_the_merge_is_not_pushed_an_older_version(land, 
     out = rsi_land.land(ilk.s, later + rsi_land.SOAK_S)
     assert out["did"] == "pushed" and pushed == []           # nothing sent: rezmac has it
     assert "already has it" in out["hosts"][0]
+
+
+# -- docs/08 B1: the landing lock, interrupted merges, and resolving a held landing ----------
+
+def merging_row(ilk, bid, pid, start):
+    with ilk.s.tx() as c:
+        c.execute("INSERT INTO rsi_landings(batch_id, status, at, merge_pid, merge_proc_start) "
+                  "VALUES (?, 'merging', ?, ?, ?)", (bid, clock.wall(), pid, start))
+
+
+def test_a_live_merge_holds_the_lock_and_a_dead_one_becomes_a_hard_stop(land):
+    import os
+    from ilk2 import procs
+    ilk = land
+    first = shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "a\n"}])
+    second = shipped_rsi_batch(ilk, [{"write": "more.md", "text": "b\n"}])
+    main = ilk.git(ilk.repo, "rev-parse", "main")
+    merging_row(ilk, first, os.getpid(), procs.start_time(os.getpid()))      # alive
+    assert rsi_land.land(ilk.s)["why"] == "a merge is in progress"          # second waits
+    assert rsi_land._acquire(ilk.s, ilk.s.get("batches", second), None, main) is False
+    rsi_land._set(ilk.s, first, merge_proc_start="a reused pid")             # pid reuse: dead
+    for _ in range(2):                                                       # stays stopped
+        assert rsi_land.land(ilk.s)["why"] == "an interrupted merge waits: ilk2 rsi resolve"
+    assert rsi_land._row(ilk.s, first)["status"] == "merge-interrupted"
+    assert ilk.git(ilk.repo, "rev-parse", "main") == main                   # nothing merged
+    (nh,) = ilk.s.all("SELECT * FROM needs_human WHERE reason = 'rsi-review' AND batch_id = ?", first)
+    assert "ilk2 rsi resolve" in nh["clear_command"]
+    assert first in [b["id"] for b in rsi.pending(ilk.s)]
+    assert rsi.tick(ilk.s)["why"] == "an interrupted merge waits for resolution"
+
+
+def interrupt_after_merge(ilk, monkeypatch, bid):
+    """A merge that dies between `git merge` and its verification: main holds it, unverified."""
+    def die(repo, commit, cfg):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(rsi_land, "verify", die)
+    with pytest.raises(KeyboardInterrupt):
+        rsi_land.land(ilk.s)
+    rsi_land._set(ilk.s, bid, merge_pid=999999, merge_proc_start="gone")
+    assert rsi_land.land(ilk.s)["why"].startswith("an interrupted merge")
+    from ilk2 import gitops
+    head = gitops.rev(ilk.repo, f"ilk2/{bid}")
+    assert gitops.is_ancestor(ilk.repo, head, gitops.rev(ilk.repo, "main"))   # main holds it
+
+
+def test_keep_verifies_main_then_the_normal_release_and_canary_follow(land, monkeypatch):
+    ilk = land
+    bid = shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "a\n"}])
+    interrupt_after_merge(ilk, monkeypatch, bid)
+    (nh,) = ilk.s.all("SELECT id FROM needs_human WHERE reason = 'rsi-review' AND batch_id = ?", bid)
+    ilk.s.ack(nh["id"], "chad")                                              # acked, still active
+    monkeypatch.setattr(rsi_land, "verify", lambda repo, commit, cfg: (False, "1 failed"))
+    assert rsi_land.resolve(ilk.s, bid, keep=True)["did"] == "nothing"      # red: unchanged
+    assert rsi_land._row(ilk.s, bid)["status"] == "merge-interrupted"
+
+    def moves_main(repo, commit, cfg):
+        (ilk.repo / "late.md").write_text("x\n")
+        ilk.git(ilk.repo, "add", "late.md")
+        ilk.git(ilk.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "late")
+        return True, "ok"
+    monkeypatch.setattr(rsi_land, "verify", moves_main)
+    assert "main moved" in rsi_land.resolve(ilk.s, bid, keep=True)["why"]   # moving head: unchanged
+    monkeypatch.setattr(rsi_land, "verify", lambda repo, commit, cfg: (True, "ok"))
+    assert rsi_land.resolve(ilk.s, bid, keep=True)["how"] == "keep"
+    row = rsi_land._row(ilk.s, bid)
+    assert row["status"] == "merged" and row["merge_commit"]
+    assert ilk.s.get("needs_human", nh["id"])["state"] == "cleared"
+    assert rsi_land.land(ilk.s)["did"] == "released"                        # the normal path
+    (ev,) = [e for e in ilk.s.events_since(0) if e["kind"] == "rsi.resolved"]
+    assert ev["payload"]["verified"] == ev["payload"]["main"]
+
+
+def test_reverted_needs_a_real_revert_and_discarded_needs_the_merge_out_of_main(land, monkeypatch):
+    ilk = land
+    bid = shipped_rsi_batch(ilk, [{"write": "notes.md", "text": "a\n"}])
+    other = shipped_rsi_batch(ilk, [{"write": "more.md", "text": "b\n"}])
+    interrupt_after_merge(ilk, monkeypatch, bid)
+    with pytest.raises(rsi_land.ResolveError):
+        rsi_land.resolve(ilk.s, bid, discarded=True)                        # the merge is in main
+    (ilk.repo / "unrelated.md").write_text("u\n")
+    ilk.git(ilk.repo, "add", "unrelated.md")
+    ilk.git(ilk.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "unrelated")
+    with pytest.raises(rsi_land.ResolveError, match="does not undo"):
+        rsi_land.resolve(ilk.s, bid, reverted="HEAD")
+    merge = ilk.git(ilk.repo, "log", "--merges", "-1", "--format=%H", "main")
+    ilk.git(ilk.repo, "-c", "user.name=t", "-c", "user.email=t@t", "revert", "--no-edit", "-m", "1", merge)
+    assert rsi_land.resolve(ilk.s, bid, reverted="HEAD")["how"] == "reverted"
+    assert rsi_land._row(ilk.s, bid)["status"] == "abandoned"
+    assert [b["id"] for b in rsi.pending(ilk.s)] == [other]                 # abandoned: not queued
+    monkeypatch.setattr(rsi_land, "verify", lambda repo, commit, cfg: (True, "ok"))
+    assert rsi_land.land(ilk.s)["did"] == "merged"                          # the stop is lifted
+
+
+def test_a_discarded_review_never_fills_the_review_queue(land):
+    ilk = land
+    weaker = TESTS.replace("\ndef test_zero():\n    assert add(0, 0) == 0\n", "")
+    bid = shipped_rsi_batch(ilk, [{"write": "tests/test_calc.py", "text": weaker}])
+    assert rsi_land.land(ilk.s)["did"] == "review"
+    assert rsi_land.resolve(ilk.s, bid, discarded=True)["how"] == "discarded"
+    assert rsi.pending(ilk.s) == []
+    assert not ilk.s.one("SELECT 1 FROM needs_human WHERE reason = 'rsi-review' AND state != 'cleared'")
