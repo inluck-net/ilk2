@@ -1129,6 +1129,132 @@ def test_a_projects_batches_on_one_base_share_its_measurement(ilk):
     assert not [e for e in ilk.s.events_since(0, third) if e["kind"] == "base.reused"]
 
 
+def test_two_batches_started_together_measure_the_base_once(ilk, monkeypatch):
+    # V3 (docs/09): 18b and 18c started 24 s apart and each recorded 11 base.measured events and
+    # 0 base.reused -- F5 only reuses a measurement that is already stored, so both measured.
+    # One claim per measurement key: the loser waits for the owner's result.
+    import threading
+    import time
+    from ilk2 import gates, paths
+    from ilk2.driver import Driver
+    from ilk2.store import Store
+
+    ilk.make_repo()
+    ilk.project()
+    a, b = ilk.submit(one_step()), ilk.submit(one_step())
+    ready = {}
+    for name, bid in (("a", a), ("b", b)):  # prepared serially: only the measurements race
+        s = Store(paths.db())
+        d = Driver(s, ilk.new_run(bid))
+        ready[name] = {"s": s, "d": d, "gate": d.all_gates()[0], "where": d.diag_worktree(d.base)}
+    calls, results, errors = [], {}, {}
+    real = gates.measure
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        time.sleep(0.3)  # the window in which both batches used to measure
+        return real(*args, **kwargs)
+    monkeypatch.setattr(gates, "measure", counted)
+    barrier = threading.Barrier(2)
+
+    def one(name):
+        r = ready[name]
+        try:
+            barrier.wait()
+            results[name] = r["d"].measure_base(r["gate"], r["where"], r["d"].base)
+        except Exception as e:  # noqa: BLE001 - reported below
+            errors[name] = e
+    ts = [threading.Thread(target=one, args=(n,)) for n in ready]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(60)
+    for r in ready.values():
+        r["s"].close()
+    assert not errors, errors
+    assert len(calls) == 1  # the gate ran once for the pair
+    rows = ilk.s.all("SELECT batch_id, at FROM base_measurements WHERE batch_id IN (?, ?)", a, b)
+    assert len(rows) == 2 and len({r["at"] for r in rows}) == 1  # the copy keeps the owner's time
+    if [e for e in ilk.s.events_since(0, a) if e["kind"] == "base.measured"]:
+        winner, loser = a, b
+    else:
+        winner, loser = b, a
+    assert not [e for e in ilk.s.events_since(0, loser) if e["kind"] == "base.measured"]
+    reused = [e["payload"] for e in ilk.s.events_since(0, loser) if e["kind"] == "base.reused"]
+    assert [r["from_batch"] for r in reused] == [winner]
+    assert reused[0]["waited_s"] >= 0
+
+
+def test_a_base_claim_whose_process_is_dead_is_taken_over(ilk):
+    # V3 (docs/09): a claim is waited on only while its owner lives. Dead is the supervisor's
+    # identity test (boot, then (pid, start time); supervisor.py reconcile): this owner is a
+    # process that has exited.
+    import subprocess
+    from ilk2 import clock, procs
+    from ilk2.driver import Driver
+
+    ilk.make_repo()
+    ilk.project()
+    p = subprocess.Popen(["sleep", "0"])
+    was = procs.start_time(p.pid)  # what a live owner records
+    p.wait()
+    dead = p.pid  # its pid, used after it exits
+    bid = ilk.submit(one_step())
+    d = Driver(ilk.s, ilk.new_run(bid))
+    g, where = d.all_gates()[0], d.diag_worktree(d.base)
+    key = d.measure_key(g, where, d.base)
+    ilk.s.insert("base_claims", {"measure_key": key, "owner_run": "r-dead", "pid": dead,
+                                 "proc_start": was, "boot_time": clock.boot_time(),
+                                 "started_at": clock.wall()})
+    d.measure_base(g, where, d.base)
+    assert [e for e in ilk.s.events_since(0, bid) if e["kind"] == "base.measured"]  # not waited on
+    took = [e["payload"] for e in ilk.s.events_since(0, bid) if e["kind"] == "base.takeover"]
+    assert [t["from_run"] for t in took] == ["r-dead"] and took[0]["pid"] == dead
+    assert ilk.s.one("SELECT * FROM base_measurements WHERE batch_id = ?", bid)
+    assert not ilk.s.one("SELECT 1 FROM base_claims WHERE measure_key = ?", key)
+
+
+def test_a_changed_setup_command_or_home_file_re_measures(ilk, monkeypatch):
+    # V3 (docs/09): the measurement key adds what spec_version lacks -- the project's setup
+    # command and the home files the pinned HOME copies in. A change in either is a different
+    # measurement, so F5 never adopts it; with nothing changed, F5 still does.
+    from dataclasses import asdict
+    from ilk2 import batches
+    from ilk2.driver import Driver
+
+    host = ilk.tmp / "host-home"
+    host.mkdir()
+    (host / ".npmrc").write_text("//registry.npmjs.org/:_authToken=one\n")
+    monkeypatch.setenv("HOME", str(host))
+    ilk.make_repo()
+    ilk.project(home_files=[".npmrc"], setup={"command": ["echo", "one"]})
+
+    def measure() -> str:
+        bid = ilk.submit(one_step())
+        d = Driver(ilk.s, ilk.new_run(bid))
+        d.measure_base(d.all_gates()[0], d.diag_worktree(d.base), d.base)
+        return bid
+
+    def kinds(bid: str) -> set[str]:
+        return {e["kind"] for e in ilk.s.events_since(0, bid) if e["kind"].startswith("base.")}
+
+    first = measure()
+    assert kinds(first) == {"base.measured"}
+    (host / ".npmrc").write_text("//registry.npmjs.org/:_authToken=two\n")  # a home file changed
+    second = measure()
+    assert kinds(second) == {"base.measured"}
+    cfg = batches.project_config(ilk.s, "proj")
+    cfg.setup = {"command": ["echo", "two"]}
+    ilk.s.update("projects", "proj", {"config": json.dumps(asdict(cfg))}, actor="test",
+                 reason="a changed setup command")
+    third = measure()
+    assert kinds(third) == {"base.measured"}
+    fourth = measure()  # nothing changed
+    assert kinds(fourth) == {"base.reused"}
+    reused = [e["payload"] for e in ilk.s.events_since(0, fourth) if e["kind"] == "base.reused"]
+    assert [r["from_batch"] for r in reused] == [third]  # F5 keeps working
+
+
 def test_a_base_measurement_records_its_cost(ilk):
     # A live kira base measurement took 1,794 s against a 900 s cap (Oct 14) and nothing could
     # tell whether that was one slow run or a capped run plus the re-run gates.measure makes for

@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS base_measurements (
   batch_id TEXT NOT NULL, gate TEXT NOT NULL, spec_version TEXT NOT NULL,
   commit_sha TEXT NOT NULL, outcome TEXT NOT NULL, failures TEXT NOT NULL, at REAL NOT NULL,
   PRIMARY KEY (batch_id, gate, spec_version, commit_sha));
+CREATE TABLE IF NOT EXISTS base_claims (
+  measure_key TEXT PRIMARY KEY, owner_run TEXT NOT NULL, pid INTEGER, proc_start TEXT,
+  boot_time INTEGER, started_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS transitions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL,
@@ -255,7 +258,11 @@ class Store:
                                      ("rsi_landings", "merge_pid", "INTEGER"),
                                      ("rsi_landings", "merge_proc_start", "TEXT"),
                                      # the exact commit a landing verified (Codex, 3d92d9f #4)
-                                     ("rsi_landings", "verified_sha", "TEXT")):
+                                     ("rsi_landings", "verified_sha", "TEXT"),
+                                     # the single-flight measurement key this row is a result
+                                     # for (docs/09 V3); '' for rows that predate it, which F5
+                                     # then does not reuse
+                                     ("base_measurements", "measure_key", "TEXT NOT NULL DEFAULT ''")):
                 have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
                 if col not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")

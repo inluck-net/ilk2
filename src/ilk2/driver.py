@@ -438,11 +438,99 @@ class Driver:
             return not new, new
         return r.failure_map() == (base.get("failures") or {}), []
 
+    def measure_key(self, gate: Gate, where: Path, commit: str) -> str:
+        """What one base measurement is a measurement of (docs/09 V3), the measurement-key
+        sibling of lock_digest: the gate's specification version and the commit, plus what that
+        version leaves out -- the project's setup command and the home files the pinned HOME
+        copies in (ProjectConfig.setup / .home_files). A change in any of these is a different
+        measurement, so a result is never adopted across it. The `measure-key-v1` tag is the
+        FINGERPRINT_VERSION rule (gates/fingerprint.py): bump it and every key changes rather
+        than being compared across rules."""
+        import hashlib
+        h = hashlib.sha256()
+        h.update(b"measure-key-v1")
+        h.update(self.project_id.encode())
+        h.update(gates.spec_version(gate, where, self.env()).encode())
+        h.update(commit.encode())
+        h.update(json.dumps(list((self.cfg.setup or {}).get("command") or [])).encode())
+        # the same host HOME pinned_env copies from, so a changed copy is a changed key
+        host_home = Path(os.environ.get("HOME", "~")).expanduser()
+        for rel in self.cfg.home_files:
+            fh = hashlib.sha256()
+            fh.update(rel.encode())
+            src = host_home / rel
+            fh.update(src.read_bytes() if src.is_file() else b"<absent>")
+            h.update(fh.digest())
+        return h.hexdigest()[:16]
+
     def measure_base(self, gate: Gate, where: Path, commit: str) -> dict[str, str] | None:
         env = self.env()
         spec = gates.spec_version(gate, where, env)
+        key = self.measure_key(gate, where, commit)
+        got = self._stored_base(gate, spec, commit, key)
+        if got is not None:
+            return got
+        # V3 (docs/09): one measurement per key. The claim is a short transaction over
+        # base_claims and the suite runs outside every transaction; a second batch on the key
+        # waits for the owner's result (18b and 18c, 24 s apart: 11 base.measured each).
+        t_wait = time.monotonic()
+        won, taken = self._claim_base(key)
+        waited_s: float | None = None  # set as soon as this batch waits on a live owner
+        while not won:
+            waited_s = round(time.monotonic() - t_wait, 1)
+            self.check_control()
+            got = self._stored_base(gate, spec, commit, key, waited_s=waited_s)
+            if got is not None:
+                return got
+            time.sleep(min(1.0, self.b.tick))
+            won, taken = self._claim_base(key)
+        if taken is not None:
+            self.event("base.takeover", gate=gate.name, commit=commit[:12],
+                       from_run=taken["owner_run"], pid=taken["pid"])
+        try:
+            # the owner can finish in the gap: adopt rather than measure again
+            got = self._stored_base(gate, spec, commit, key, waited_s=waited_s)
+            if got is not None:
+                return got
+            t0 = time.monotonic()
+            r = gates.measure(gate, where, env, self.dir / "gates", spec)
+            # What the measurement cost, including the re-run measure() makes for a transient
+            # (capped) first result: on Oct 14 a kira base suite took 1,794 s against a 900 s cap
+            # and nothing could say whether that was one slow run or a capped run plus its re-run.
+            self.event("base.measured", gate=gate.name, commit=commit[:12], outcome=r.outcome,
+                       failures=len(r.failures), seconds=round(time.monotonic() - t0, 1),
+                       timeouts=r.timeouts, reran=bool(r.reruns))
+            if r.outcome == "unmeasured":
+                self.block_batch("base-unmeasured",
+                                 f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
+                                 f"fix the gate, then: ilk2 resume {self.batch_id}")
+            # A shell gate red at the base is recorded, not blocking: it is judged absolutely after
+            # its step (run_gates), never against this base (§2.5.1, revised Oct 13).
+            failures = r.failure_map()
+            if gate.adapter == "shell" and r.outcome == "fail":
+                # what a plan-wide check already reported at the base (judge_inherited_red)
+                self._set_meta(self._red_key(gate, spec, commit),
+                               json.dumps({"lines": r.red_lines, "failures": failures}))
+            with self.s.tx() as c:  # the result and the release of the claim land together
+                c.execute("INSERT INTO base_measurements (batch_id, gate, spec_version, "
+                          "commit_sha, outcome, failures, at, measure_key) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                          (self.batch_id, gate.name, spec, commit, r.outcome, dumps(failures),
+                           clock.wall(), key))
+                c.execute("DELETE FROM base_claims WHERE measure_key = ? AND owner_run = ?",
+                          (key, self.run_id))
+            return failures
+        finally:  # a blocked or failing measurement never leaves a claim behind
+            self._release_base(key)
+
+    def _stored_base(self, gate: Gate, spec: str, commit: str, key: str,
+                     waited_s: float | None = None) -> dict[str, str] | None:
+        """A stored result to adopt, if there is one: this batch's own, or another batch of this
+        project's (F5). Adopted with the F5 semantics -- the copy keeps the owner's time, and the
+        event names the source batch (with how long this batch waited for it)."""
         row = self.s.one("SELECT * FROM base_measurements WHERE batch_id = ? AND gate = ? AND "
-                         "spec_version = ? AND commit_sha = ?", self.batch_id, gate.name, spec, commit)
+                         "spec_version = ? AND commit_sha = ?", self.batch_id, gate.name, spec,
+                         commit)
         if row:
             return json.loads(row["failures"])
         # F5 (docs/06): another batch of this project measured the same spec at the same commit.
@@ -450,49 +538,74 @@ class Driver:
         # the result is the same measurement; a rezmac base suite costs a median 710 s (E2).
         # Judgment call: reuse for BASE_REUSE_S (24 h) and keep the original time, so reuse
         # never extends a measurement's life; wrong if bases go stale within a day through
-        # wall-clock-dependent tests.
+        # wall-clock-dependent tests. measure_key closes what the spec version leaves out.
         prior = self.s.one(
             "SELECT bm.* FROM base_measurements bm JOIN batches b ON b.id = bm.batch_id "
             "WHERE b.project_id = ? AND bm.batch_id != ? AND bm.spec_version = ? AND "
-            "bm.commit_sha = ? AND bm.outcome != 'unmeasured' AND bm.at > ? "
-            "ORDER BY bm.at DESC LIMIT 1", self.project_id, self.batch_id, spec, commit,
-            clock.wall() - BASE_REUSE_S)
-        if prior:
-            self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
-                                                "spec_version": spec, "commit_sha": commit,
-                                                "outcome": prior["outcome"],
-                                                "failures": prior["failures"], "at": prior["at"]})
-            self.event("base.reused", gate=gate.name, commit=commit, from_batch=prior["batch_id"],
-                       age_s=round(clock.wall() - prior["at"]))
-            red = self.s.one("SELECT value FROM meta WHERE key = ?",
-                             self._red_key(gate, spec, commit, prior["batch_id"]))
-            if red:
-                self._set_meta(self._red_key(gate, spec, commit), red["value"])
-            return json.loads(prior["failures"])
-        t0 = time.monotonic()
-        r = gates.measure(gate, where, env, self.dir / "gates", spec)
-        # What the measurement cost, including the re-run measure() makes for a transient
-        # (capped) first result: on Oct 14 a kira base suite took 1,794 s against a 900 s cap
-        # and nothing could say whether that was one slow run or a capped run plus its re-run.
-        self.event("base.measured", gate=gate.name, commit=commit[:12], outcome=r.outcome,
-                   failures=len(r.failures), seconds=round(time.monotonic() - t0, 1),
-                   timeouts=r.timeouts, reran=bool(r.reruns))
-        if r.outcome == "unmeasured":
-            self.block_batch("base-unmeasured",
-                             f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
-                             f"fix the gate, then: ilk2 resume {self.batch_id}")
-        # A shell gate red at the base is recorded, not blocking: it is judged absolutely after
-        # its step (run_gates), never against this base (§2.5.1, revised Oct 13).
-        failures = r.failure_map()
-        if gate.adapter == "shell" and r.outcome == "fail":
-            # what a plan-wide check already reported at the base (judge_inherited_red)
-            self._set_meta(self._red_key(gate, spec, commit),
-                           json.dumps({"lines": r.red_lines, "failures": failures}))
+            "bm.commit_sha = ? AND bm.outcome != 'unmeasured' AND bm.at > ? AND "
+            "bm.measure_key = ? ORDER BY bm.at DESC LIMIT 1", self.project_id, self.batch_id,
+            spec, commit, clock.wall() - BASE_REUSE_S, key)
+        return self._adopt_base(gate, spec, commit, key, prior, waited_s) if prior else None
+
+    def _adopt_base(self, gate: Gate, spec: str, commit: str, key: str, prior,
+                    waited_s: float | None = None) -> dict[str, str]:
         self.s.insert("base_measurements", {"batch_id": self.batch_id, "gate": gate.name,
                                             "spec_version": spec, "commit_sha": commit,
-                                            "outcome": r.outcome, "failures": dumps(failures),
-                                            "at": clock.wall()})
-        return failures
+                                            "outcome": prior["outcome"],
+                                            "failures": prior["failures"], "at": prior["at"],
+                                            "measure_key": key})
+        payload = {"gate": gate.name, "commit": commit, "from_batch": prior["batch_id"],
+                   "age_s": round(clock.wall() - prior["at"])}
+        if waited_s is not None:
+            payload["waited_s"] = waited_s
+        self.event("base.reused", **payload)
+        red = self.s.one("SELECT value FROM meta WHERE key = ?",
+                         self._red_key(gate, spec, commit, prior["batch_id"]))
+        if red:
+            self._set_meta(self._red_key(gate, spec, commit), red["value"])
+        return json.loads(prior["failures"])
+
+    def _claim_base(self, key: str) -> tuple[bool, dict | None]:
+        """Claim a measurement key (docs/09 V3): won, plus the dead owner taken over if any.
+        Dead is the supervisor's identity test (§2.10) -- another boot, or a pid no longer
+        running the recorded start time. Liveness is decided before the transaction (store:
+        transactions do no I/O besides SQLite); the transaction only decides who holds the row."""
+        pid = os.getpid()
+        start, boot = procs.start_time(pid), clock.boot_time()
+        prev = self.s.one("SELECT * FROM base_claims WHERE measure_key = ?", key)
+        taken = None
+        if prev is not None and prev["owner_run"] != self.run_id:
+            reboot = prev["boot_time"] is not None and prev["boot_time"] != boot
+            if not reboot and procs.is_same_process(prev["pid"], prev["proc_start"]):
+                return False, None
+            taken = (prev["owner_run"], prev["pid"], prev["proc_start"], prev["boot_time"])
+        with self.s.tx() as c:
+            if taken is not None:
+                cur = c.execute("UPDATE base_claims SET owner_run = ?, pid = ?, proc_start = ?, "
+                                "boot_time = ?, started_at = ? WHERE measure_key = ? "
+                                "AND owner_run = ? AND pid = ? AND proc_start IS ? "
+                                "AND boot_time IS ?",
+                                (self.run_id, pid, start, boot, clock.wall(), key, *taken))
+                if cur.rowcount != 1:
+                    return False, None  # it changed hands between the look and the claim
+                return True, {"owner_run": taken[0], "pid": taken[1]}
+            if prev is not None:  # this run's own claim, re-owned
+                cur = c.execute("UPDATE base_claims SET pid = ?, proc_start = ?, boot_time = ?, "
+                                "started_at = ? WHERE measure_key = ? AND owner_run = ?",
+                                (pid, start, boot, clock.wall(), key, self.run_id))
+                return cur.rowcount == 1, None
+            cur = c.execute("INSERT OR IGNORE INTO base_claims (measure_key, owner_run, pid, "
+                            "proc_start, boot_time, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (key, self.run_id, pid, start, boot, clock.wall()))
+            return cur.rowcount == 1, None
+
+    def _release_base(self, key: str) -> None:
+        try:
+            with self.s.tx() as c:
+                c.execute("DELETE FROM base_claims WHERE measure_key = ? AND owner_run = ?",
+                          (key, self.run_id))
+        except Exception:  # noqa: BLE001 - a claim this run does not own is not its to clear
+            pass
 
     def diag_worktree(self, commit: str) -> Path:
         p = paths.diag(self.batch_id) / commit[:12]
