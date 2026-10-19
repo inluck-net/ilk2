@@ -15,7 +15,8 @@ First draft Oct 12, 2026 by Claude Code session ilk-skills-aa; revised Oct 13 by
 | 5 | [Open questions](05-open-questions.md) | What still needs a decision before code |
 | 6 | [Open items after design close](06-open-items.md) | What is still open, and at which phase it gets resolved |
 | 7 | [Retiring V1 completely](07-retiring-v1.md) (accepted, Oct 17) | How V1's planner, feedback and run skills become ilk2-native or go, and when V1's data is archived |
-| 8 | [Standing goals for RSI](08-rsi-goals.md) (revision 6, Oct 19; stage A accepted) | Why RSI went idle, and how goals keep it working on what matters |
+| 8 | [Standing goals for RSI](08-rsi-goals.md) (revision 8, Oct 19; stage A released) | Why RSI went idle, and how goals keep it working on what matters |
+| 9 | [What batch verification costs](09-verification-cost.md) (revision 2, Oct 19) | Where the full suite runs, what it costs, and how to make it cheaper |
 | E1 | [Evidence: where V1's time goes](evidence/2026-10-12-v1-stuck-and-slow.md) | How many hours are lost to refusals (stuck) and to worker time (slow)? |
 | E2 | [Evidence: what the full suite costs](evidence/2026-10-13-full-suite-cost.md) | Where do full-suite runs cost time in V1's repos, and would splitting into component repos help? |
 | E3 | [Evidence: the gh-resolve P5 batch baseline](evidence/2026-10-14-gh-resolve-p5-batch-baseline.md) | How long does each step of a real 15-step batch take on ilk2, and what did the night's fixes change? |

@@ -1,8 +1,8 @@
 # 8. Standing goals for RSI
 
-**Status:** revision 6, Oct 19, 2026. Codex reviewed revisions 1-5 the same day, and every finding was checked against the code and accepted (8.9).
-- **Stage A: accepted, and built Oct 19** (uncommitted until Chad's go; 8.10).
-- **Stage B: rework in round 5.** Its fixes are folded in here, and it is split into **B1** (landing intent and lock) and **B2** (the goal ledger). Both wait for a sixth review.
+**Status:** revision 8, Oct 19, 2026. Codex reviewed revisions 1-7 the same day, and every finding was checked against the code and accepted (8.9).
+- **Stage A: accepted, built and committed Oct 19** (`3152cff`). It is released on chad-mbp once gh-resolve's trial batch `b-da5e3354a7d1` ships (Chad: "release after trial #3").
+- **Stage B: rework in rounds 5-7.** Its fixes are folded in here. It is split into **B1** (landing intent, lock and resolution) and **B2** (the goal ledger). The next review is proposed against B1's code rather than on paper (8.9, round 7).
 
 **Asked by Chad, Oct 19:** "is the RSI still working? not a single auto improving batch for a few days", then "can we set this expected working RSI as the goal of the RSI itself, so that it can find all these defects/problems/reasons and get them handled properly".
 
@@ -80,6 +80,19 @@ A `host` field is rejected in this version: goals are measured on this host's st
 
 The row is inserted before planning starts. Each later field is written once. Every judgment of a round uses its own `goal_json`, never the current file. So editing or deleting a goal never changes how an earlier round is judged.
 
+**The hook into the trigger** (stage A's `rsi.tick` and `_tick`):
+1. `tick()` passes its `tick_id` into `_tick()`. Today it does not (`src/ilk2/rsi.py:509-513`).
+2. Open rounds are reconciled and closed (below) before `find_sources` runs.
+3. Each goal's derived state is projected onto its `goal:<id>` candidate row: `open` when `eligible`, otherwise the state's name. This bypasses `record()`'s "done stays done" rule (`src/ilk2/rsi.py:298`) for goals only.
+4. **One atomic claim for every candidate kind**, goals and defects alike. After allowance selection, and before planning, one `BEGIN IMMEDIATE` transaction does four things:
+   - it re-checks that no candidate is `planning`;
+   - it re-checks the selected candidate and its allowance;
+   - it moves the candidate from `open` to `planning` with a compare-and-set;
+   - for a goal, it inserts the round.
+
+   Today the "a plan is in progress" check and the claim are separate (`src/ilk2/rsi.py:570`, `:603`), so two ticks could claim two different candidates. A partial unique index, `rsi_candidates(status) WHERE status = 'planning'`, guards the same rule in the store.
+5. A unique partial index, `rsi_goal_rounds(goal_id) WHERE closed_at IS NULL`, makes "one open round per goal" a constraint of the store.
+
 **Durable results.**
 - The planner's answer (`already_fixed`, `not_a_defect`) or failure is written to the round first, before the candidate row is touched.
 - A submitted batch carries `meta.rsi_goal_round_id` and `meta.rsi_source` from the moment of submission. A tick killed between submit and the round update is reattached on the next tick by that metadata.
@@ -89,7 +102,8 @@ The row is inserted before planning starts. Each later field is written once. Ev
 
   `batches.submit()` does validation, preflight and worktree setup before it inserts the batch (`src/ilk2/batches.py:287-344`), and a manual `ilk2 rsi tick` can run beside the supervisor's. Without the second condition, a concurrent tick could close a round that is still being submitted.
 - **A late submit cannot attach to a closed round.** The check runs in the same `BEGIN IMMEDIATE` transaction as the batch insert (`src/ilk2/store.py:204-208`; `src/ilk2/batches.py:370`).
-  - If the round has closed, that transaction inserts the batch already `cancelled`, reason `rsi-round-closed`, and commits.
+  - If the round has closed, that transaction inserts the batch as `queued`, transitions it to `cancelled` with reason `rsi-round-closed` (so the close table has its transition, `src/ilk2/store.py:263-286`), and commits.
+  - `batches.submit()` still returns the batch id, so its CLI and supervisor callers do not change. The RSI caller reads the returned batch's status, and for a `cancelled` one it marks neither the candidate nor the round `submitted` (today it does so after any successful return, `src/ilk2/rsi.py:619`).
   - The cancellation is finalized outside the transaction, because the store forbids non-SQL I/O inside one (`src/ilk2/store.py:6`).
   - A crash between the commit and finalization is picked up by the supervisor's existing retry of unfinished cancellations (`src/ilk2/supervisor.py:368`).
   - The worktree, created before the transaction (`src/ilk2/batches.py:344`), therefore always has an owning batch row, and follows the normal 7-day GC (`src/ilk2/supervisor.py:520`).
@@ -104,6 +118,7 @@ The row is inserted before planning starts. Each later field is written once. Ev
 | landing `verified` or `pushed` (written only after the canary passes) | `landed` | judged later | `verified_at` |
 | landing `rolled_back` | `rolled-back` | `miss` | `rolled_back_at` |
 | batch shipped, its branch is an ancestor of `main`, and its landing row is absent or `review` (a merge by hand; never `merge-interrupted`) | `landed-by-hand` | judged later | first tick that sees it |
+| landing `abandoned` (by `ilk2 rsi resolve --reverted` or `--discarded`) | `abandoned` | `miss` | the resolution |
 | goal's current hash differs from the round's (Chad edited or reset it) while the round is held | `abandoned` | `miss` | that tick |
 | batch shipped and not in `main`, landing `review` or none (`rsi_land` off); or landing `merge-interrupted`, in `main` or not | still open: **held** | | |
 | anything else (planning, queued, running, `merging`, merged, released) | still open | | |
@@ -115,10 +130,31 @@ The row is inserted before planning starts. Each later field is written once. Ev
   - it writes this batch's row as `merging`, with its own process identity.
 
   The existing flow then moves the row to `merged` or `review`. While a `merging` row's process is alive (`procs.is_same_process`), `land()` returns at once without considering any other batch.
+- **The acquire also requires that this batch has no landing row of any status**, and it is a plain `INSERT`, never a replacement. Today `_row()` is consulted only inside `_review()` (`src/ilk2/rsi_land.py:74-84`).
 - **A `merging` row whose process is gone becomes `merge-interrupted`**, never `review` and never a landing. `main` may already hold the unverified merge.
-  - It is a hold: one `rsi-review` row says to verify and keep the merge, or to revert it.
-  - `pending()` and `land()` treat it like `review`.
-  - The round stays held until Chad resolves it. Reverting and resetting the goal closes the round as `abandoned`. Keeping the merge by setting the landing to `review` after verifying it by hand lets the next tick close it as `landed-by-hand`.
+  - **It is a hard global stop.** While any `merge-interrupted` row exists, `land()` returns at once, and the trigger plans nothing (`"why": "an interrupted merge waits for resolution"`). Treating it like `review` would let `land()` merge another batch on top of an unverified commit (`src/ilk2/rsi_land.py:274-277`).
+  - One `rsi-review` row asks Chad to resolve it with the command below.
+- **Resolution: `ilk2 rsi resolve <batch> --keep | --reverted <revert-commit> | --discarded`** (B1, not deferred). It applies to a `merge-interrupted` or `review` landing, and every resolution is audited with an `rsi.resolved` event (who, which, the full commit SHAs, and the verification outcome):
+  - **`--keep`:**
+    - it snapshots `main`'s head SHA, and requires the batch's merge to be in it;
+    - it verifies exactly that SHA in a scratch worktree (as `verify()` already does for a given commit, `src/ilk2/rsi_land.py:107`);
+    - before recording anything, it re-checks that `main` still equals the verified SHA. If `main` moved, nothing changes, and the command asks for a retry.
+
+    On green, the landing moves to `merged`, so `land()` resumes the normal path: release, canary, push (`src/ilk2/rsi_land.py:258-265`). A kept merge is never released together with a later one. Red verification changes nothing and says so.
+  - **`--reverted <revert-commit>`:** for a merge that is in `main` and was undone by a normal `git revert -m 1`. That leaves the merge in `main`'s ancestry (`gitops.is_ancestor` means "ancestor or equal", `src/ilk2/gitops.py:191`), so ancestry cannot tell. The command checks three things:
+    - the given commit is in `main`;
+    - it is a revert of the landing's recorded `merge_commit`;
+    - the merge's changes are gone at that commit.
+
+    It then records the landing as `abandoned`.
+  - **`--discarded`:** the batch's merge is not in `main` at all (never merged, or `main` reset). It records the landing as `abandoned`.
+
+  All three clear the batch's `rsi-review` row.
+- **Review rows stay active once acked.** `rsi-review` joins `ACTIVE_WHEN_ACKED` (stage A, `src/ilk2/store.py:51`). It is cleared, open or acked, on every terminal resolution: a resolved keep (when its canary passes), `abandoned`, a hand merge closed as `landed-by-hand`, and a goal reset. Today `clear_needs_human()` clears only `open` rows (`src/ilk2/store.py:398`).
+- **Visibility.**
+  - `pending()` includes `merge-interrupted` landings even when the branch is already in `main`; today ancestry drops them (`src/ilk2/rsi.py:463`).
+  - The panel's held query adds `merge-interrupted` to `review` (`src/ilk2/xbar.py:347-348`), and the pending payload carries the landing's status, so the panel shows it as needing attention.
+  - `ilk2 rsi log` already lists every landing row.
 
 `landed-by-hand` therefore excludes `merging`, `merge-interrupted`, `merged` and `released`.
 
@@ -126,7 +162,7 @@ The row is inserted before planning starts. Each later field is written once. Ev
 - **Merging the branch by hand** closes it as `landed-by-hand`.
 - **Editing the goal, or bumping its `reset`** in `goals.json`, closes it as `abandoned`, and git records the edit. Abandoning also disposes of the branch. The batch's landing row is written or updated to `abandoned`, and its `rsi-review` row is cleared. `pending()` excludes `abandoned` landings, so abandoned branches no longer fill `REVIEW_CAP` (`src/ilk2/rsi.py:411-419`, `:492-494`). `land()` already skips any batch with a landing row (`src/ilk2/rsi_land.py:274-277`), so the branch can never land later by itself.
 
-An abandoned round stays abandoned. If its branch is later merged by hand, the round is not credited after the fact; an `rsi.abandoned-merged` event records that it happened.
+An abandoned round stays abandoned. If its branch is later merged by hand, the round is not credited after the fact. Git history records that merge; no extra event is kept (cut in round 6).
 
 `ilk2 ack` closes nothing: it only means "seen" (`src/ilk2/store.py:384`).
 
@@ -141,7 +177,7 @@ The credit is **for the portfolio, not for the cause**: `improved` means "the me
 | `invalid` / `retired` | G4 rejects it / it is no longer in the file | no |
 | `in-round` / `held` | a round of the current hash is open / held | no; `held` opens one `rsi-goal` row: "resolve the review: merge it, or reset the goal" |
 | `judging` | the last round is landed and not yet judged | no ("needs N more samples") |
-| `unjudgeable` | the last round's `registry_version` has no implementation | no; one `rsi-goal` row |
+| `unjudgeable` | the latest round **of the current hash** has an unimplemented `registry_version` | no; one `rsi-goal` row. A reset changes the hash, so the goal can become eligible again; the old round stays `unjudgeable` in the ledger for audit, and its alarm is cleared |
 | `met` | the metric is on target | no; clears the goal's `rsi-goal` row |
 | `stopped` | the last 2 judged rounds of the current hash are `no-effect`/`miss`, or the last 3 are `retry` | no; one `rsi-goal` row naming the rounds |
 | `waiting` | fewer than `min_samples` new samples since the last round closed (`retry` waits 2 h instead) | no |
@@ -169,7 +205,8 @@ An internal function, `report.metric(s, project, path, since, until, registry_ve
 - `transitions(actor, at, entity, entity_id)`;
 - `attempts(ended_at, step_id)`;
 - `rsi_goal_rounds(goal_id, started_at)`;
-- `rsi_goal_rounds(goal_id, goal_hash, closed_at)`.
+- `rsi_goal_rounds(goal_id, goal_hash, closed_at)`;
+- `rsi_goal_rounds(goal_id) WHERE closed_at IS NULL`, unique (one open round per goal).
 
 The `events` and `batches` indexes are in stage A (8.6). Today there are 3 indexes (`src/ilk2/store.py:144-146`).
 
@@ -276,6 +313,23 @@ All findings below were checked against the code before being accepted.
 
 Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also lacks) and B2 (the goal ledger), as round 5 suggested.
 
+**Round 6** (revision 6 → B1 "rework", B2 "rework"). Round-5 items 1-3, 5-7 resolved (1 narrowly); 4 partly. Findings:
+1. `merge-interrupted` let `land()` merge another batch on top of an unverified commit, and had no resolution command. → a hard global stop, plus `ilk2 rsi resolve --keep|--reverted` in B1.
+2. No atomic handoff from stage A's selection to a goal round. → the five-point hook, with a compare-and-set claim and a unique open-round index.
+3. "Insert already cancelled" made no transition, and the caller would report the batch as submitted. → insert as queued, transition in the same transaction, and RSI reads the status.
+4. `rsi-review` rows were cleared only while open. → added to `ACTIVE_WHEN_ACKED`, and cleared on every resolution.
+5. The panel would show `merge-interrupted` as an ordinary queue entry. → the held query and the payload, with `xbar.py` added to B1.
+6. A reset did not escape `unjudgeable`. → judged against the current hash only.
+7. The acquire did not require "no row for this batch", and `rsi.abandoned-merged` was extra. → both done; the event is cut.
+
+**Round 7** (revision 7 → B1 "rework", B2 "rework"). Round-6 items 3-7 resolved; 1-2 partly. Findings:
+1. `--keep` recorded `kept`, which `land()` never advances, so the merge was never released or canaried, and could later ship together with another. → a green keep moves the landing to `merged`, and the normal canary follows.
+2. `--reverted` required "not an ancestor", but a normal `git revert -m 1` leaves the merge in `main`'s ancestry. → `--reverted <revert-commit>`, checked against the recorded merge; `--discarded` for a merge that is not in `main`.
+3. The claim prevented two rounds of one goal, but not two different candidates planning at once. → one atomic claim for every kind, plus a unique `planning` index.
+4. `--keep` raced a moving `main`. → snapshot the SHA, verify it, and re-check before recording.
+
+**Process note.** Round 7's findings are at the level of transactions and races, which tests pin better than prose. AGENTS.md also moved reviews to code at phase boundaries. So the proposal is to build B1 next, with tests for every case above, and to review B1's diff, not another revision of this page (Chad's call).
+
 ## 8.10 Build and verification
 
 **Stage A** (G1, G5, G6): one session.
@@ -291,12 +345,19 @@ Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also
 2. The full suite once, then commit and release on chad-mbp.
 3. Live check: the next tick's `rsi.tick-completed` shows `issues: ok`.
 
-**Stage B1** (landing intent and lock), after its review: one session.
+**Stage B1** (landing intent, lock and resolution), after its review: one session. Touches `rsi_land.py`, `rsi.py`, `store.py`, `cli.py`, `xbar.py` and their tests.
 - Tests:
   - acquiring the `merging` lock in one transaction;
   - a second `land()` returning while a live `merging` row exists;
   - a kill after `git merge` but before verification leaving `merge-interrupted` across repeated ticks;
   - PID reuse not treated as alive;
+  - a batch that already has a landing row cannot acquire;
+  - a `merge-interrupted` row stopping `land()` and the trigger, with a second pending batch present;
+  - `ilk2 rsi resolve --keep`: green moves the landing to `merged` and the normal canary follows; red changes nothing; `main` moving during verification changes nothing;
+  - `--reverted` with a real `git revert -m 1` commit, and with a commit that is not a revert of that merge;
+  - `--discarded` when the merge is in `main`, which is refused;
+  - each resolution emitting `rsi.resolved` and clearing an open or acked `rsi-review` row;
+  - `pending()` and the panel showing `merge-interrupted` as needing attention;
   - today's review paths (conflict, kernel touch, removed tests, red suite) still recorded once.
 - The full suite once, then commit and release.
 
@@ -311,7 +372,10 @@ Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also
    - `held` resolved by a merge and by a reset;
    - two reset-abandoned rounds not filling `REVIEW_CAP`, and their branches never landing;
    - an unsupported `registry_version` giving the `unjudgeable` state, which plans nothing;
-   - a hand merge of an abandoned branch staying `abandoned`, with its audit event.
+   - a hand merge of an abandoned branch staying `abandoned`;
+   - two concurrent ticks claiming one goal, or two different candidates: one claim wins, and both unique indexes hold;
+   - a late cancelled submit reported as cancelled, not submitted;
+   - a reset of an `unjudgeable` goal making it eligible again.
 2. Tests for every derived state, including a deleted goal with a round still judging (judged from its own `goal_json`), `met` before `stopped`, and drift back to `eligible`.
 3. Tests for each 8.5 clock just inside and just outside the range, and for each G4 rejection.
 4. The full suite once, then commit and release.
@@ -327,5 +391,5 @@ Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also
 - **Deferred:**
   - remote goals (`host`), which need a remote range query;
   - a public `ilk2 report --since`;
-  - an explicit `ilk2 rsi review --approve|--abandon` command, if merging by hand or resetting the goal proves clumsy.
+  - (no longer deferred: `ilk2 rsi resolve` is in B1.)
 - **Seeding `ilk2 improvement` by hand** for 18a's levers. Cheap, and it can be done alongside.
