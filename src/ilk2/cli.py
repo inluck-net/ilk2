@@ -594,7 +594,13 @@ def main(argv: list[str] | None = None) -> int:
                 from . import rsi_land
                 _out({"landings": rsi_land.log(s)}, True)
             elif a.op == "pending":
-                _out({"pending": [{"batch": b["id"], "branch": b["branch"], "ref": b["consumer_ref"]}
+                from . import rsi_land
+                landing = {r["batch_id"]: r["status"] for r in s.all(
+                    "SELECT batch_id, status FROM rsi_landings")}
+                _out({"pending": [{"batch": b["id"], "branch": b["branch"], "ref": b["consumer_ref"],
+                                   "landing": landing.get(b["id"]),
+                                   **({"resolve": rsi_land.RESOLVE.format(bid=b["id"])}
+                                      if landing.get(b["id"]) in rsi_land.HELD else {})}
                                   for b in rsi.pending(s)]}, True)
             else:
                 rows = rsi.candidates(s, None if a.all else rsi.OPEN)

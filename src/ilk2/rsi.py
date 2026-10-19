@@ -579,8 +579,14 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
     if s.one("SELECT 1 FROM batches WHERE project_id = ? AND status IN ('queued', 'active', "
              "'parked', 'blocked')", PROJECT):
         return {"did": "nothing", "why": "an ilk2 batch is in flight", **rec}
-    if s.one("SELECT 1 FROM rsi_landings WHERE status = 'merge-interrupted'"):
-        return {"did": "nothing", "why": "an interrupted merge waits for resolution", **rec}
+    # nothing is planned from a main that may hold an unverified merge: one interrupted, or one
+    # still verifying in another process (Codex review of 3d92d9f #3)
+    held = s.one("SELECT status FROM rsi_landings WHERE status IN ('merge-interrupted', 'merging') "
+                 "ORDER BY status = 'merge-interrupted' DESC LIMIT 1")
+    if held:
+        why = ("an interrupted merge waits for resolution" if held["status"] == "merge-interrupted"
+               else "a merge is being verified")
+        return {"did": "nothing", "why": why, **rec}
     waiting = pending(s)
     if len(waiting) >= REVIEW_CAP:
         return {"did": "nothing", "why": f"{len(waiting)} RSI branches wait for review", **rec}

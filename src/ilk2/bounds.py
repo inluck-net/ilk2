@@ -58,6 +58,10 @@ ATTEMPTS_PER_STEP = 3        # Q6
 # attempt 4 is a fresh session briefed with every earlier attempt's evidence, attempt 5
 # resumes it. Judgment call: 2 more; wrong if escalated attempts rarely succeed (ilk2 report).
 ESCALATION_ATTEMPTS = 2
+# A verification step's repair rounds: each round opens repairs, they ship, and the full suite
+# runs again (docs/09 V2). Judgment call: 3 rounds; wrong if real batches need more to converge
+# (the block keeps the last full-suite evidence for the person who clears it).
+VERIFY_REPAIR_ROUNDS = 3
 RESUMED_ATTEMPTS = (2, ATTEMPTS_PER_STEP + 2)   # each resumes the attempt just before it
 RESTARTS_PER_STEP = 3               # a backoff after every 3 restarts of one step ...
 RESTARTS_BEFORE_HUMAN = 3 * RESTARTS_PER_STEP   # ... and a human after the third round

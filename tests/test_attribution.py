@@ -301,3 +301,56 @@ def test_a_verification_step_that_opened_repairs_is_accepted_only_after_a_green_
     runs = ilk.s.all("SELECT outcome FROM attempts WHERE step_id = ? ORDER BY n, created_at",
                      f"{bid}.v.0")
     assert [r["outcome"] for r in runs] == ["measured", "accepted"]  # suite again after repair
+
+
+ORDER_FILES = {**FILES, "calc.py": "STATE = []\n\ndef add(a, b):\n    return a + b\n",
+               "tests/test_b.py": "import calc\ndef test_b():\n    assert not calc.STATE\n"}
+LEAK = {"write": "tests/test_calc.py",
+        "text": "import calc\nfrom calc import add\ndef test_add():\n    calc.STATE.append(1)\n"
+                "    assert add(1, 2) == 3\n"}
+NO_LEAK = {"write": "tests/test_calc.py", "text": FILES["tests/test_calc.py"]}
+
+
+def test_an_order_dependent_full_suite_failure_is_never_accepted_as_green(ilk):
+    # Codex review of 63e348c: a failure seen only in the full suite. Probes run the test alone,
+    # so it is not attributed: it stays red, and the verification worker fixes it.
+    setup(ilk, ORDER_FILES)
+    ilk.script([LEAK], [NO_LEAK])            # the work step leaks; the verification worker fixes
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("leak state")]},
+        {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.stub_calls() == 2                                                   # a worker fixed it
+    rows = ilk.s.all("SELECT g.outcome FROM gate_results g JOIN attempts a ON a.id = g.attempt_id "
+                     "WHERE a.step_id = ? ORDER BY g.id", f"{bid}.v.0")
+    assert [r["outcome"] for r in rows] == ["fail", "pass"]                        # accepted only green
+
+
+def test_a_failure_whose_repair_already_shipped_is_not_explained(ilk):
+    # The defence in depth for Codex's finding 1: joining a shipped repair returns the test as
+    # recurring, so run_gates keeps it red instead of reading it as attributed.
+    from ilk2.attribution import Attribution
+    from ilk2.driver import Driver
+    setup(ilk)
+    ilk.script([BREAK], [FIX])
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("break b")]},
+        {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
+    assert ilk.drive_inprocess(bid) == "shipped"
+    r = ilk.s.one("SELECT * FROM repairs WHERE batch_id = ?", bid)
+    d = Driver(ilk.s, ilk.new_run(bid))
+    again = Attribution(r["test_id"], r["fingerprint"], "attributed",
+                        (r["edge_clean"], r["edge_failing"]), f"{bid}.p.0")
+    assert d.add_repair([again], None, "brief") == {r["test_id"]}           # no new plan either
+    assert order_of(ilk, "repair.recurring")
+
+
+def test_repair_rounds_are_capped_per_verification_step(ilk, monkeypatch):
+    monkeypatch.setattr(bounds, "VERIFY_REPAIR_ROUNDS", 0)
+    setup(ilk)
+    ilk.script([BREAK], [FIX])
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("break b")]},
+        {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
+    assert ilk.drive_inprocess(bid).startswith("blocked")
+    assert ilk.s.one("SELECT 1 FROM needs_human WHERE reason = 'repair-rounds' AND batch_id = ?", bid)

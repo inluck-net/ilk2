@@ -91,18 +91,23 @@ def _set(s, bid: str, **fields) -> None:
 
 
 def _review(s, b, why: str) -> dict:
-    """Leave the batch for a human review: recorded, visible in the panel, never retried."""
-    if _row(s, b["id"]) is None:
-        with s.tx() as c:
+    """Leave the batch for a human review: recorded, visible in the panel, never retried. The
+    row, its event and its needs_human row are one transaction, and a batch already held is
+    not recorded twice (Codex review of 3d92d9f #2)."""
+    with s.tx() as c:
+        row = c.execute("SELECT status FROM rsi_landings WHERE batch_id = ?", (b["id"],)).fetchone()
+        if row is not None and row["status"] == "review":
+            return {"did": "review", "batch": b["id"], "why": why}
+        if row is None:
             c.execute("INSERT INTO rsi_landings(batch_id, candidate_id, status, note, at) "
                       "VALUES (?, ?, 'review', ?, ?)",
                       (b["id"], _candidate(b), why[:1000], clock.wall()))
-    else:
-        _set(s, b["id"], status="review", note=why[:1000])
-    s.event("rsi.review", {"batch": b["id"], "why": why[:500]}, batch_id=b["id"])
-    s.open_needs_human("rsi-review", f"RSI batch {b['id']} needs a review: {why[:300]}",
-                       f"review git log main..{b['branch']}, merge or cancel it by hand",
-                       batch_id=b["id"])
+        else:
+            c.execute("UPDATE rsi_landings SET status = 'review', note = ? WHERE batch_id = ?",
+                      (why[:1000], b["id"]))
+        s.event("rsi.review", {"batch": b["id"], "why": why[:500]}, batch_id=b["id"])
+        s.open_needs_human("rsi-review", f"RSI batch {b['id']} needs a review: {why[:300]}",
+                           RESOLVE.format(bid=b["id"]), batch_id=b["id"])
     return {"did": "review", "batch": b["id"], "why": why}
 
 
@@ -157,8 +162,9 @@ def merge(s, b, repo: Path, cfg) -> dict:
     if weak:
         return _review(s, b, f"removes tests or asserts: {weak[:10]}")
     cand = _candidate(b)
-    if not _acquire(s, b, cand, main):
-        return {"did": "nothing", "why": "another landing holds the lock"}
+    held = _acquire(s, b, cand, main)
+    if held is not True:
+        return {"did": "nothing", "why": held}
     msg = (f"Merge RSI batch {b['id']} ({b['consumer_ref']}), landed unattended\n\n"
            f"{TRAILER}-batch: {b['id']}\n{TRAILER}-candidate: {cand}\n{TRAILER}-branch: {b['branch']}\n")
     out = _git(repo, "merge", "--no-ff", "-m", msg, b["branch"], check=False)
@@ -171,12 +177,12 @@ def merge(s, b, repo: Path, cfg) -> dict:
         if gitops.rev(repo, "HEAD") == merged:
             _git(repo, "reset", "-q", "--keep", main)  # undo only our own merge
         return _review(s, b, f"the suite is red on the merged commit: {tail[-600:]}")
-    _set(s, b["id"], status="merged", merge_commit=merged, merged_at=clock.wall())
+    _set(s, b["id"], status="merged", merge_commit=merged, verified_sha=merged, merged_at=clock.wall())
     s.event("rsi.merged", {"batch": b["id"], "candidate": cand, "commit": merged}, batch_id=b["id"])
     return {"did": "merged", "batch": b["id"], "commit": merged}
 
 
-def _acquire(s, b, cand, main: str) -> bool:
+def _acquire(s, b, cand, main: str) -> "bool | str":
     """Take the landing lock just before `git merge`: in one transaction, no landing may be
     merging, merged, released or interrupted, and this batch may have no row of any status.
     The row records its process, so a merge that dies mid-verification is told apart from a
@@ -185,11 +191,13 @@ def _acquire(s, b, cand, main: str) -> bool:
     from . import procs
     pid = os.getpid()
     start = procs.start_time(pid)  # no I/O inside the transaction
+    if not start:  # a row with no start time would read as dead to every other process
+        return "cannot read this process's start time: not taking the landing lock"
     with s.tx() as c:
         busy = c.execute(f"SELECT 1 FROM rsi_landings WHERE status IN ({','.join('?' * len(LOCKING))}) "
                          "OR batch_id = ?", (*LOCKING, b["id"])).fetchone()
         if busy:
-            return False
+            return "another landing holds the lock"
         c.execute("INSERT INTO rsi_landings(batch_id, candidate_id, pre_merge, status, at, "
                   "merge_pid, merge_proc_start) VALUES (?, ?, ?, 'merging', ?, ?, ?)",
                   (b["id"], cand, main, clock.wall(), pid, start))
@@ -204,13 +212,21 @@ def interrupted(s) -> list[str]:
     for r in s.all("SELECT * FROM rsi_landings WHERE status = 'merging'"):
         if procs.is_same_process(r["merge_pid"], r["merge_proc_start"]):
             continue
-        _set(s, r["batch_id"], status="merge-interrupted",
-             note="the merging process died before the merge was verified")
-        s.event("rsi.merge-interrupted", {"batch": r["batch_id"], "pid": r["merge_pid"]},
-                batch_id=r["batch_id"])
-        s.open_needs_human("rsi-review", f"RSI batch {r['batch_id']}: its merge was interrupted "
-                           "before verification; main may hold an unverified merge",
-                           RESOLVE.format(bid=r["batch_id"]), batch_id=r["batch_id"])
+        # status, event and needs_human row commit together, and only if the row is still the
+        # one judged dead (Codex review of 3d92d9f #2)
+        with s.tx() as c:
+            cur = c.execute("UPDATE rsi_landings SET status = 'merge-interrupted', note = ? WHERE "
+                            "batch_id = ? AND status = 'merging' AND merge_pid IS ? AND "
+                            "merge_proc_start IS ?",
+                            ("the merging process died before the merge was verified",
+                             r["batch_id"], r["merge_pid"], r["merge_proc_start"]))
+            if cur.rowcount != 1:
+                continue
+            s.event("rsi.merge-interrupted", {"batch": r["batch_id"], "pid": r["merge_pid"]},
+                    batch_id=r["batch_id"])
+            s.open_needs_human("rsi-review", f"RSI batch {r['batch_id']}: its merge was interrupted "
+                               "before verification; main may hold an unverified merge",
+                               RESOLVE.format(bid=r["batch_id"]), batch_id=r["batch_id"])
         out.append(r["batch_id"])
     return out
 
@@ -252,29 +268,47 @@ def resolve(s, bid: str, *, keep: bool = False, reverted: str | None = None,
         if gitops.rev(repo, "main") != main:
             return {"did": "nothing", "why": "main moved during verification; run resolve again"}
         merge_commit = _merge_of(repo, head, main) or main
-        _set(s, bid, status="merged", merge_commit=merge_commit, merged_at=clock.wall(),
-             note=f"kept by {by} after verifying {main}")
         ev |= {"how": "keep", "verified": main, "merge_commit": merge_commit, "verification": "green"}
+        _finish(s, bid, "merged", {"merge_commit": merge_commit, "verified_sha": main,
+                                   "merged_at": clock.wall(), "note": f"kept by {by} after verifying {main}"},
+                ev)
     elif reverted is not None:
-        m = _merge_of(repo, head, main) if in_main else None
+        if not in_main:
+            raise ResolveError(f"{bid}'s work is not in main (use --discarded)")
+        # The landing range: our --no-ff merge, or (a fast-forward or other hand merge) the
+        # batch's own commits from its base (Codex review of 3d92d9f #5).
+        m = _merge_of(repo, head, main)
+        pre, landed = (f"{m}^1", m) if m else (b["base_commit"], head)
         c = gitops.rev(repo, reverted)
-        if not m:
-            raise ResolveError(f"{bid}'s merge is not in main (use --discarded)")
-        if not c or not gitops.is_ancestor(repo, m, c) or not gitops.is_ancestor(repo, c, main):
-            raise ResolveError(f"{reverted} must be in main and after the merge {m[:12]}")
-        touched = _git(repo, "diff", "--name-only", f"{m}^1", m, check=False).split()
-        if _git(repo, "diff", "--name-only", f"{m}^1", c, "--", *touched, check=False).strip():
-            raise ResolveError(f"{reverted} does not undo the merge {m[:12]}: its changes remain")
-        _set(s, bid, status="abandoned", merge_commit=m, note=f"reverted by {c} ({by})")
-        ev |= {"how": "reverted", "merge_commit": m, "revert": c}
+        if not c or not gitops.is_ancestor(repo, landed, c) or not gitops.is_ancestor(repo, c, main):
+            raise ResolveError(f"{reverted} must be in main and after the landing {landed[:12]}")
+        touched = _git(repo, "diff", "--name-only", pre, landed, check=False).split()
+        for at, what in ((c, reverted), (main, "main")):
+            if _git(repo, "diff", "--name-only", pre, at, "--", *touched, check=False).strip():
+                raise ResolveError(f"the landing's changes are not undone at {what} "
+                                   f"({at[:12]}): the paths it touched differ from before it")
+        fields, ev = {"merge_commit": m or head, "note": f"reverted by {c} ({by})"}, \
+            ev | {"how": "reverted", "landing": [pre, landed], "revert": c}
     else:
         if in_main:
             raise ResolveError(f"{bid}'s merge is in main: use --keep or --reverted <commit>")
-        _set(s, bid, status="abandoned", note=f"discarded by {by}")
-        ev |= {"how": "discarded"}
-    s.clear_needs_human(bid, {"rsi-review"})
-    s.event("rsi.resolved", ev, batch_id=bid)
+        fields, ev = {"note": f"discarded by {by}"}, ev | {"how": "discarded"}
+    if not keep:
+        _finish(s, bid, "abandoned", fields, ev)
     return {"did": "resolved", "batch": bid, "how": ev["how"]}
+
+
+def _finish(s, bid: str, status: str, fields: dict, ev: dict) -> None:
+    """A resolution's status change, review-row clear and audit event, in one transaction, and
+    only if the landing is still held (a concurrent resolution loses)."""
+    sets = ", ".join(f"{k} = ?" for k in ("status", *fields))
+    with s.tx() as c:
+        cur = c.execute(f"UPDATE rsi_landings SET {sets} WHERE batch_id = ? AND status IN "
+                        f"({','.join('?' * len(HELD))})", (status, *fields.values(), bid, *HELD))
+        if cur.rowcount != 1:
+            raise ResolveError(f"{bid}'s landing changed while resolving; look again")
+        s.clear_needs_human(bid, {"rsi-review"})
+        s.event("rsi.resolved", ev, batch_id=bid)
 
 
 def release_landed(s, row, repo: Path) -> dict:
@@ -282,9 +316,23 @@ def release_landed(s, row, repo: Path) -> dict:
     if not _idle(s):
         return {"did": "nothing", "why": "a run is live: the release waits for idle"}
     previous = Path(release.current().resolve()).name if release.current().exists() else None
-    if gitops.rev(repo, "HEAD") != row["merge_commit"] and not gitops.is_ancestor(
-            repo, row["merge_commit"], gitops.rev(repo, "HEAD")):
+    head = gitops.rev(repo, "HEAD")
+    if head != row["merge_commit"] and not gitops.is_ancestor(repo, row["merge_commit"], head):
         return {"did": "nothing", "why": "main no longer contains the merge"}
+    verified = row["verified_sha"] or row["merge_commit"]
+    if head != verified:
+        # main moved since the landing was verified: build only what a suite has passed
+        # (Codex review of 3d92d9f #4), so the new head is verified first
+        from . import batches, rsi
+        ok, tail = verify(repo, head, batches.project_config(s, rsi.PROJECT))
+        if not ok:
+            return _review(s, s.get("batches", row["batch_id"]),
+                           f"main moved to {head[:12]} after the landing, and the suite is red there: "
+                           f"{tail[-400:]}")
+        if gitops.rev(repo, "HEAD") != head:
+            return {"did": "nothing", "why": "main moved during re-verification; next pass"}
+        _set(s, row["batch_id"], verified_sha=head)
+        s.event("rsi.reverified", {"batch": row["batch_id"], "head": head}, batch_id=row["batch_id"])
     built = release.build(repo)
     version = built.name
     out = release.upgrade(version)

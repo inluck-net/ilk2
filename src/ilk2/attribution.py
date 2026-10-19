@@ -33,6 +33,7 @@ class Attribution:
     edge: tuple[str, str] | None = None    # (last clean commit, first failing commit)
     step_id: str | None = None
     probes: int = 0                        # probe runs this call counted against the budget
+    recurring: bool = False                # its repair already shipped and it failed again
 
     def to_dict(self) -> dict:
         return {"result": self.result, "edge": list(self.edge) if self.edge else None,

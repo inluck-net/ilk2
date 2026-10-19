@@ -328,6 +328,16 @@ Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also
 3. The claim prevented two rounds of one goal, but not two different candidates planning at once. → one atomic claim for every kind, plus a unique `planning` index.
 4. `--keep` raced a moving `main`. → snapshot the SHA, verify it, and re-check before recording.
 
+**Code review of B1 (`3d92d9f`, Codex, Oct 19 → "fix first").** All findings were checked and fixed in the next commit:
+1. Status, audit event and hold were separate writes. → one transaction each, conditional on the prior status, in `interrupted()`, `resolve()` and `_review()`; `_review()` records a hold once.
+2. A tick planned while another process's merge was still verifying. → the trigger stops for `merging` as well as `merge-interrupted`.
+3. `--keep`, and any landing, could release a newer head than it verified. → `rsi_landings.verified_sha`; release re-verifies when `main` moved, and a red re-verification becomes a review hold.
+4. `--reverted` missed fast-forward hand merges, and checked only the given commit. → the landing range is our merge, or the batch's own commits from its base; the touched paths must match the pre-landing tree both at the given commit and at current `main`.
+5. A lock row with no process start time read as dead. → no lock without it.
+6. `ilk2 rsi pending` hid the status. → it shows the landing status and, for a hold, the resolve command.
+
+Tests: 10 of the 11 new ones fail without the fixes; the 11th, concurrent acquires, confirms an atomicity the review found already held.
+
 **Process note.** Round 7's findings are at the level of transactions and races, which tests pin better than prose. AGENTS.md also moved reviews to code at phase boundaries. So the proposal is to build B1 next, with tests for every case above, and to review B1's diff, not another revision of this page (Chad's call).
 
 ## 8.10 Build and verification

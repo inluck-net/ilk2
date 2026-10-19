@@ -47,6 +47,7 @@ NEEDS_HUMAN_REASONS = {
     "apply-failed",
     "rsi-review", "rsi-rollback",   # unattended RSI landing (rsi_land.py)
     "rsi-health", "rsi-goal",       # RSI watched from outside, and standing goals (docs/08)
+    "repair-rounds",                # a verification step's repairs keep reopening (docs/09 V2)
 }
 # Rows that stay active once acked: acking an ongoing condition must not spawn a second row,
 # and recovery clears the acked one (docs/08 §8.6).
@@ -235,7 +236,9 @@ class Store:
             for table, col, decl in (("runs", "plan_id", "TEXT"),   # lanes (docs/06, Oct 14)
                                      # the landing lock's owner (docs/08 B1)
                                      ("rsi_landings", "merge_pid", "INTEGER"),
-                                     ("rsi_landings", "merge_proc_start", "TEXT")):
+                                     ("rsi_landings", "merge_proc_start", "TEXT"),
+                                     # the exact commit a landing verified (Codex, 3d92d9f #4)
+                                     ("rsi_landings", "verified_sha", "TEXT")):
                 have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
                 if col not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")

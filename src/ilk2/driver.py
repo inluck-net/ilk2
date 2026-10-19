@@ -713,6 +713,14 @@ class Driver:
                                  "again after them", {"gates_first": True}, gates_out=verdicts)
                 self.s.update("steps", step["id"], {"attempt_count": n - 1}, actor="driver",
                               reason="gates first: not counted")
+                rounds = self.s.one("SELECT COUNT(*) n FROM attempts WHERE step_id = ? AND "
+                                    "outcome = 'measured' AND reason LIKE 'failures attributed%'",
+                                    step["id"])["n"]
+                if rounds > bounds.VERIFY_REPAIR_ROUNDS:
+                    self.block_batch("repair-rounds", f"verification step {step['id']} opened "
+                                     f"repairs in {rounds} rounds; the last full-suite evidence is "
+                                     f"attempt {aid}", "look at the repairs and the suite, then "
+                                     f"ilk2 resume {self.batch_id}")
                 return
             if red is None and (plan["verification"] or (repair and not kept)):
                 # A repair whose test already passes has nothing left to repair: gh-resolve P6,
@@ -1094,7 +1102,10 @@ class Driver:
             attributions = []
             if attribute and inherited and gate.adapter in ("pytest", "vitest") and base is not None:
                 attributions = self.attribute(step, gate, spec, r, inherited, parent)
-                done = {a.test_id for a in attributions if a.result == "attributed"}
+                # A failure whose repair already shipped and fails again is not explained: it
+                # stays red (Codex review of 63e348c: an order-dependent failure joined its
+                # shipped repair and the verification step was accepted on a red suite).
+                done = {a.test_id for a in attributions if a.result == "attributed" and not a.recurring}
                 v.new_failures = [t for t in v.new_failures if t not in done]
                 if done and not v.new_failures:
                     v.outcome = "pass-with-attributed"
@@ -1177,27 +1188,36 @@ class Driver:
                 if a.result == "attributed":
                     groups.setdefault((a.step_id, tuple(a.edge)), []).append(
                         (a, repair_brief(self.s, self.root, a, gate, f.message)))
+            recurring: set[str] = set()
             for items in groups.values():
-                self.add_repair([a for a, _ in items], gate, "\n\n".join(b for _, b in items))
+                recurring |= self.add_repair([a for a, _ in items], gate,
+                                             "\n\n".join(b for _, b in items))
+            for a in out:
+                a.recurring = a.test_id in recurring
         self.s.update("runs", self.run_id, {"phase": "gates", "phase_started_mono": clock.mono()},
                       actor="driver", reason="phase gates")
         return out
 
-    def add_repair(self, attrs: list, gate: Gate, brief: str) -> None:
+    def add_repair(self, attrs: list, gate: Gate, brief: str) -> set[str]:
         """One repair plan for failures attributed to the same step and edge (A10). A failure
-        already repaired on that edge joins its existing repair instead."""
-        new = []
+        already repaired on that edge joins its existing repair instead. Returns the tests
+        whose repair had already shipped: they failed again, so they are not explained."""
+        new, recurring = [], set()
         for a in attrs:
             clean, failing = a.edge
-            row = self.s.one("SELECT plan_id FROM repairs WHERE batch_id = ? AND test_id = ? AND "
-                             "fingerprint = ? AND edge_clean = ? AND edge_failing = ?", self.batch_id,
-                             a.test_id, a.fingerprint, clean, failing)
-            if row:  # A10: the same failure on the same edge joins the existing repair
+            row = self.s.one("SELECT r.plan_id, p.status FROM repairs r JOIN plans p ON "
+                             "p.id = r.plan_id WHERE r.batch_id = ? AND r.test_id = ? AND "
+                             "r.fingerprint = ? AND r.edge_clean = ? AND r.edge_failing = ?",
+                             self.batch_id, a.test_id, a.fingerprint, clean, failing)
+            if row and row["status"] == "shipped":
+                recurring.add(a.test_id)
+                self.event("repair.recurring", plan=row["plan_id"], test=a.test_id)
+            elif row:  # A10: the same failure on the same edge joins the existing repair
                 self.event("repair.joined", plan=row["plan_id"], test=a.test_id)
             else:
                 new.append(a)
         if not new:
-            return
+            return recurring
         a, ids = new[0], [x.test_id for x in new]
         clean, failing = a.edge
         if len(new) > 1:
@@ -1229,6 +1249,7 @@ class Driver:
                           (self.batch_id, x.test_id, x.fingerprint, *x.edge,
                            f"{self.batch_id}.{slug}", clock.wall()))
         self.event("repair.added", plan=slug, test=a.test_id, tests=ids, repair_of=a.step_id)
+        return recurring
 
     def red_first(self, gate_list: list[Gate], must_pass: list[str], parent: str,
                   aid: str, step=None) -> list[str]:
