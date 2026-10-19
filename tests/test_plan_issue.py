@@ -62,6 +62,8 @@ def test_a_clean_plan_is_drafted_and_checked_and_never_submitted(ilk, tmp_path):
     assert "write no batch-verification sub-plan" in prompt                 # no verify_command
     assert out["session"] == "done"
     assert "Do not run the project's tests" in prompt and "`$TMPDIR`" in prompt
+    from conftest import PY_BIN                                           # the project's PATH
+    assert f"--path-prelude {PY_BIN}:/usr/bin:/bin" in prompt
 
 
 def test_bad_input_fails_and_starts_nothing(ilk, tmp_path):

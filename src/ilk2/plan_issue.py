@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 from . import clock, paths
@@ -65,7 +66,8 @@ Issue body (verbatim):
   - local_checks: {local_checks}
   - frontmatter the MASTER must carry: {frontmatter}
 - Skip 7h and 8: ilk2 runs `ilk2 submit --check` after you, outside this session. Do run 7g
-  (`plan_check.py`) from this checkout.
+  (`plan_check.py`) from this checkout, with `--path-prelude {prelude}`: the project's PATH, so
+  its gate tools resolve as the driver will run them.
 - If the issue cannot be planned, write the reason to `{drafts}/{unplannable}` and stop.
 """
 
@@ -167,7 +169,8 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
             scope_paths=json.dumps(raw.get("scope_paths") or []),
             write_targets=json.dumps(raw.get("write_targets") or []),
             local_checks=json.dumps(raw.get("local_checks") or []),
-            frontmatter=json.dumps(raw.get("master_frontmatter") or {}), unplannable=UNPLANNABLE)
+            frontmatter=json.dumps(raw.get("master_frontmatter") or {}), unplannable=UNPLANNABLE,
+            prelude=shlex.quote(":".join(cfg.path_prelude or [])))
         b = bounds.load()
         session = worker.dispatch(wcfg, files, wt, prompt)
         cap = cap_s or rsi.PLAN_CAP_S
