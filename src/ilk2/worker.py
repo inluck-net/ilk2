@@ -515,7 +515,10 @@ def preload(root: Path, scope: list[str], instructions: str, gate_commands: list
             earlier_diff: str) -> str:
     """Context the driver assembles at no model cost: the files the step names, the gates'
     test files, and the diff of the batch's earlier accepted steps. Same rules as P1 step 4
-    (whole files up to 600 lines, else windows around named identifiers; 150k characters)."""
+    (whole files up to 600 lines, else windows around named identifiers; 150k characters).
+    The text opens with a list of what it holds and of every path it does not hold in full,
+    and one rule beside it: the list is the worker's half of docs/07 §7.4.2 rule 3 (no
+    re-reading what the brief preloads)."""
     idents = {m for m in re.findall(r"`([A-Za-z_][A-Za-z0-9_.]{3,})`", instructions)}
     idents |= set(re.findall(r"\b([a-z_][a-z0-9_]{3,})\(", instructions))
     files: list[str] = []
@@ -530,20 +533,27 @@ def preload(root: Path, scope: list[str], instructions: str, gate_commands: list
         for a in cmd[1:]:
             if not a.startswith("-") and (root / a.split("::")[0]).is_file():
                 files.append(a.split("::")[0])
-    parts = ["# Preloaded context (assembled by the driver)\n"]
+    # (path, kind, text) per section, in the order they are written. kind is what that section
+    # holds when it survives whole: a "whole" body, "windows" all in, "windows-cut" (the
+    # per-file cap left its marker), or "ranges" (only the spans the step names).
+    sections: list[tuple[str | None, str, str]] = []
     # First the ranges the step's text names (gh-resolve sub-plans name file:line ranges to
     # read; the worker otherwise reads each one in its own turn).
     ranges = named_ranges(root, instructions)
+    only_ranges: dict[str, str] = {}
     for rel, spans in ranges.items():
         lines = (root / rel).read_text(errors="replace").splitlines()
-        parts.append(f"\n## {rel}: the ranges the step names ({len(lines)} lines in all)\n")
-        parts += [_numbered(lines, a, b) for a, b in spans]
+        head = f"\n## {rel}: the ranges the step names ({len(lines)} lines in all)\n"
+        sections.append((rel, "ranges", head + "".join(_numbered(lines, a, b) for a, b in spans)))
+        only_ranges[rel] = ("only lines "
+                            + ", ".join(f"{a + 1}-{min(b, len(lines))}" for a, b in spans)
+                            + " are here")
     for rel in dict.fromkeys(files):
         body = (root / rel).read_text(errors="replace")
         lines = body.splitlines()
         if len(lines) <= WHOLE_FILE_MAX_LINES:
             if rel not in ranges:
-                parts.append(f"\n## {rel} ({len(lines)} lines)\n```\n{body}\n```\n")
+                sections.append((rel, "whole", f"\n## {rel} ({len(lines)} lines)\n```\n{body}\n```\n"))
         else:
             wins, size = [], 0
             for a, b in _windows(lines, idents):
@@ -554,9 +564,45 @@ def preload(root: Path, scope: list[str], instructions: str, gate_commands: list
                 wins.append(w)
                 size += len(w)
             if wins:
-                parts.append(f"\n## {rel} ({len(lines)} lines; windows around names the step uses)\n")
-                parts += wins
+                kind = "windows-cut" if wins[-1].startswith("[more windows") else "windows"
+                head = f"\n## {rel} ({len(lines)} lines; windows around names the step uses)\n"
+                sections.append((rel, kind, head + "".join(wins)))
     if earlier_diff:
-        parts.append(f"\n## Changes from this batch's earlier steps\n```diff\n{earlier_diff}\n```\n")
-    text = "".join(parts)
-    return text[:PRELOAD_CAP] + ("\n[preload truncated]\n" if len(text) > PRELOAD_CAP else "")
+        sections.append((None, "diff",
+                         f"\n## Changes from this batch's earlier steps\n```diff\n{earlier_diff}\n```\n"))
+    # The list is derived from the text after the PRELOAD_CAP slice, never from what was meant
+    # to go in: a section the slice cut must not be listed as here in full. The list is then
+    # prepended, so it survives whatever the slice left (its room is not reserved against the
+    # cap; it is one line per path).
+    body = "".join(t for _, _, t in sections)
+    kept = body[:PRELOAD_CAP]
+    paths = list(dict.fromkeys([*ranges, *dict.fromkeys(files)]))
+    seen: dict[str, dict] = {p: {"kinds": set(), "held": 0, "of": 0} for p in paths}
+    off = 0
+    for rel, kind, t in sections:
+        if rel is not None:
+            s = seen[rel]
+            s["kinds"].add(kind)
+            s["of"] += len(t)
+            s["held"] += max(0, min(off + len(t), PRELOAD_CAP) - off)
+        off += len(t)
+
+    def _label(rel: str) -> str:
+        s = seen[rel]
+        if s["of"] and s["held"] < s["of"]:
+            return "only partly here; read it" if s["held"] else "not here; read it"
+        if "windows-cut" in s["kinds"]:
+            return "only partly here; read it"
+        if "whole" in s["kinds"] or "windows" in s["kinds"]:
+            return "here in full"
+        if "ranges" in s["kinds"] and s["held"]:
+            return only_ranges[rel]
+        return "not here; read it"  # a large file whose names matched no window
+
+    listed = "\n".join(f"- `{rel}` — {_label(rel)}" for rel in paths)
+    head = ("# Preloaded context (assembled by the driver)\n\n"
+            "Listed content is this worktree's current version (the plan's line numbers are "
+            "from an older commit), so a step's \"read these\" for a path listed as here in "
+            "full is already done and needs no lookup. Read only what this list says is not "
+            "(fully) here.\n\n" + listed + "\n")
+    return head + kept + ("\n[preload truncated]\n" if len(body) > PRELOAD_CAP else "")
