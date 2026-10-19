@@ -294,9 +294,11 @@ def state(s, repo: Path, g: dict, now: float) -> tuple[str, dict]:
     judged = [r["verdict"] for r in mine if r["verdict"]]
     if len(judged) >= STOP_MISSES and all(v in ("no-effect", "miss") for v in judged[-STOP_MISSES:]):
         info["rounds"] = [r["id"] for r in mine[-STOP_MISSES:]]
+        info["why"] = "missed"
         return "stopped", info
     if len(judged) >= STOP_RETRIES and all(v == "retry" for v in judged[-STOP_RETRIES:]):
         info["rounds"] = [r["id"] for r in mine[-STOP_RETRIES:]]
+        info["why"], info["last_detail"] = "plan-failed", (last["detail"] or "")[:200]
         return "stopped", info
     if last:
         if last["verdict"] == "retry":
@@ -326,11 +328,18 @@ def tick(s, repo: Path, now: float, plan_cap_s: float) -> dict[str, str]:
         _project(s, g, st, info, now, rsi)
         ref = f"goal:{g['id']}"
         if st in ("held", "unjudgeable", "stopped"):
+            n = len(info.get("rounds") or [])
+            # Oct 19: a stop after 3 planning timeouts said the rounds "did not move it", though
+            # none had planned anything, and its clear "command" was a sentence.
+            stopped = (f"its last {n} rounds failed to plan (last: {info.get('last_detail')}): "
+                       "fix planning, then reset the goal"
+                       if info.get("why") == "plan-failed" else
+                       f"its last {n} rounds did not move it: change the target, or reset the goal")
             what = {"held": "its batch is held: merge it, resolve it, or reset the goal",
                     "unjudgeable": "its last round's metric version has no implementation: reset the goal",
-                    "stopped": f"rounds {info.get('rounds')} did not move it: change the target or reset"}[st]
+                    "stopped": stopped}[st]
             s.open_needs_human("rsi-goal", f"goal {g['id']} is {st}: {what}",
-                               "edit docs/rsi/goals.json (or bump the goal's reset)",
+                               f"ilk2 rsi reset-goal {g['id']}",
                                project_id=rsi.PROJECT, consumer_ref=ref)
         else:
             s.clear_needs_human_reason("rsi-goal", rsi.PROJECT, consumer_ref=ref)
@@ -350,9 +359,14 @@ def _project(s, g: dict, st: str, info: dict, now: float, rsi) -> None:
     k, t = _bound(g)
     title = (f"goal {g['id']}: {g['project']} {g['metric']} is {info.get('value')}, "
              f"target {OP[k]} {t} ({g['window_days']} d, {info.get('samples')} samples)")
+    # Earlier rounds of this goal, any hash: a planner that ran out of time left its notes in
+    # the round's detail, and the next round builds on them instead of starting cold (Oct 19).
+    earlier = [{"round": r["id"], "result": r["result_kind"], "detail": (r["detail"] or "")[:1500]}
+               for r in rounds(s, g["id"])[-3:] if r["closed_at"] is not None]
     ev = json.dumps([{"goal": g["id"], "project": g["project"], "metric": g["metric"],
                       "value": info.get("value"), "target": f"{OP[k]} {t}",
-                      "window_days": g["window_days"], "samples": info.get("samples")}])
+                      "window_days": g["window_days"], "samples": info.get("samples"),
+                      **({"earlier_rounds": earlier} if earlier else {})}])
     status = "open" if st == "eligible" else st
     row = s.one("SELECT status, title FROM rsi_candidates WHERE id = ?", cid)
     if row is None:
@@ -363,3 +377,26 @@ def _project(s, g: dict, st: str, info: dict, now: float, rsi) -> None:
         # a claimed goal is the planner's until it answers; unchanged rows are not rewritten
         s.update("rsi_candidates", cid, {"status": status, "title": title, "evidence": ev,
                                          "last_seen": now}, actor="rsi", reason=f"goal {st}")
+
+
+def reset(repo: Path, goal_id: str) -> dict:
+    """Chad's restart of a goal: bump its `reset` in goals.json and commit that one file, so the
+    goal gets a new hash (docs/08 §8.4) and git records the edit. Only on a clean `main`: RSI
+    lands only into a clean checkout, and this must not sweep anyone's work into its commit."""
+    from . import gitops
+    if gitops.git(repo, "rev-parse", "--abbrev-ref", "HEAD") != "main":
+        raise GoalsError("the checkout is not on main")
+    dirty = gitops.changed_paths(repo)
+    if dirty:
+        raise GoalsError(f"the checkout has uncommitted changes: {dirty[:5]}")
+    f = repo / GOALS_FILE
+    raw = json.loads(f.read_text())
+    g = next((x for x in raw if isinstance(x, dict) and x.get("id") == goal_id), None)
+    if g is None:
+        raise GoalsError(f"no goal {goal_id} in {GOALS_FILE}")
+    g["reset"] = int(g.get("reset") or 0) + 1
+    f.write_text("[\n  " + ",\n  ".join(json.dumps(x) for x in raw) + "\n]\n")
+    gitops.git(repo, "add", str(GOALS_FILE))
+    gitops.git(repo, "commit", "-q", "-m", f"rsi: reset goal {goal_id} (reset {g['reset']})",
+               "--", str(GOALS_FILE), env=gitops.identity(repo))
+    return {"goal": goal_id, "reset": g["reset"], "commit": gitops.head(repo)}

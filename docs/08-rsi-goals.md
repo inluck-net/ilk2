@@ -179,7 +179,7 @@ The credit is **for the portfolio, not for the cause**: `improved` means "the me
 | `judging` | the last round is landed and not yet judged | no ("needs N more samples") |
 | `unjudgeable` | the latest round **of the current hash** has an unimplemented `registry_version` | no; one `rsi-goal` row. A reset changes the hash, so the goal can become eligible again; the old round stays `unjudgeable` in the ledger for audit, and its alarm is cleared |
 | `met` | the metric is on target | no; clears the goal's `rsi-goal` row |
-| `stopped` | the last 2 judged rounds of the current hash are `no-effect`/`miss`, or the last 3 are `retry` | no; one `rsi-goal` row naming the rounds |
+| `stopped` | the last 2 judged rounds of the current hash are `no-effect`/`miss`, or the last 3 are `retry` | no; one `rsi-goal` row naming the rounds and why: they missed, or they failed to plan (with the last failure). Its clear command is `ilk2 rsi reset-goal <id>` |
 | `waiting` | fewer than `min_samples` new samples since the last round closed (`retry` waits 2 h instead) | no |
 | `eligible` | otherwise | yes, subject to 8.7 |
 
@@ -188,6 +188,10 @@ The credit is **for the portfolio, not for the cause**: `improved` means "the me
 **Judgment calls**, each checkable from the ledger:
 - **2 judged misses in a row stop a goal.** Wrong if, among goals Chad restarts with only a `reset` bump, the next round is `improved` in more than 1 of 3 restarts.
 - **3 `retry` rounds in a row, 2 h apart, stop a goal.** Wrong if more than 1 in 3 such stops are followed by a restart whose first round succeeds in planning.
+
+**Restarting a goal: `ilk2 rsi reset-goal <id>`** (added Oct 19 after the first retry stop, [evidence](evidence/2026-10-19-rsi-goal-stopped-by-planning-timeouts.md)). Chad runs it, and it is the `rsi-goal` row's clear command. It bumps the goal's `reset` in `goals.json` and commits that one file on `main`, and it refuses on any other branch or on a checkout with uncommitted changes, so it never sweeps other work into its commit and never leaves `main` dirty for a landing. RSI itself never runs it: `goals.json` stays governance.
+
+**A round that fails to plan leaves its notes for the next.** When a planner writes no spec, its last messages go into the round's `detail` (`rsi.last_notes`), and the goal's evidence lists the last 3 closed rounds, of any hash, with their details. The planner brief states the session's cap and asks for the spec by two thirds of it, building on earlier rounds' notes instead of redoing their reading. The cap itself is not raised.
 
 ## 8.5 The goal metric registry (G3)
 
@@ -349,6 +353,13 @@ Stage B is split into B1 (landing intent and lock, which today's `rsi_land` also
 6. `ilk2 rsi pending` hid the status. → it shows the landing status and, for a hold, the resolve command.
 
 Tests: 10 of the 11 new ones fail without the fixes; the 11th, concurrent acquires, confirms an atomicity the review found already held.
+
+**First retry stop (Oct 19, `gh-resolve-step-minutes`).** 3 rounds, each cut at the 30-min cap with no spec, stopped the goal as designed. Three defects made it worse, and all are fixed:
+1. The alert said the rounds "did not move it". No round had planned anything. → the stop names its cause.
+2. The clear "command" was a sentence, which the panel's "copy the clear command" copied. → `ilk2 rsi reset-goal <id>`.
+3. Every round started cold and redid the same reading. → notes carried over, and a time budget in the brief.
+
+A fourth was the `rsi-goal` row itself becoming a defect candidate, which cost a 30-min session (fixed in `d33c201`). Details are in the [retrospective](evidence/2026-10-19-rsi-goal-stopped-by-planning-timeouts.md).
 
 **Process note.** Round 7's findings are at the level of transactions and races, which tests pin better than prose. AGENTS.md also moved reviews to code at phase boundaries. So the proposal is to build B1 next, with tests for every case above, and to review B1's diff, not another revision of this page (Chad's call).
 

@@ -489,3 +489,21 @@ def test_a_batch_counts_toward_its_sources_allowance_even_from_another_host(ilk,
     del snap["meta"]["rsi_source"]                                 # a batch from before the field
     ilk.s.update("batches", out["batch"], {"snapshot": json.dumps(snap)}, actor="t", reason="t")
     assert (rsi.today_count(ilk.s, now, "goal"), rsi.today_count(ilk.s, now, "defect")) == (0, 1)
+
+
+def test_a_planner_without_a_spec_leaves_its_last_notes_and_the_brief_names_its_time(ilk, tmp_path):
+    log = tmp_path / "start.jsonl"
+    msg = lambda text: json.dumps({"t": 1, "ev": {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": text}, {"type": "tool_use", "name": "Bash", "input": {}}]}}})
+    log.write_text("\n".join([msg("reading docs"), "not json", msg("the lever is\n the preload"),
+                              json.dumps({"t": 2, "ev": {"type": "system"}})]) + "\n")
+    assert rsi.last_notes(log, n=1) == "the lever is the preload"
+    assert rsi.last_notes(log) == "reading docs | the lever is the preload"
+    assert rsi.last_notes(tmp_path / "missing.jsonl") == ""
+    ilk.make_repo()
+    ilk2_project(ilk)
+    lost_run(ilk)
+    ilk.script([])                                                   # writes no spec
+    out = rsi.tick(ilk.s)
+    assert out["did"] == "shelved" and "wrote no .rsi-spec.json" in out["note"]
+    assert "killed at 30 minutes" in ilk.stub_prompts()[0] and "by minute 20" in ilk.stub_prompts()[0]

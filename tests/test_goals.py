@@ -202,3 +202,48 @@ def test_a_removed_goal_is_retired(ilk):
     write_goals(ilk)
     assert goals.tick(ilk.s, ilk.repo, clock.wall(), rsi.PLAN_CAP_S) == {"rsi-inputs": "retired"}
     assert ilk.s.get("rsi_candidates", "goal:rsi-inputs")["status"] == "retired"
+
+
+def test_failed_plans_stop_a_goal_with_a_planning_alert_and_reset_goal_restarts_it(ilk, monkeypatch):
+    # Oct 19: 3 planning timeouts stopped gh-resolve-step-minutes with "did not move it" and a
+    # clear "command" that was a sentence; each round had also started cold.
+    import subprocess
+
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk2_project(ilk)
+    failing_inputs(monkeypatch)
+    monkeypatch.setattr(rsi, "pending", lambda s: [])
+    monkeypatch.setattr(goals, "RETRY_WAIT_S", 0)
+    seen = []
+
+    def timed_out(s, cand, *a, **k):
+        seen.append(cand["evidence"])
+        return {"shelve": f"the planner wrote no .rsi-spec.json (session timeout); "
+                          f"its last notes: lever {len(seen)} is the brief"}
+    monkeypatch.setattr(rsi, "plan", timed_out)
+    write_goals(ilk, INPUTS)
+    g = ["git", "-C", str(ilk.repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(g + ["add", "docs"], check=True)
+    subprocess.run(g + ["commit", "-q", "-m", "goals"], check=True)
+    tick_done(ilk)
+    for _ in range(3):
+        assert rsi.tick(ilk.s)["did"] == "shelved"
+    assert "earlier_rounds" not in seen[0] and "lever 1 is the brief" in seen[1]  # carried over
+    assert rsi.tick(ilk.s)["why"] == "no open candidate"
+    (row,) = rows(ilk)
+    assert "failed to plan" in row["detail"] and "lever 3" in row["detail"]
+    assert "did not move" not in row["detail"]
+    assert row["clear_command"] == "ilk2 rsi reset-goal rsi-inputs"
+
+    (ilk.repo / "stray.txt").write_text("x")                        # never swept into its commit
+    assert cli.main(["rsi", "reset-goal", "rsi-inputs", "--repo", str(ilk.repo)]) == 2
+    (ilk.repo / "stray.txt").unlink()
+    assert cli.main(["rsi", "reset-goal", "nope", "--repo", str(ilk.repo)]) == 2
+    assert cli.main(["rsi", "reset-goal", "rsi-inputs", "--repo", str(ilk.repo)]) == 0
+    assert json.loads((ilk.repo / "docs/rsi/goals.json").read_text())[0]["reset"] == 1
+    log = subprocess.run(["git", "-C", str(ilk.repo), "log", "-1", "--format=%s", "--name-only"],
+                         capture_output=True, text=True, check=True).stdout.split()
+    assert log[:4] == ["rsi:", "reset", "goal", "rsi-inputs"] and log[-1] == "docs/rsi/goals.json"
+    assert rsi.tick(ilk.s)["did"] == "shelved"                       # a new hash: eligible again
+    assert not rows(ilk)

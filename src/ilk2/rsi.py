@@ -352,7 +352,34 @@ Rules for a plan: one step; a change that a reviewer can check in ten minutes; i
 test that fails without the change; it updates docs/02-architecture.md or docs/06-open-items.md
 if the design changes. These paths are the protected kernel and must not be in scope:
 {kernel}. The gate is fixed: ilk2's full suite. Do not propose changing gates, tests' strength,
-bounds, or the RSI rules themselves."""
+bounds, or the RSI rules themselves.
+
+Time: this session is killed at {cap_min} minutes, and a session that writes no {spec_file} is
+wasted. Write it by minute {write_by}: one narrow step you can ground now beats a complete survey.
+If the evidence has earlier_rounds, those planners ran out of time; their notes are what they
+found, so build on them instead of redoing that reading. Scratch files go under $TMPDIR."""
+
+
+def last_notes(log: Path, n: int = 4, limit: int = 900) -> str:
+    """The planner's last few text messages from its stream log, newest last, for a session that
+    wrote no spec: what it had found is kept for the next round (Oct 19: 3 goal rounds each
+    redid the same 25 min of reading, then hit the cap)."""
+    texts: list[str] = []
+    try:
+        lines = log.read_text().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        try:
+            ev = json.loads(line).get("ev") or {}
+        except ValueError:
+            continue
+        if ev.get("type") != "assistant":
+            continue
+        for c in (ev.get("message") or {}).get("content") or []:
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip():
+                texts.append(" ".join(c["text"].split()))
+    return " | ".join(texts[-n:])[-limit:]
 
 
 def plan(s, cand, repo: Path, cfg, cap_s: float = PLAN_CAP_S) -> dict:
@@ -370,13 +397,16 @@ def plan(s, cand, repo: Path, cfg, cap_s: float = PLAN_CAP_S) -> dict:
         gate = cfg.rsi_gate or SUITE_GATE
         worker.prepare(wcfg, files, wt, [gate["command"]])
         prompt = PLANNER_BRIEF.format(title=cand["title"], evidence=cand["evidence"][:6000],
-                                      spec_file=SPEC_FILE, kernel=", ".join(cfg.deny_paths))
+                                      spec_file=SPEC_FILE, kernel=", ".join(cfg.deny_paths),
+                                      cap_min=round(cap_s / 60), write_by=round(cap_s * 2 / 3 / 60))
         b = bounds.load()
         run = worker.dispatch(wcfg, files, wt, prompt)
         outcome = run.wait(cap_s, b.term_grace, b.kill_grace)
         out = wt / SPEC_FILE
         if not out.exists():
-            return {"shelve": f"the planner wrote no {SPEC_FILE} (session {outcome})"}
+            notes = last_notes(run.log_path)
+            return {"shelve": f"the planner wrote no {SPEC_FILE} (session {outcome})"
+                              + (f"; its last notes: {notes}" if notes else "")}
         try:
             got = json.loads(out.read_text())
         except ValueError as e:

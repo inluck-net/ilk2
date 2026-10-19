@@ -228,8 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--input", required=True, help="the issue JSON (gh-resolve's planner contract)")
     pi.add_argument("--outcome", required=True, help="where to write the outcome JSON")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
-    rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log", "resolve"])
-    rs.add_argument("target", nargs="?", help="resolve: the batch whose held landing to resolve")
+    rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log", "resolve",
+                                   "reset-goal"])
+    rs.add_argument("target", nargs="?", help="resolve: the batch whose held landing to resolve; "
+                    "reset-goal: the goal id (bumps its reset in docs/rsi/goals.json and commits it)")
     rs.add_argument("--keep", action="store_true",
                     help="resolve: verify main as it is, then release and canary the merge")
     rs.add_argument("--reverted", metavar="COMMIT", help="resolve: the commit on main that undoes the merge")
@@ -596,6 +598,17 @@ def main(argv: list[str] | None = None) -> int:
                 repo = Path(row["repo_root"]) if row else None
             if a.op == "find":
                 _out(rsi.record(s, rsi.find(s, repo)), True)
+            elif a.op == "reset-goal":
+                from . import goals
+                try:
+                    if not a.target or repo is None:
+                        raise goals.GoalsError("reset-goal needs a goal id and the ilk2 repo")
+                    out = goals.reset(repo, a.target)
+                except goals.GoalsError as e:
+                    _out({"error": str(e)}, True)
+                    return 2
+                s.event("rsi.goal-reset", out)
+                _out(out, True)
             elif a.op == "tick":
                 _out(rsi.tick(s), True)
             elif a.op == "land":
