@@ -323,6 +323,39 @@ def test_preload_puts_the_named_ranges_first_and_caps_identifier_windows(tmp_pat
     assert "[preload truncated]" not in text
 
 
+def test_the_preload_names_what_it_holds_and_what_it_dropped(tmp_path, monkeypatch):
+    # gh-resolve 17d, Oct 17: every fresh attempt opened the brief, then sat 7.2-14.6 min and
+    # 35-62 calls before its first edit, re-reading files the brief already held because the
+    # sub-plan said "Read these". The list is the brief's half of docs/07 §7.4.2 rule 3; it
+    # must be built from the text after the PRELOAD_CAP slice, never from what was meant to
+    # go in.
+    (tmp_path / "small.py").write_text("def add(a, b):\n    return a + b\n")
+    # one merged identifier window, over WINDOWS_PER_FILE_CAP, so the per-file cap cuts it
+    (tmp_path / "wide.py").write_text("\n".join(f"x = 'engine' # {i}" for i in range(2000)))
+    (tmp_path / "range.py").write_text("\n".join(f"r_{i} = {i}" for i in range(1, 301)))
+    # a whole file whose section the final slice cuts (it is last in scope order)
+    (tmp_path / "tail.py").write_text("def tail_fn():\n" + "\n".join(f"t = {i}" for i in range(500)))
+    monkeypatch.setattr(worker, "PRELOAD_CAP", 2_500)
+    out = worker.preload(tmp_path, ["small.py", "wide.py", "tail.py"],
+                         "Use `engine` in wide.py and see `range.py:20-22`.", [], "")
+
+    def listed(path):
+        for line in out.splitlines():
+            if line.startswith(f"- `{path}`"):
+                return line
+        raise AssertionError(f"{path} not listed in {out[:500]!r}")
+
+    whole, over_cap, ranged, cut = (listed("small.py"), listed("wide.py"),
+                                    listed("range.py"), listed("tail.py"))
+    assert "here in full" in whole
+    assert "only partly here" in over_cap and "read" in over_cap   # the windows cap cut it
+    assert "only lines" in ranged and "10-32" in ranged and "here" in ranged  # REF_PAD'd span
+    # what the slice cut is named as not (fully) here, and never as here in full
+    assert "here in full" not in cut
+    assert "only partly here" in cut or "not here" in cut
+    assert '"read these"' in out and "already done" in out         # the rule beside the list
+
+
 def test_private_dirs_hide_data_not_v1_code(monkeypatch, tmp_path):
     # gh-resolve P5 batch, Oct 13: tests that load V1 skills via ~/.claude/skills -> ~/.ilk/current
     # failed in the worker's sandbox once ~/.ilk was hidden. ~/.ilk holds code releases only.
