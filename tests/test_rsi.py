@@ -339,6 +339,14 @@ def test_rsi_review_holds_are_not_defects(ilk):
     assert not [c for c in rsi.find(ilk.s) if c.source == "needs-human"]
 
 
+def test_a_stopped_goals_row_is_not_a_defect(ilk):
+    ilk.make_repo()
+    ilk.project()
+    ilk.s.open_needs_human("rsi-goal", "goal g is stopped: 3 rounds", "edit docs/rsi/goals.json",
+                           project_id=rsi.PROJECT, consumer_ref="goal:g")
+    assert not [c for c in rsi.find(ilk.s) if c.source == "needs-human"]
+
+
 def fake_gh(tmp_path, monkeypatch, rows, rc=0):
     import os
     b = tmp_path / "bin"

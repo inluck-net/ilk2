@@ -5,7 +5,8 @@ runs the whole suite of a declared gate. Fails closed: Claude Code treats any ex
 than 2 as non-blocking, so every internal error exits 2 (P1 finding 7).
 
 Inputs from the environment the driver sets: ILK2_WORKTREE, ILK2_GATES_FILE (JSON list of
-gate commands), ILK2_HOOK_LOG (optional JSON-lines log).
+gate commands), ILK2_WRITE_DIRS_FILE (JSON list of directories outside the worktree that edits
+may also go to, such as plan-issue's drafts dir), ILK2_HOOK_LOG (optional JSON-lines log).
 """
 
 from __future__ import annotations
@@ -169,7 +170,7 @@ def full_suite(command: str, gates: list[list[str]], root: str = ".", depth: int
     return False
 
 
-def decide(ev: dict, root: str, gates: list[list[str]]) -> str | None:
+def decide(ev: dict, root: str, gates: list[list[str]], write_dirs: list[str] = ()) -> str | None:
     tool = ev.get("tool_name", "")
     inp = ev.get("tool_input") or {}
     if tool == "Bash":
@@ -181,7 +182,7 @@ def decide(ev: dict, root: str, gates: list[list[str]]) -> str | None:
                     "your attempt. Run only the tests for the files you changed.")
     elif tool in EDIT_TOOLS:
         path = inp.get("file_path") or inp.get("notebook_path") or ""
-        if path and not inside(path, root):
+        if path and not any(inside(path, d) for d in (root, *write_dirs)):
             return f"Edits outside the worktree are refused: {path}"
     return None
 
@@ -194,7 +195,12 @@ def main() -> int:
     if gf and os.path.exists(gf):
         with open(gf) as f:
             gates = json.load(f)
-    reason = decide(ev, root, gates) if root else "ILK2_WORKTREE is not set; refusing."
+    write_dirs: list[str] = []
+    wf = os.environ.get("ILK2_WRITE_DIRS_FILE")
+    if wf and os.path.exists(wf):
+        with open(wf) as f:
+            write_dirs = json.load(f)
+    reason = decide(ev, root, gates, write_dirs) if root else "ILK2_WORKTREE is not set; refusing."
     log = os.environ.get("ILK2_HOOK_LOG")
     if log:
         with open(log, "a") as f:

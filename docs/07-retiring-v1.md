@@ -150,7 +150,7 @@ New planning rules. The planner fails its own QC on each:
 
 - **Input:** `issue{repo,number,title,body,url}`, `project_root`, `base_branch`, `scope_paths`, `write_targets`, `local_checks`, `run_id`, `master_frontmatter` (as V1). Additions, mirroring what gh-resolve's own submit passes (gh-resolve `tools/gh_resolve/ilk2_client.py`, about `:300-340`):
   - `project`: the ilk2 project id; if absent, the project whose repo is `project_root`'s repository;
-  - `execution_root`: the issue's worktree (I3);
+  - `execution_root`: the issue's worktree (I3). Only the submit check uses it; the session plans in its own worktree of the project at the base (`src/ilk2/plan_issue.py`), so a consumer cannot hand it a dirty tree;
   - `base`: optional, absent when the batch reuses the branch head;
   - `branch`;
   - `consumer_ref`;
@@ -165,6 +165,7 @@ New planning rules. The planner fails its own QC on each:
   - `meta`: `{"scope": {"source", "tickets", "ac_groups"}}`, ready for gh-resolve's `--meta`;
   - `source_ac_groups`: at top level, for gh-resolve's ledger;
   - `warnings`: the plan-shape and gate-path warnings.
+  - `session` (added Oct 19 after the #8751 probe): how the planning session ended (`done`, `timeout`, `crashed`). A session that did not end `done` fails with that named first, the drafts it left, and `master_path` when one MASTER is on disk. The drafts dir is open to both the sandbox and the worker hook (`WorkerConfig.write_dirs`); the probe lost about 400 s to a hook that refused it.
 - **Exit codes:**
   - 0, `drafted-checked`: checked, with no refusal and no warning, ready to submit;
   - 3, `drafted`: the files are on disk, but a check refused them, or a warning stands (`/ilk2-plan`'s QC treats warnings as failures);

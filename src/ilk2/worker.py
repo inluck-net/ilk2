@@ -45,6 +45,9 @@ class WorkerConfig:
     max_turns: int = 400
     sandbox: bool = True
     sandbox_allow: list[str] = field(default_factory=list)
+    # Directories outside the worktree the worker may also edit (plan-issue's drafts dir): both
+    # the sandbox and the hook allow them. sandbox_allow alone leaves the hook refusing them.
+    write_dirs: list[str] = field(default_factory=list)
     hook: bool = True
     hook_python: str = sys.executable
     permission_mode: str = "bypassPermissions"
@@ -137,15 +140,21 @@ def prepare(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, gate_command
         with os.fdopen(fd, "w") as f:
             json.dump(settings, f, indent=2)
     (files.logs / "gates.json").write_text(json.dumps(gate_commands))
-    (files.logs / "sandbox.sb").write_text(sandbox_profile(worktree, files, cfg.sandbox_allow))
+    (files.logs / "write_dirs.json").write_text(json.dumps([os.path.realpath(d) for d in cfg.write_dirs]))
+    (files.logs / "sandbox.sb").write_text(sandbox_profile(worktree, files,
+                                                           [*cfg.sandbox_allow, *cfg.write_dirs]))
 
 
 def worker_env(files: AttemptFiles, worktree: Path) -> dict[str, str]:
     env = {k: v for k, v in procs.host_env().items() if not k.startswith(SCRUB)}
     env["CLAUDE_CONFIG_DIR"] = str(files.config)
     env["TMPDIR"] = os.path.realpath(files.tmp) + "/"
+    # zsh writes here-documents under $TMPPREFIX (default /tmp/zsh), not $TMPDIR: the sandbox
+    # refused a planner's heredoc on Oct 19 ("can't create temp file for here document").
+    env["TMPPREFIX"] = os.path.realpath(files.tmp) + "/zsh"
     env["ILK2_WORKTREE"] = os.path.realpath(worktree)
     env["ILK2_GATES_FILE"] = str(files.logs / "gates.json")
+    env["ILK2_WRITE_DIRS_FILE"] = str(files.logs / "write_dirs.json")
     env["ILK2_HOOK_LOG"] = str(files.logs / "hook.jsonl")
     return env
 

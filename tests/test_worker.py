@@ -149,6 +149,33 @@ def test_hook_edit_outside(tmp_path):
     assert decide(outside, str(tmp_path), []) is not None
 
 
+def test_write_dirs_are_open_to_the_hook_and_the_sandbox_and_nothing_else_is(tmp_path):
+    # Oct 19: plan-issue's drafts dir was in the sandbox allow-list only, so the hook refused
+    # every Write there and the planner spent its last 15 min working around it.
+    wt, drafts, other = tmp_path / "wt", tmp_path / "drafts", tmp_path / "other"
+    for d in (wt, drafts, other):
+        d.mkdir()
+    subprocess.run(["git", "init", "-q", str(wt)], check=True)
+    files = worker.AttemptFiles(tmp_path / "attempt")
+    tmpl = tmp_path / "template"
+    tmpl.mkdir()
+    (tmpl / "settings.json").write_text("{}")
+    cfg = worker.WorkerConfig(claude_bin=STUB, template=tmpl, write_dirs=[str(drafts)])
+    worker.prepare(cfg, files, wt, [])
+    env = worker.worker_env(files, wt)
+
+    def hook(path):
+        ev = {"tool_name": "Write", "tool_input": {"file_path": str(path)}}
+        return subprocess.run(["python3", "-I", str(worker.HOOK)], input=json.dumps(ev), text=True,
+                              capture_output=True, env=env).returncode
+
+    assert hook(drafts / "MASTER-x.md") == 0
+    assert hook(wt / "a.py") == 0
+    assert hook(other / "a.py") == 2
+    assert str(drafts.resolve()) in (files.logs / "sandbox.sb").read_text()
+    assert env["TMPPREFIX"].startswith(os.path.realpath(files.tmp))
+
+
 def test_hook_fails_closed(tmp_path):
     p = subprocess.run(["python3", "-I", str(worker.HOOK)], input="not json", text=True,
                        capture_output=True, env={"ILK2_WORKTREE": str(tmp_path), "PATH": "/usr/bin"})

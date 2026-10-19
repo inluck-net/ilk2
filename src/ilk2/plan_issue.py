@@ -48,8 +48,12 @@ Issue body (verbatim):
 
 - The ilk2 project is `{project}`. Skip step 2's registry lookup and `ilk2 status`: ilk2's store
   is not readable from this session.
-- The batch id is `{batch_id}`, and the drafts dir is `{drafts}`. Write every plan file there and
-  nowhere else. Do not edit this checkout: it is the project at the base, for reading only.
+- The batch id is `{batch_id}`, and the drafts dir is `{drafts}`. Write every plan file there,
+  with the Write and Edit tools, and nowhere else. Do not edit this checkout: it is the project at
+  the base, for reading only. Scratch output (a check's report, notes) goes under `$TMPDIR`, never
+  in the checkout or `/tmp`.
+- Do not run the project's tests, suites, builds or installs (`pytest`, `vitest`, `bun run test`,
+  `npm test`, ...). Planning reads code; ilk2 runs the gates after a step is built.
 - The project's `verify_command` is {verify}. {verify_rule}
 - base_branch: {base_branch}. Write it as the MASTER's `base_branch:`.
 - Record the scope in the MASTER frontmatter before planning (step 3b): `source: {repo}#{number}`,
@@ -102,7 +106,8 @@ def _project(s, raw) -> str | None:
 def run(s, input_path: Path, outcome_path: Path, cap_s: float | None = None) -> int:
     """Plan one issue; write the outcome; return the exit code (0 / 3 / 1)."""
     out: dict = {"outcome": "failed", "problems": [], "master_path": None, "plans_dir": None,
-                 "planner_log": None, "meta": None, "source_ac_groups": None, "warnings": []}
+                 "planner_log": None, "session": None, "meta": None, "source_ac_groups": None,
+                 "warnings": []}
 
     def finish(outcome: str, *problems: str) -> int:
         out["outcome"] = outcome
@@ -144,8 +149,8 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
     gitops.add_worktree(repo, wt, base_sha)
     try:
         wcfg = worker.WorkerConfig(claude_bin=cfg.claude_bin, max_turns=cfg.max_turns,
-                                   sandbox=cfg.sandbox,
-                                   sandbox_allow=[*cfg.sandbox_allow, str(drafts)],
+                                   sandbox=cfg.sandbox, sandbox_allow=cfg.sandbox_allow,
+                                   write_dirs=[str(drafts)],
                                    model=cfg.worker_model, effort=cfg.worker_effort)
         files = worker.AttemptFiles(work / "attempt")
         worker.prepare(wcfg, files, wt, [])
@@ -165,10 +170,24 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
             frontmatter=json.dumps(raw.get("master_frontmatter") or {}), unplannable=UNPLANNABLE)
         b = bounds.load()
         session = worker.dispatch(wcfg, files, wt, prompt)
-        ended = session.wait(cap_s or rsi.PLAN_CAP_S, b.term_grace, b.kill_grace)
+        cap = cap_s or rsi.PLAN_CAP_S
+        ended = session.wait(cap, b.term_grace, b.kill_grace)
+        out["session"] = ended
         changed = gitops.changed_paths(wt)
+        changed_problem = f"the planner changed the checkout, which it must not: {changed[:10]}"
+        if ended != "done":
+            # Name the session's end first: on Oct 19 a session cut at the cap was reported only
+            # by a stray file it left, with master_path null although its MASTER was on disk.
+            masters = sorted(drafts.glob("MASTER-*.md"))
+            if len(masters) == 1:
+                out["master_path"] = str(masters[0])
+            left = sorted(p.name for p in drafts.iterdir())
+            why = (f"the planning session ended {ended}"
+                   + (f" at the {cap:.0f} s cap" if ended == "timeout" else "")
+                   + f"; drafts left: {left[:10]}")
+            return finish("failed", why, *([changed_problem] if changed else []))
         if changed:
-            return finish("failed", f"the planner changed the checkout, which it must not: {changed[:10]}")
+            return finish("failed", changed_problem)
         if (drafts / UNPLANNABLE).exists():
             return finish("failed", "unplannable: " + (drafts / UNPLANNABLE).read_text().strip())
         masters = sorted(drafts.glob("MASTER-*.md"))

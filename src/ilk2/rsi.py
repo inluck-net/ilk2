@@ -34,7 +34,10 @@ WEIGHTS = {"request": 100, "goal": 90, "engine-error": 50, "stall": 40, "needs-h
            "refusal": 20, "report": 10, "improvement": 5}
 # A step's own red attempts are the consumer's work, not ilk2's; capacity and leases are the
 # host's state, not defects.
-NOT_DEFECTS_NH = {"attempts", "rsi-review"}  # rsi-review: RSI's own hold for a person, not a defect
+# rsi-review and rsi-goal: RSI's own holds for a person, not defects. On Oct 19 an rsi-goal row
+# (a stopped goal, cleared only by editing docs/rsi/goals.json) became a candidate and took a
+# 30-min planning session.
+NOT_DEFECTS_NH = {"attempts", "rsi-review", "rsi-goal"}
 NOT_DEFECTS_REFUSAL = {"project-limit", "host-load", "host-budget", "root-lease", "waiting-lease",
                        "waiting-api", "quota", "reserve"}
 STALL_REASONS = re.compile(r"^(stalled|lost)")
