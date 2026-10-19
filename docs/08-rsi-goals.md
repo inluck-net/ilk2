@@ -2,7 +2,7 @@
 
 **Status:** revision 8, Oct 19, 2026. Codex reviewed revisions 1-7 the same day, and every finding was checked against the code and accepted (8.9).
 - **Stage A: accepted, built and committed Oct 19** (`3152cff`). It is released on chad-mbp once gh-resolve's trial batch `b-da5e3354a7d1` ships (Chad: "release after trial #3").
-- **Stage B: rework in rounds 5-7.** Its fixes are folded in here. It is split into **B1** (landing intent, lock and resolution) and **B2** (the goal ledger). **B1 is built** (Oct 19, Chad: "do your recommendations"), and its next review is against its code. B2 is next.
+- **Stage B: rework in rounds 5-7.** Its fixes are folded in here. It is split into **B1** (landing intent, lock and resolution) and **B2** (the goal ledger). **B1 is built** (Oct 19, Chad: "do your recommendations"), reviewed against its code, and fixed. **B2 is built** too (Oct 19, Chad: "do as you recommend"): `src/ilk2/goals.py`, the claim in `rsi.claim`, and the late-submit check in `batches.submit`. Its code review is next.
 
 **Asked by Chad, Oct 19:** "is the RSI still working? not a single auto improving batch for a few days", then "can we set this expected working RSI as the goal of the RSI itself, so that it can find all these defects/problems/reasons and get them handled properly".
 

@@ -150,6 +150,19 @@ CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind, cursor);
+CREATE TABLE IF NOT EXISTS rsi_goal_rounds (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, goal_json TEXT NOT NULL, goal_hash TEXT NOT NULL,
+  registry_version INTEGER NOT NULL, tolerance REAL, tick_id TEXT, tick_pid INTEGER,
+  tick_proc_start TEXT, started_at REAL NOT NULL, before_value REAL, before_samples INTEGER,
+  batch_id TEXT, result_kind TEXT, detail TEXT, closed_at REAL, after_value REAL,
+  after_samples INTEGER, verdict TEXT, version INTEGER NOT NULL DEFAULT 1);
+CREATE INDEX IF NOT EXISTS goal_rounds_goal ON rsi_goal_rounds(goal_id, started_at);
+CREATE INDEX IF NOT EXISTS goal_rounds_hash ON rsi_goal_rounds(goal_id, goal_hash, closed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS goal_rounds_open ON rsi_goal_rounds(goal_id) WHERE closed_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS rsi_one_planning ON rsi_candidates(status) WHERE status = 'planning';
+CREATE INDEX IF NOT EXISTS transitions_to ON transitions(entity, to_state, at, entity_id);
+CREATE INDEX IF NOT EXISTS transitions_actor ON transitions(actor, at, entity, entity_id);
+CREATE INDEX IF NOT EXISTS attempts_ended ON attempts(ended_at, step_id);
 CREATE INDEX IF NOT EXISTS batches_project ON batches(project_id, created_at);
 """
 

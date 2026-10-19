@@ -133,58 +133,11 @@ def _issues(s) -> list[Candidate]:
     return out
 
 
-def goals(s, repo: Path | None) -> list[Candidate]:
-    """Chad's standing goals: docs/rsi/goals.json (protected kernel), each
-    {"id", "project", "metric", "max" or "min", "host"?}. The metric is a number in
-    `ilk2 report --project <p> --json`, read on the goal's host (ssh) or here. A goal off its
-    target is a candidate; on target, none. A broken file stops the finder, like requests."""
-    if repo is None:
-        return []
-    f = repo / "docs" / "rsi" / "goals.json"
-    if not f.exists():
-        return []
-    out = []
-    for g in json.loads(f.read_text()):
-        try:
-            value = _metric(g)
-        except Exception as e:  # noqa: BLE001 - an unreachable host is reported, not fatal
-            s.event("rsi.goal-failed", {"goal": g.get("id"), "error": str(e)[:300]})
-            continue
-        if value is None:
-            continue
-        off = (g.get("max") is not None and value > g["max"]) or \
-              (g.get("min") is not None and value < g["min"])
-        if off:
-            target = f"<= {g['max']}" if g.get("max") is not None else f">= {g['min']}"
-            out.append(Candidate(f"goal:{g['id']}", "goal",
-                                 f"goal {g['id']}: {g['project']} {g['metric']} is {value}, target {target}",
-                                 [{"goal": g["id"], "project": g["project"], "metric": g["metric"],
-                                   "value": value, "target": target, "host": g.get("host")}]))
-    return out
-
-
-def _metric(g: dict):
-    import subprocess
-    from .release import REMOTE_ENV, _ssh
-    cmd = ["ilk2", "report", "--project", g["project"], "--json"]
-    if g.get("host"):
-        p = subprocess.run([*_ssh(), g["host"], REMOTE_ENV + "~/.ilk2/current/venv/bin/" + " ".join(cmd)],
-                           capture_output=True, text=True, timeout=180)
-    else:
-        import sys
-        p = subprocess.run([sys.executable, "-m", "ilk2", *cmd[1:]], capture_output=True, text=True,
-                           timeout=180)
-    if p.returncode:
-        raise RuntimeError(p.stderr.strip()[-300:])
-    v = json.loads(p.stdout).get(g["metric"])
-    return v if isinstance(v, (int, float)) else None
-
-
 def find(s, repo: Path | None = None, now: float | None = None) -> list[Candidate]:
     """Every source's candidates. A broken requests or goals file raises here (fails closed,
     never "none"); the trigger uses find_sources, which records it and runs the rest."""
     cands, _, errors = find_sources(s, repo, now)
-    for name in ("records", "requests", "goals"):
+    for name in ("records", "requests"):
         if name in errors:
             raise errors[name]
     return cands
@@ -215,8 +168,8 @@ def find_sources(s, repo: Path | None = None, now: float | None = None):
         return got
 
     out = run("records", lambda: _records(s, now)) + run("requests", lambda: requests(repo))
-    if repo is not None:  # Chad's inputs live with the ilk2 repo's host
-        out += run("issues", lambda: _issues(s)) + run("goals", lambda: goals(s, repo))
+    if repo is not None:  # Chad's inputs live with the ilk2 repo's host (goals: goals.tick)
+        out += run("issues", lambda: _issues(s))
     return sorted(out, key=lambda c: -score(c.source, len(c.evidence))), status, errors
 
 
@@ -487,6 +440,27 @@ def kind(source: str) -> str:
     return source if source in ("request", "goal") else "defect"
 
 
+def claim(s, cand, now: float, caps: dict, round_: dict | None = None) -> str | None:
+    """One atomic claim for every candidate kind (docs/08 B2): no candidate planning, the
+    selected one still open and within its allowance, then open -> planning and, for a goal,
+    its round. None when claimed, else why not. The store's unique indexes guard the same rules."""
+    k = kind(cand["source"])
+    with s.tx() as c:
+        if c.execute("SELECT 1 FROM rsi_candidates WHERE status = 'planning'").fetchone():
+            return "a plan is in progress"
+        if k != "request" and today_count(s, now, k) >= caps[k]:
+            return f"daily cap {caps[k]} reached" if k == "defect" else f"goal cap {caps[k]} reached"
+        cur = c.execute("UPDATE rsi_candidates SET status = 'planning', planned_at = ?, "
+                        "version = version + 1 WHERE id = ? AND status = 'open'", (now, cand["id"]))
+        if cur.rowcount != 1:
+            return "the candidate changed before it was claimed"
+        if round_:
+            cols = ", ".join(round_)
+            c.execute(f"INSERT INTO rsi_goal_rounds({cols}) VALUES ({', '.join('?' * len(round_))})",
+                      tuple(round_.values()))
+    return None
+
+
 def today_count(s, now: float, of: str = "defect") -> int:
     """RSI batches of one kind in the last 24 h that were not cancelled. The kind is the batch's
     meta.rsi_source; a batch from before it was recorded counts as a defect unless its candidate
@@ -515,7 +489,7 @@ def tick(s, now: float | None = None) -> dict:
     s.event("rsi.tick-started", {"tick_id": tick_id, "pid": os.getpid()})
     sources: dict[str, str] = {}
     try:
-        out = _tick(s, now, sources)
+        out = _tick(s, now, sources, {"tick_id": tick_id, "pid": os.getpid()})
     except BaseException as e:
         try:
             s.event("rsi.tick-failed", {"tick_id": tick_id, "error": f"{type(e).__name__}: {e}"[:500]})
@@ -532,7 +506,7 @@ def tick(s, now: float | None = None) -> dict:
     return out | {"sources": sources}
 
 
-def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
+def _tick(s, now: float | None = None, sources: dict | None = None, tick_info: dict | None = None) -> dict:
     """Find, then, if the trigger may, plan and submit the top open candidate. Every exit says
     why it did nothing (a quiet trigger must be tellable from a stuck one)."""
     from . import batches
@@ -559,6 +533,19 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
         # a tick that died mid-plan: the candidate goes back to open, never stuck
         s.update("rsi_candidates", r["id"], {"status": "open"}, actor="rsi", reason="stale planning")
     sources = {} if sources is None else sources
+    goal_defs: dict = {}
+    if repo is not None:  # standing goals (docs/08 B2): reconcile rounds, derive, project
+        from . import goals as goals_mod
+        try:
+            ok, _ = goals_mod.load(s, repo)
+            goal_defs = {g["id"]: g for g in ok}
+            goals_mod.tick(s, repo, now, PLAN_CAP_S)
+            sources["goals"] = "ok"
+        except STORE_ERRORS:
+            raise
+        except Exception as e:  # noqa: BLE001 - one source's failure is that source's
+            sources["goals"] = f"{type(e).__name__}: {e}"[:300]
+            s.event("rsi.source-failed", {"source": "goals", "error": sources["goals"]})
     found, status, _ = find_sources(s, repo, now)
     sources.update(status)
     rec = record(s, found, now)
@@ -603,6 +590,8 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
     top = None
     for c in open_:
         k = kind(c["source"])
+        if k == "goal" and c["id"].split(":", 1)[1] not in goal_defs:
+            continue  # a goal with no definition here (removed, or another host's): never planned
         if k != "request":
             used.setdefault(k, today_count(s, now, k))
             if used[k] >= caps[k]:
@@ -613,9 +602,15 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
         why = "; ".join(f"daily cap {caps[k]} reached" if k == "defect" else f"goal cap {caps[k]} reached"
                         for k in sorted(used))
         return {"did": "nothing", "why": why, **rec}
-    s.update("rsi_candidates", top["id"], {"status": "planning", "planned_at": now}, actor="rsi",
-             reason="tick")
-    s.event("rsi.planning", {"candidate": top["id"], "title": top["title"]})
+    round_ = None
+    if top["source"] == "goal":
+        from . import goals as goals_mod
+        round_ = goals_mod.new_round(s, goal_defs[top["id"].split(":", 1)[1]], tick_info or {}, now)
+    why = claim(s, top, now, caps, round_)
+    if why:
+        return {"did": "nothing", "why": why, **rec}
+    s.event("rsi.planning", {"candidate": top["id"], "title": top["title"],
+                             **({"round": round_["id"]} if round_ else {})})
     try:
         res = plan(s, top, repo, cfg)
     except Exception as e:  # noqa: BLE001 - a failed plan shelves the candidate, never wedges it
@@ -623,19 +618,30 @@ def _tick(s, now: float | None = None, sources: dict | None = None) -> dict:
     if "spec" in res:
         from . import plans as plans_mod
         n = s.one("SELECT COUNT(*) n FROM batches WHERE consumer_ref LIKE 'rsi-auto-%'")["n"] + 1
+        meta = {"rsi_candidate": top["id"], "rsi_source": top["source"],
+                **({"rsi_goal_round_id": round_["id"]} if round_ else {})}
         try:
             bid = batches.submit(s, PROJECT, plans_mod.from_dict(res["spec"]),
-                                 consumer_ref=f"rsi-auto-{n}",
-                                 meta={"rsi_candidate": top["id"], "rsi_source": top["source"]})
+                                 consumer_ref=f"rsi-auto-{n}", meta=meta)
         except batches.SubmitRejected as e:
             res = {"shelve": "submit rejected: " + "; ".join(e.problems)[:500]}
         else:
+            if s.get("batches", bid)["status"] == "cancelled":
+                # its round closed while it was planned (docs/08 B2): submitted as cancelled
+                return {"did": "nothing", "why": f"{bid} was cancelled: its round closed", **rec}
+            if round_:
+                with s.tx() as c:
+                    c.execute("UPDATE rsi_goal_rounds SET batch_id = ? WHERE id = ?", (bid, round_["id"]))
             s.update("rsi_candidates", top["id"], {"status": "submitted", "batch_id": bid},
                      actor="rsi", reason="submitted")
             s.event("rsi.submitted", {"candidate": top["id"], "batch": bid}, batch_id=bid)
             return {"did": "submitted", "batch": bid, "candidate": top["id"], **rec}
     status = "done" if "done" in res else "shelved"
     note = res.get("done") or res.get("shelve")
+    if round_:  # the round's result first, before the candidate row (docs/08 B2)
+        from . import goals as goals_mod
+        goals_mod.close(s, round_["id"], "answered" if status == "done" else "plan-failed",
+                        "miss" if status == "done" else "retry", clock.wall(), note or "")
     s.update("rsi_candidates", top["id"], {"status": status, "note": note}, actor="rsi",
              reason=status)
     s.event(f"rsi.{status}", {"candidate": top["id"], "note": note})

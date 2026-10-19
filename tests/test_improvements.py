@@ -18,7 +18,7 @@ def test_a_finding_dedups_by_fingerprint_and_keeps_its_evidence(ilk):
     assert a["new"] and not b["new"] and a["id"] == b["id"] and b["hits"] == 2
     row = imp.rows(ilk.s, "proj")[0]
     assert [e["batch"] for e in row["evidence"]] == ["b-1", "b-2"] and row["status"] == "open"
-    journal = ilk.s.all("SELECT actor, reason FROM transitions WHERE entity = 'improvements'")
+    journal = ilk.s.all("SELECT actor, reason FROM transitions WHERE entity = 'improvements' ORDER BY id")
     assert [j["reason"] for j in journal] == ["added from postmortem", "seen again from postmortem"]
 
 

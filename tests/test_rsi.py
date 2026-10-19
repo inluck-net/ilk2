@@ -373,23 +373,6 @@ def test_issues_are_off_unless_the_host_reads_them_and_failures_are_events(ilk, 
     assert any(e["kind"] == "rsi.issues-failed" for e in ilk.s.events_since(0))
 
 
-def test_a_goal_off_its_target_is_a_candidate(ilk, tmp_path, monkeypatch):
-    # Chad, Oct 16: standing goals in docs/rsi/goals.json, measured with ilk2 report.
-    ilk.make_repo()
-    (tmp_path / "docs" / "rsi").mkdir(parents=True)
-    (tmp_path / "docs" / "rsi" / "goals.json").write_text(json.dumps([
-        {"id": "kira-speed", "project": "kira-live", "host": "rezmac",
-         "metric": "minutes_per_accepted_step", "max": 20},
-        {"id": "waste", "project": "gh-resolve", "metric": "share_attempts_producing_nothing", "max": 0.1}]))
-    values = {"kira-live": 30.1, "gh-resolve": 0.08}
-    monkeypatch.setattr(rsi, "_metric", lambda g: values[g["project"]])
-    got = [c for c in rsi.find(ilk.s, tmp_path) if c.source == "goal"]
-    assert [c.id for c in got] == ["goal:kira-speed"]                     # waste is on target
-    assert "is 30.1, target <= 20" in got[0].title and got[0].evidence[0]["host"] == "rezmac"
-
-
-# -- docs/08 stage A: inputs that report themselves, tick events, allowances ------------------
-
 def test_gh_is_found_off_path_as_under_launchd(ilk, tmp_path, monkeypatch):
     # Oct 16-19: launchd's PATH lacks Homebrew, and every supervisor tick failed to run `gh`.
     from ilk2 import paths as p_
@@ -442,6 +425,17 @@ def test_every_tick_records_its_start_and_how_it_ended(ilk, monkeypatch):
     assert "core broke" in ev[1]["payload"]["error"]
 
 
+GOAL = {"id": "speed", "project": "ilk2", "metric": "minutes_per_accepted_step", "max": 25,
+        "window_days": 7, "min_samples": 1}
+
+
+def defined_goal(monkeypatch):
+    """A goal defined in goals.json, with the projection left alone (these tests set rows)."""
+    from ilk2 import goals as goals_mod
+    monkeypatch.setattr(goals_mod, "load", lambda s, repo: ([GOAL], {}))
+    monkeypatch.setattr(goals_mod, "tick", lambda *a, **k: {})
+
+
 def candidate(ilk, cid, source, score):
     now = clock.wall()
     ilk.s.insert("rsi_candidates", {"id": cid, "source": source, "title": f"{source} {cid}",
@@ -454,6 +448,7 @@ def test_goals_and_defects_have_separate_allowances_and_a_capped_one_yields(ilk,
     ilk2_project(ilk)
     monkeypatch.setattr(rsi, "pending", lambda s: [])
     monkeypatch.setattr(rsi, "find_sources", lambda s, repo, now: ([], {}, {}))
+    defined_goal(monkeypatch)
     candidate(ilk, "goal:speed", "goal", 95)
     candidate(ilk, "stall:x", "stall", 45)
     used = {"goal": 1, "defect": 0}
@@ -473,6 +468,7 @@ def test_a_batch_counts_toward_its_sources_allowance_even_from_another_host(ilk,
     ilk.make_repo()
     ilk2_project(ilk)
     monkeypatch.setattr(rsi, "find_sources", lambda s, repo, now: ([], {}, {}))
+    defined_goal(monkeypatch)
     candidate(ilk, "rezmac/goal:speed", "goal", 95)                # a host-prefixed goal
     ilk.script(spec_write(PLAN))
     out = rsi.tick(ilk.s)

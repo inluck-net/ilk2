@@ -392,6 +392,14 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
                               "steps": sum(len(p.steps) for p in spec.plans)}, batch_id=bid)
         for w in plan_warnings(spec) + path_warns:
             s.event("submit.warning", w, batch_id=bid)
+        # An RSI goal round that closed while this batch was planned (docs/08 B2): the batch is
+        # recorded, then cancelled in the same transaction, so the round's close table sees a
+        # cancellation transition and the caller sees a cancelled batch.
+        rid = (meta or {}).get("rsi_goal_round_id")
+        if rid:
+            r = s.one("SELECT closed_at FROM rsi_goal_rounds WHERE id = ?", rid)
+            if r is None or r["closed_at"] is not None:
+                s.transition("batches", bid, "cancelled", actor="rsi", reason="rsi-round-closed")
     return bid
 
 
