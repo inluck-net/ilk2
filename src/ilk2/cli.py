@@ -268,6 +268,16 @@ def main(argv: list[str] | None = None) -> int:
                     "status returns it unchanged")
     sm.add_argument("--check", action="store_true",
                     help="validate exactly as a submit would, and create nothing")
+    sm.add_argument("--not-after", type=float, metavar="UNIX_TS",
+                    help="refuse (refused:not-after) if the submit is processed after this time; "
+                         "checked in the transaction that makes the batch durable")
+    sm.add_argument("--fence", nargs=2, metavar=("KEY", "TOKEN"),
+                    help="refuse (refused:fence) if a newer integer token was seen for KEY; a "
+                         "submit that passes records its token")
+    fe = sub.add_parser("fence", help="advance a submit fence: later submits with an older token "
+                        "for this key are refused")
+    fe.add_argument("--key", required=True)
+    fe.add_argument("--token", type=int, required=True)
     sm.add_argument("--json", action="store_true")
 
     st = sub.add_parser("status")
@@ -477,7 +487,8 @@ def main(argv: list[str] | None = None) -> int:
                                      root=Path(a.root) if a.root else None,
                                      originals={f.name: f.read_text()}, branch=a.branch,
                                      deny_paths=a.deny_path, meta=_meta(a.meta),
-                                     check_only=a.check)
+                                     check_only=a.check, not_after=a.not_after,
+                                     fence=(a.fence[0], int(a.fence[1])) if a.fence else None)
             except batches.SubmitRejected as e:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
@@ -570,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
                 batches.resume(s, a.batch)
                 out["restarted"] = True
             _out(out, True)
+        elif a.cmd == "fence":
+            _out({"key": a.key, "token": batches.advance_fence(s, a.key, a.token)}, True)
         elif a.cmd == "plan-issue":
             from . import plan_issue
             code = plan_issue.run(s, Path(a.input), Path(a.outcome))

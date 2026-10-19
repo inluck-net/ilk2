@@ -289,7 +289,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
            priority: int = 0, consumer_ref: str | None = None, root: Path | None = None,
            originals: dict | None = None, branch: str | None = None,
            deny_paths: list[str] | None = None, meta: dict | None = None,
-           check_only: bool = False) -> str:
+           check_only: bool = False, not_after: float | None = None,
+           fence: tuple[str, int] | None = None) -> str:
     """Validate and create a batch. check_only validates exactly as a submit would and creates
     nothing: a consumer can test its rendered plans before it goes live (gh-resolve on rezmac,
     Oct 14: two live dispatches were rejected one after the other)."""
@@ -341,10 +342,14 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
     if problems:
         raise SubmitRejected(problems)
     path_warns = gate_path_warnings(spec, repo, base_sha)
+    late = _fenced(s, not_after, fence)  # early, so a refused submit makes no worktree
+    if late:
+        raise SubmitRejected([late])
     if check_only:
         return ""
     bid = new_id("b")
     branch = branch or f"ilk2/{bid}"
+    made = None  # a worktree this submit created, removed if the submit is refused after all
     if root is None and existing:
         prior = s.one("SELECT execution_root FROM batches WHERE project_id = ? AND branch = ? "
                       "ORDER BY created_at DESC LIMIT 1", project_id, branch)
@@ -355,6 +360,7 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
             gitops.git(repo, "worktree", "add", "-q", str(root), branch)
     elif root is None:
         root = gitops.add_worktree(repo, paths.worktrees() / bid, base_sha, branch=branch)
+        made = root
     else:
         # An existing root may be held by a consumer or another batch: nothing is written to it
         # here. The driver checks out this batch's branch once it holds the lease (R4).
@@ -369,7 +375,46 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         if not isinstance(meta, dict) or len(json.dumps(meta)) > META_MAX:
             raise SubmitRejected([f"--meta must be a JSON object of at most {META_MAX} bytes"])
         snapshot["meta"] = meta
+    try:
+        _commit(s, bid, project_id, base_sha, branch, root, priority, consumer_ref, snapshot,
+                originals, spec, meta, path_warns, not_after, fence)
+    except SubmitRejected:
+        if made is not None:
+            gitops.remove_worktree(repo, made)
+        raise
+    return bid
+
+
+def _fenced(s, not_after: float | None, fence: tuple[str, int] | None) -> str | None:
+    """Submit-side fencing (gh-resolve ADR 0116): a submit processed after its deadline, or with
+    a fence token older than one already seen for its key, is refused. The authoritative check
+    runs in the transaction that makes the batch durable (_commit); this one only saves work."""
+    if not_after is not None and clock.wall() > not_after:
+        return f"refused:not-after: processed at {clock.wall():.3f}, after {not_after:.3f}"
+    if fence is not None:
+        row = s.one("SELECT token FROM submit_fences WHERE key = ?", fence[0])
+        if row and row["token"] > fence[1]:
+            return f"refused:fence: token {fence[1]} for {fence[0]!r} is older than {row['token']}"
+    return None
+
+
+def advance_fence(s, key: str, token: int) -> int:
+    """Record a fence token for a key; tokens only move forward. Returns the stored token."""
+    with s.tx() as c:
+        c.execute("INSERT INTO submit_fences(key, token, at) VALUES (?, ?, ?) ON CONFLICT(key) DO "
+                  "UPDATE SET token = MAX(token, excluded.token), at = excluded.at",
+                  (key, int(token), clock.wall()))
+        return c.execute("SELECT token FROM submit_fences WHERE key = ?", (key,)).fetchone()["token"]
+
+
+def _commit(s, bid, project_id, base_sha, branch, root, priority, consumer_ref, snapshot,
+            originals, spec, meta, path_warns, not_after, fence) -> None:
     with s.tx():
+        late = _fenced(s, not_after, fence)  # in the same transaction as the insert
+        if late:
+            raise SubmitRejected([late])
+        if fence is not None:
+            advance_fence(s, *fence)
         s.insert("batches", {"id": bid, "project_id": project_id, "base_commit": base_sha,
                              "branch": branch, "execution_root": str(root), "priority": priority,
                              "consumer_ref": consumer_ref, "status": "queued",
@@ -400,7 +445,6 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
             r = s.one("SELECT closed_at FROM rsi_goal_rounds WHERE id = ?", rid)
             if r is None or r["closed_at"] is not None:
                 s.transition("batches", bid, "cancelled", actor="rsi", reason="rsi-round-closed")
-    return bid
 
 
 # -- plan-shape warnings (docs/07 §7.4.1): telemetry, never a refusal -----------------------

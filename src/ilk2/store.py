@@ -151,6 +151,8 @@ CREATE INDEX IF NOT EXISTS events_batch ON events(batch_id, cursor);
 CREATE INDEX IF NOT EXISTS steps_plan ON steps(plan_id, idx);
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind, cursor);
+CREATE TABLE IF NOT EXISTS submit_fences (
+  key TEXT PRIMARY KEY, token INTEGER NOT NULL, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS rsi_goal_rounds (
   id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, goal_json TEXT NOT NULL, goal_hash TEXT NOT NULL,
   registry_version INTEGER NOT NULL, tolerance REAL, tick_id TEXT, tick_pid INTEGER,
