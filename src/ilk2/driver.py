@@ -640,8 +640,8 @@ class Driver:
                     self.ship_batch()
                     return "shipped"
                 return "plan-done"
-            if step == "plan-blocked":
-                return "plan-blocked"
+            if step in ("plan-blocked", "plan-yield"):
+                return step
             if step == "shipped":
                 self.ship_batch()
                 return "shipped"
@@ -666,6 +666,15 @@ class Driver:
                 return "plan-done"
             if plan["status"] == "blocked":
                 return "plan-blocked"
+            if plan["verification"] and self.s.one(
+                    "SELECT 1 FROM plans WHERE batch_id = ? AND repair_of_step_id IS NOT NULL AND "
+                    "status != 'shipped'", self.batch_id):
+                # §2.5.7 barrier for a bound run: verification waits for the repairs it opened.
+                # The run ends so the supervisor can start them (runs.ready_plans offers only
+                # repairs now). gh-resolve b-a8b7e1240628, Oct 20: the bound verify run re-ran
+                # the full suite 4 times while its repair never ran, then blocked on
+                # repair-rounds.
+                return "plan-yield"
             step = self.s.one("SELECT * FROM steps WHERE plan_id = ? AND status != 'accepted' "
                               "ORDER BY idx LIMIT 1", self.plan_id)
             if step is None:

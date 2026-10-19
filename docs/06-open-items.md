@@ -279,6 +279,12 @@ On rezmac kira-live #8644 (b-5206fa7e6324), step 0's commit ca183b96b also edite
 - **Idea:** when the specification changed, also measure the base under the head's configuration (overlay the head's config files in a diagnostic worktree), so failures can still be walked back to the step that caused them and repaired there.
 - **Open:** the cost of that second measurement, and whether per-step repairs beat one worker fixing all of them together. Neither is measured. Not built.
 
+### A run bound to a plan bypasses the repair barrier (found Oct 20, gh-resolve b-a8b7e1240628)
+
+`next_step`'s bound-run branch returned the plan's own pending step without reaching the §2.5.7 repair barrier. A verification run bound to its plan re-ran the full suite 4 times at the same parent while the repair it had opened never started (the run held the batch root, so `runs.ready_plans` could not start the repair), then blocked on `repair-rounds`.
+- **Fixed for verification:** a bound verification run with an unshipped repair in its batch ends `plan-yield`, which is not a restart, and the supervisor starts the repair (`test_a_bound_verification_run_yields_to_the_repair_it_opened`, failing before).
+- **Open:** a bound *work* lane run takes the same branch, so it can keep starting steps while a repair opened elsewhere is pending, against §2.5.7. No failure has been seen. Repairs today come almost only from verification, which `ready_plans` starts only after every work plan has shipped. Not changed.
+
 ### Speed levers from docs/03 §3.4 that were never built (found Oct 16)
 
 kira-cloudflare-44 measured support piece A's step 0 timing out at the 3600 s attempt cap. It made 154 tool calls, spent about 3150 s in model turns at ~20 s per turn, and made its first edit at 1007 s; all its gates passed on the kept work. docs/03 §3.4 promises three levers that would address this, and none is built:

@@ -386,3 +386,26 @@ def test_a_failure_first_seen_at_a_lane_merge_is_attributed_to_the_plan_it_merge
     assert len(rp) == 1 and rp[0]["repair_of_step_id"] == f"{bid}.p1.0"
     b = ilk.s.get("batches", bid)
     assert ilk.git(b["execution_root"], "show", f"{b['branch']}:b.py") == "B = 1"
+
+
+def test_a_bound_verification_run_yields_to_the_repair_it_opened(ilk):
+    # gh-resolve b-a8b7e1240628, Oct 20: a run bound to the verification plan never reached the
+    # repair barrier in next_step. It re-ran the full suite 4 times at the same parent, joining
+    # a repair that never ran, then blocked on repair-rounds.
+    from ilk2 import runs
+    from ilk2.driver import Driver
+    setup(ilk)
+    ilk.script([BREAK], [FIX])
+    bid = ilk.submit({"plans": [
+        {"slug": "p", "steps": [step("break b")]},
+        {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
+    for slug, ended in (("p", "plan-done"), ("v", "plan-yield")):
+        rid = ilk.new_run(bid)
+        ilk.s.update("runs", rid, {"plan_id": f"{bid}.{slug}"}, actor="test", reason="bind")
+        assert Driver(ilk.s, rid).run() == ended
+    (rp,) = repair_plans(ilk, bid)
+    assert [p["id"] for p in runs.ready_plans(ilk.s, bid)] == [rp["id"]]   # the repair is next
+    assert ilk.drive_inprocess(bid) == "shipped"
+    rows = ilk.s.all("SELECT outcome FROM attempts WHERE step_id = ? ORDER BY created_at", f"{bid}.v.0")
+    assert [r["outcome"] for r in rows] == ["measured", "accepted"]        # one round, then green
+    assert not runs.counts_as_restart("plan-yield")

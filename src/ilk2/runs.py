@@ -14,7 +14,8 @@ from . import lease, procs
 from .store import Store
 
 NOT_A_RESTART = {"shipped", "parked", "drained", "cancelled", "quota", "api", "waiting-lease",
-                 "plan-done", "plan-blocked"}  # a lane run ends when its plan does
+                 "plan-done", "plan-blocked", "plan-yield"}  # a lane run ends when its plan does,
+                                                           # or yields to repairs (§2.5.7)
 
 
 def counts_as_restart(reason: str | None) -> bool:
