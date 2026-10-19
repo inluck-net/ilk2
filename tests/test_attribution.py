@@ -354,3 +354,35 @@ def test_repair_rounds_are_capped_per_verification_step(ilk, monkeypatch):
         {"slug": "v", "verification": True, "depends_on": ["p"], "steps": [step("verify", BOTH)]}]})
     assert ilk.drive_inprocess(bid).startswith("blocked")
     assert ilk.s.one("SELECT 1 FROM needs_human WHERE reason = 'repair-rounds' AND batch_id = ?", bid)
+
+
+# -- docs/09 V2 mapping: the edge is a lane merge, not a step's accepted commit ------------------
+
+def test_a_failure_first_seen_at_a_lane_merge_is_attributed_to_the_plan_it_merged(ilk):
+    # p1 breaks b.py under the CALC gate only, so its own gates and its merge re-gate stay green.
+    # Its break reaches the batch head only at p1's lane merge, and p2's BOTH gate is what finds
+    # it. Without the merge mapping that reads `foreign`, no repair opens, and the batch ships
+    # with the regression unexplained (docs/09 V2, trial #3).
+    from ilk2.driver import Driver
+    setup(ilk, max_lanes=2, concurrency_limit=2)
+    ilk.script([BREAK], [note(1)], [FIX])
+    bid = ilk.submit({"plans": [
+        {"slug": "p1", "steps": [step("break b")]},                       # CALC only
+        {"slug": "p2", "depends_on": ["p1"], "steps": [step("p2 declares test_b", BOTH)]}]})
+    rid = ilk.new_run(bid)
+    ilk.s.update("runs", rid, {"plan_id": f"{bid}.p1"}, actor="test", reason="bind")
+    assert Driver(ilk.s, rid).run() == "plan-done"                         # the only lane
+    assert ilk.drive_inprocess(bid) == "shipped"                          # p2, then the repair
+    merged = [e["payload"]["head"] for e in ilk.s.events_since(0)
+              if e["kind"] == "lane.merged" and e["payload"]["plan"] == "p1"]
+    p1 = ilk.s.get("plans", f"{bid}.p1")
+    assert merged and p1["merge_commit"] == merged[0]                     # durable, with `shipped`
+    att = {tid: a for gr in ilk.s.all("SELECT details FROM gate_results ORDER BY id")
+           for tid, a in json.loads(gr["details"]).get("attribution", {}).items()}
+    assert att["tests/test_b.py::test_b"]["result"] == "attributed"
+    assert att["tests/test_b.py::test_b"]["step"] == f"{bid}.p1.0"
+    assert att["tests/test_b.py::test_b"]["plan_id"] == f"{bid}.p1"
+    rp = repair_plans(ilk, bid)
+    assert len(rp) == 1 and rp[0]["repair_of_step_id"] == f"{bid}.p1.0"
+    b = ilk.s.get("batches", bid)
+    assert ilk.git(b["execution_root"], "show", f"{b['branch']}:b.py") == "B = 1"

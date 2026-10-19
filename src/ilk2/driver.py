@@ -288,11 +288,31 @@ class Driver:
             if repair:
                 self.add_merge_repair(*repair)
             head = gitops.branch_head(root, branch)
+            # The merge that brought this lane in, written in the same transaction as `shipped`:
+            # `lane.merged` alone is only an event after that transition, so a crash between the
+            # two lost the mapping (docs/09 V2). NULL when the merge never landed (a conflict
+            # aborted above): the pre-merge head did not bring the plan in.
             self.s.transition("plans", self.plan_id, "shipped", actor="driver",
-                              reason="lane merged" if repair is None else f"lane merged; repair: {repair[0]}")
+                              reason="lane merged" if repair is None else f"lane merged; repair: {repair[0]}",
+                              fields={"merge_commit": self.lane_merge_commit(lane_head)})
             lease.set_accepted_head(self.s, str(root), head)
             self.event("lane.merged", plan=slug, head=head, repair=repair[0] if repair else None)
         gitops.remove_worktree(self.repo, self.root)
+
+    def lane_merge_commit(self, lane_head: str) -> str | None:
+        """The first-parent commit whose second parent is the lane head: the merge that brought
+        the lane into the batch branch. Found from the current branch head, because on the
+        re-gate-only path that head may already be a later plan's merge. None when no such merge
+        landed (a conflict aborted it)."""
+        tip = gitops.branch_head(self.batch_root, self.batch_branch)
+        if not tip or not lane_head:
+            return None
+        for line in gitops.git(self.batch_root, "rev-list", "--first-parent", "--parents", tip,
+                               check=False).splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == lane_head:
+                return parts[0]
+        return None
 
     def conflict_brief(self, files: list[str], parent: str, lane_head: str, out: str) -> str:
         return (f"Plan {self.plan['slug']} was built in its own lane (branch {self.branch}) from an "

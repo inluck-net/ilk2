@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES batches(id), slug TEXT NOT NULL,
   ord INTEGER NOT NULL, depends_on TEXT NOT NULL, status TEXT NOT NULL,
   blocked_reason TEXT, verification INTEGER NOT NULL DEFAULT 0, repair_of_step_id TEXT,
+  merge_commit TEXT,
   version INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS steps (
   id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id),
@@ -247,6 +248,9 @@ class Store:
             c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')")
             # Added columns (ALTER TABLE only adds; old releases ignore them).
             for table, col, decl in (("runs", "plan_id", "TEXT"),   # lanes (docs/06, Oct 14)
+                                     # the lane merge that brought the plan in, written with its
+                                     # `shipped` transition (docs/09 V2; docs/02 §2.5.7)
+                                     ("plans", "merge_commit", "TEXT"),
                                      # the landing lock's owner (docs/08 B1)
                                      ("rsi_landings", "merge_pid", "INTEGER"),
                                      ("rsi_landings", "merge_proc_start", "TEXT"),
