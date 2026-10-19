@@ -142,6 +142,46 @@ New planning rules. The planner fails its own QC on each:
 
 **Built beside the old planner.** The new skills are installed under temporary names (for example `/ilk2-plan`) next to the old ones. Codex and Cursor get them too. They are smoke-tested on both hosts and trialled on gh-resolve (§7.6). Only then are they switched in (§7.4.5).
 
+### 7.4.2b A headless planner for consumers: `ilk2 plan-issue` (built Oct 19; Chad: build first, review the code)
+
+**Asked by gh-resolve-65, Oct 19**, relaying Chad: move gh-resolve's planning onto ilk2. Today gh-resolve plans an admitted issue with its own template renderer (`planner.route: template`, the default). Its opt-in route `ilk-plan` calls V1's `autoplan.py plan-issue` (ilk-skills `skills/ilk-self-improve/scripts/autoplan.py:1239-1290`). That route starts a Claude session following `/ilk-plan --yes` under a V1 manager home, then lints, preflights and queues the MASTER. It is off on both hosts and is being retired with V1.
+
+**What ilk2 adds: `ilk2 plan-issue --input <issue.json> --outcome <outcome.json>`** (probed with `--help`). It keeps the V1 contract (gh-resolve `tools/gh_resolve/planner.py:1-30`), so gh-resolve's route changes only its argv:
+
+- **Input:** `issue{repo,number,title,body,url}`, `project_root`, `base_branch`, `scope_paths`, `write_targets`, `local_checks`, `run_id`, `master_frontmatter` (as V1). Additions, mirroring what gh-resolve's own submit passes (gh-resolve `tools/gh_resolve/ilk2_client.py`, about `:300-340`):
+  - `project`: the ilk2 project id; if absent, the project whose repo is `project_root`'s repository;
+  - `execution_root`: the issue's worktree (I3);
+  - `base`: optional, absent when the batch reuses the branch head;
+  - `branch`;
+  - `consumer_ref`;
+  - `deny_paths`: the plan writes nothing under one, and the check refuses a step that declares such a write.
+
+  `priority` is not needed: gh-resolve sets it at submit.
+- **What it does:**
+  1. **Validate:** it validates the input, and writes nothing until the input is valid.
+  2. **Plan:** it starts one planning session through ilk2's own worker path and template (as `rsi.plan` does, `src/ilk2/rsi.py:402-420`; never a V1 home). The session is told to follow `commands/ilk2-plan.md` as `/ilk2-plan --draft`. Its drafts go under `~/.ilk2/plans/<project>/<batch-id>/`, where the batch id is `issue-<number>-<run_id>`. It never asks a question; an unplannable issue ends with a stated reason. It writes only in that drafts dir, and it records the scope from the issue (`source: <repo>#<number>`, `source_tickets: 1`, and its count of AC groups) before drafting. A consumer project with no `verify_command`, like kira-live, gets no verification sub-plan; `/ilk2-plan`'s own rule already says so, and D-592 removed the one gh-resolve's renderer added.
+  3. **Check, and stop:** ilk2, not the session, runs `ilk2 submit --check` with the input's project, base, branch and deny paths. **It does not submit.** gh-resolve submits the checked MASTER itself (gh-resolve-65, Oct 19). Its submit is the one place that stamps its ledger row with the batch, passes the run's deny paths and owns the dispatch slot, and two submit writers would split that.
+- **Outcome** (written atomically on every path): `outcome` (`drafted-checked` / `drafted` / `failed`), `problems`, `master_path`, `plans_dir`, `planner_log`, and new:
+  - `meta`: `{"scope": {"source", "tickets", "ac_groups"}}`, ready for gh-resolve's `--meta`;
+  - `source_ac_groups`: at top level, for gh-resolve's ledger;
+  - `warnings`: the plan-shape and gate-path warnings.
+- **Exit codes:**
+  - 0, `drafted-checked`: checked, with no refusal and no warning, ready to submit;
+  - 3, `drafted`: the files are on disk, but a check refused them, or a warning stands (`/ilk2-plan`'s QC treats warnings as failures);
+  - 1, `failed`.
+
+  It never waits for a human; gh-resolve falls back to its template on anything but 0.
+
+**Judgment calls:**
+- **The session cap is `PLAN_CAP_S` (30 min)**, as for RSI planning. Wrong if issue plans routinely need longer; the log shows it.
+- **Warnings give `drafted`, not `queued`.** A consumer's unattended path should not submit a plan the planner's own QC rejects. Wrong if `drafted` becomes the common outcome for warnings that later prove harmless; then those warnings are reviewed, not the rule.
+
+**Where it lives:** ilk2 core, next to `rsi.plan`, because it needs ilk2's worker template and its submit path. The planner prompt stays in ilk-skills (`commands/ilk2-plan.md`), read from the installed planner family. Today that is the clone; after the switch (§7.4.5), a release location.
+
+**Verification:**
+- tests with the stub worker: valid input to `drafted-checked` with `meta.scope`, and no batch created; a session that writes no MASTER to `failed`; a refused check (including a write under a deny path) to `drafted`; a stubbed warning to `drafted`; bad input to `failed`, with nothing spawned;
+- a live run on one real kira issue, in `--check` form only (no submit), before gh-resolve's fleet-b trial.
+
 ### 7.4.3 ilk-feedback on ilk2, and an improvement intake (ilk-skills and ilk2)
 
 ilk-feedback today reads V1's run files: `last-launch.json`, the `.ilk-loop.log` summary and per-iteration logs (`ilk-feedback/SKILL.md:55-90`), and the run's `last-exit.json` (SKILL.md:95-105). The rebuilt version:

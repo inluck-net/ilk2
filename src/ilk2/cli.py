@@ -223,6 +223,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="the repo is V1's: make V1 skip it and claim its queued masters (docs/04 §4.3)")
     psub.add_parser("take-over").add_argument("project_id")
     psub.add_parser("show", help="a project's settings (env values redacted)").add_argument("project_id")
+    pi = sub.add_parser("plan-issue", help="headless /ilk2-plan for one consumer issue (docs/07 §7.4.2b): "
+                        "plans and checks; never submits. Exit 0 drafted-checked, 3 drafted, 1 failed")
+    pi.add_argument("--input", required=True, help="the issue JSON (gh-resolve's planner contract)")
+    pi.add_argument("--outcome", required=True, help="where to write the outcome JSON")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
     rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log", "resolve"])
     rs.add_argument("target", nargs="?", help="resolve: the batch whose held landing to resolve")
@@ -566,6 +570,11 @@ def main(argv: list[str] | None = None) -> int:
                 batches.resume(s, a.batch)
                 out["restarted"] = True
             _out(out, True)
+        elif a.cmd == "plan-issue":
+            from . import plan_issue
+            code = plan_issue.run(s, Path(a.input), Path(a.outcome))
+            _out(json.loads(Path(a.outcome).read_text()), True)
+            return code
         elif a.cmd == "rsi":
             from . import rsi
             repo = Path(a.repo) if a.repo else None
