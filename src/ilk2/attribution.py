@@ -9,7 +9,12 @@ recent clean-to-failing edge (A9). Both sides are re-probed twice more; any disa
 
 Results: attributed | base (still failing at the batch base: judged against the current
 step) | current (the parent fails differently: this step changed it) | spec-changed | flaky |
-budget | foreign (the failing side is not an ilk2 step).
+budget | foreign (the failing side is not an ilk2 step or lane merge).
+
+The edge's failing side is usually a step's accepted commit. When it is a lane-merge commit it
+belongs to the plan that merge brought in (docs/09 V2): the failure reached the batch head only
+at the merge, so the plan's own narrow gates never saw it. That attribution carries `plan_id`
+and anchors on the plan's last step, so `repair_of_step_id` stays valid.
 """
 
 from __future__ import annotations
@@ -32,12 +37,13 @@ class Attribution:
     result: str
     edge: tuple[str, str] | None = None    # (last clean commit, first failing commit)
     step_id: str | None = None
+    plan_id: str | None = None             # set when the edge is a lane merge, not a step's commit
     probes: int = 0                        # probe runs this call counted against the budget
     recurring: bool = False                # its repair already shipped and it failed again
 
     def to_dict(self) -> dict:
         return {"result": self.result, "edge": list(self.edge) if self.edge else None,
-                "step": self.step_id, "probes": self.probes}
+                "step": self.step_id, "plan_id": self.plan_id, "probes": self.probes}
 
 
 class Attributor:
@@ -91,7 +97,20 @@ class Attributor:
             a.edge = (older, failing)
             step = self.s.one("SELECT id FROM steps WHERE batch_id = ? AND accepted_commit = ?",
                               self.d.batch_id, failing)
-            a.result, a.step_id = ("attributed", step["id"]) if step else ("foreign", None)
+            if step:
+                a.result, a.step_id = "attributed", step["id"]
+                return a
+            # The failing side may be a lane-merge commit rather than a step: the failure reached
+            # the batch head only at that merge (docs/09 V2). It belongs to the plan the merge
+            # brought in, anchored on that plan's last step so `repair_of_step_id` stays valid.
+            plan = self.s.one("SELECT id FROM plans WHERE batch_id = ? AND merge_commit = ?",
+                              self.d.batch_id, failing)
+            last = self.s.one("SELECT id FROM steps WHERE plan_id = ? ORDER BY idx DESC LIMIT 1",
+                              plan["id"]) if plan else None
+            if plan and last:
+                a.result, a.step_id, a.plan_id = "attributed", last["id"], plan["id"]
+            else:
+                a.result, a.step_id = "foreign", None
             return a
         return a  # still failing at the base: a base failure whose fingerprint changed
 
@@ -140,13 +159,23 @@ class Attributor:
 
 def repair_brief(s, root, a: Attribution, gate: Gate, message: str) -> str:
     clean, failing = a.edge
-    step = s.get("steps", a.step_id)
     diff = gitops.git(root, "diff", f"{clean}..{failing}", check=False)[:30_000]
-    return (f"An earlier accepted step broke a test, and later steps found it. Repair it.\n\n"
-            f"- Failing test: {a.test_id}\n- Failure: {message}\n"
-            f"- Introduced by step {a.step_id} ({step['title']!r}): the test passes at "
-            f"{clean[:12]} and fails at {failing[:12]}.\n"
-            f"- Gate: {' '.join(gate.command)}\n\n"
+    if a.plan_id:
+        # A lane-merge edge: no step introduced it on the batch branch, so do not say one did.
+        slug = s.get("plans", a.plan_id)["slug"]
+        how = (f"Plan {slug}'s lane merge brought in a regression, and later steps found it. "
+               f"Repair it.\n\n")
+        line = (f"- Came in with plan {slug}'s lane merge ({failing[:12]}): the test passes at "
+                f"{clean[:12]} and fails at {failing[:12]}.\n")
+    else:
+        step = s.get("steps", a.step_id)
+        how = "An earlier accepted step broke a test, and later steps found it. Repair it.\n\n"
+        line = (f"- Introduced by step {a.step_id} ({step['title']!r}): the test passes at "
+                f"{clean[:12]} and fails at {failing[:12]}.\n")
+    return (how
+            + f"- Failing test: {a.test_id}\n- Failure: {message}\n"
+            + line
+            + f"- Gate: {' '.join(gate.command)}\n\n"
             "Fix the regression at the branch head without undoing the later steps' work. "
             "Run only that test while you work.\n\n"
             f"The change that introduced it:\n```diff\n{diff}\n```\n")
