@@ -164,7 +164,7 @@ New planning rules. The planner fails its own QC on each:
 - **Outcome** (written atomically on every path): `outcome` (`drafted-checked` / `drafted` / `failed`), `problems`, `master_path`, `plans_dir`, `planner_log`, and new:
   - `meta`: `{"scope": {"source", "tickets", "ac_groups"}}`, ready for gh-resolve's `--meta`;
   - `source_ac_groups`: at top level, for gh-resolve's ledger;
-  - `warnings`: the plan-shape and gate-path warnings.
+  - `warnings`: the plan-shape and gate-path warnings, and (Oct 20) every WARN or ERROR line of ilk2's own run of `plan_check.py` on the drafts (`plan-check`), with the project's `path_prelude`. A checker that cannot run is a `plan-check-failed` warning, never a pass. planprobe2's session saw a WARN three times, and its outcome had reported `warnings: []`.
   - `session` (added Oct 19 after the #8751 probe): how the planning session ended (`done`, `timeout`, `crashed`). A session that did not end `done` fails with that named first, the drafts it left, and `master_path` when one MASTER is on disk. The drafts dir is open to both the sandbox and the worker hook (`WorkerConfig.write_dirs`); the probe lost about 400 s to a hook that refused it.
 - **Exit codes:**
   - 0, `drafted-checked`: checked, with no refusal and no warning, ready to submit;
@@ -174,7 +174,7 @@ New planning rules. The planner fails its own QC on each:
   It never waits for a human; gh-resolve falls back to its template on anything but 0.
 
 **Judgment calls:**
-- **The session cap is `PLAN_CAP_S` (30 min)**, as for RSI planning. Wrong if issue plans routinely need longer; the log shows it.
+- **The session cap is `PLAN_CAP_S` (30 min)**, as for RSI planning. Wrong if issue plans routinely need longer; the log shows it. **Evidence, Oct 20:** both #8751 probes ended within 40 s of it. Of planprobe2's 1764 s, tools took 12 s, the first draft came at 1341 s, and the QC loop took the rest. The brief now states the cap and asks for the drafts by two thirds of it (Chad's rule: fix a wait by removing work, never raise the timeout). Measure again after that.
 - **Warnings give `drafted`, not `queued`.** A consumer's unattended path should not submit a plan the planner's own QC rejects. Wrong if `drafted` becomes the common outcome for warnings that later prove harmless; then those warnings are reviewed, not the rule.
 
 **Where it lives:** ilk2 core, next to `rsi.plan`, because it needs ilk2's worker template and its submit path. The planner prompt stays in ilk-skills (`commands/ilk2-plan.md`), read from the installed planner family. Today that is the clone; after the switch (§7.4.5), a release location.

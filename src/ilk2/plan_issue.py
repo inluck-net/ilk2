@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 from . import clock, paths
@@ -20,6 +22,34 @@ from . import clock, paths
 EXIT = {"drafted-checked": 0, "drafted": 3, "failed": 1}
 ISSUE_FIELDS = ("repo", "number", "title", "body")
 UNPLANNABLE = "UNPLANNABLE.txt"
+
+
+def plan_check_script() -> Path:
+    """plan_check.py beside the planner command (ilk-skills `skills/ilk2-plan/scripts/`)."""
+    env = os.environ.get("ILK2_PLAN_CHECK")
+    return Path(env) if env else (planner_command().parent.parent / "skills" / "ilk2-plan" /
+                                  "scripts" / "plan_check.py")
+
+
+def run_plan_check(master: Path, subs: list[Path], wt: Path, prelude: list[str]) -> list[dict]:
+    """ilk2's own run of the planner's QC (step 7g) on the drafts: each WARN or ERROR line is a
+    warning. The session runs it too, but what it saw reached nobody: planprobe2 (#8751, Oct 20)
+    got the same WARN three times and its outcome said warnings: []."""
+    script = plan_check_script()
+    if not script.exists():
+        return [{"kind": "plan-check-failed", "detail": f"no plan_check at {script}"}]
+    cmd = [sys.executable, "-I", str(script), "--master", str(master), "--git-cwd", str(wt),
+           "--project-root", str(wt), "--path-prelude", ":".join(prelude), *map(str, subs)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return [{"kind": "plan-check-failed", "detail": "plan_check ran past 300 s"}]
+    found = [{"kind": "plan-check", "detail": line.strip()[:500]} for line in p.stdout.splitlines()
+             if line.startswith(("WARN:", "ERROR:"))]
+    if p.returncode not in (0, 1) or (p.returncode == 1 and not found):
+        found.append({"kind": "plan-check-failed",
+                      "detail": f"exit {p.returncode}: {(p.stderr or p.stdout).strip()[-300:]}"})
+    return found
 
 
 def planner_command() -> Path:
@@ -69,6 +99,11 @@ Issue body (verbatim):
   (`plan_check.py`) from this checkout, with `--path-prelude {prelude}`: the project's PATH, so
   its gate tools resolve as the driver will run them.
 - If the issue cannot be planned, write the reason to `{drafts}/{unplannable}` and stop.
+
+Time: this session is killed at {cap_min} minutes, and a session cut at the cap delivers no plan.
+Write the MASTER and its sub-plans by minute {write_by}, then use the rest for 7g: a plan grounded
+in the code you have read beats a complete survey of the code. ilk2 runs `plan_check.py` again
+after you, and any WARN it reports holds the plan back.
 """
 
 
@@ -158,7 +193,9 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
         worker.prepare(wcfg, files, wt, [])
         out["planner_log"] = str(files.logs)
         verify = cfg.verify_command
+        cap = cap_s or rsi.PLAN_CAP_S
         prompt = BRIEF.format(
+            cap_min=round(cap / 60), write_by=round(cap * 2 / 3 / 60),
             command=planner_command(), repo=issue["repo"], number=issue["number"],
             title=issue["title"], url=issue.get("url", ""), body=issue["body"], project=project,
             batch_id=batch_id, drafts=drafts, base_branch=raw["base_branch"],
@@ -173,7 +210,6 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
             prelude=shlex.quote(":".join(cfg.path_prelude or [])))
         b = bounds.load()
         session = worker.dispatch(wcfg, files, wt, prompt)
-        cap = cap_s or rsi.PLAN_CAP_S
         ended = session.wait(cap, b.term_grace, b.kill_grace)
         out["session"] = ended
         changed = gitops.changed_paths(wt)
@@ -215,8 +251,10 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
             return finish("drafted", *e.problems)
         bb = batches.base_behind(repo, base_sha, proj["default_branch"])
         warn = batches.base_warning(bb)
+        subs = sorted(p for p in drafts.glob("*.md") if not p.name.startswith("MASTER-"))
         out["warnings"] = ([warn] if warn else []) + batches.plan_warnings(spec) + \
-            batches.gate_path_warnings(spec, repo, base_sha)
+            batches.gate_path_warnings(spec, repo, base_sha) + \
+            run_plan_check(master, subs, wt, cfg.path_prelude or [])
         if out["warnings"]:
             return finish("drafted", "warnings stand (the planner's QC treats them as failures)")
         return finish("drafted-checked")

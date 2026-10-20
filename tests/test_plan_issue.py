@@ -4,7 +4,23 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ilk2 import cli, paths, plan_issue
+
+
+def fake_plan_check(tmp_path, out=""):
+    """A plan_check stand-in: prints `out`, records its argv, exits 1 if it printed a finding."""
+    f = tmp_path / "plan_check.py"
+    f.write_text("import json, sys\n"
+                 f"open({str(tmp_path / 'pc-argv.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+                 f"print({out!r})\nsys.exit(1 if {bool(out)!r} else 0)\n")
+    return f
+
+
+@pytest.fixture(autouse=True)
+def clean_plan_check(tmp_path, monkeypatch):
+    monkeypatch.setenv("ILK2_PLAN_CHECK", str(fake_plan_check(tmp_path)))
 
 ISSUE = {"repo": "keyreply/kira-cloudflare", "number": 7, "title": "add works",
          "body": "add(1, 2) is 3, and add(0, 0) is 0", "url": "https://x/7"}
@@ -64,6 +80,11 @@ def test_a_clean_plan_is_drafted_and_checked_and_never_submitted(ilk, tmp_path):
     assert "Do not run the project's tests" in prompt and "`$TMPDIR`" in prompt
     from conftest import PY_BIN                                           # the project's PATH
     assert f"--path-prelude {PY_BIN}:/usr/bin:/bin" in prompt
+    assert "killed at 30 minutes" in prompt and "by minute 20" in prompt
+    argv = json.loads((tmp_path / "pc-argv.json").read_text())           # ilk2 ran plan_check too
+    assert argv[argv.index("--path-prelude") + 1] == f"{PY_BIN}:/usr/bin:/bin"
+    assert argv[argv.index("--master") + 1] == out["master_path"]
+    assert argv[-1].endswith("issue-7-r1-a.md")
 
 
 def test_bad_input_fails_and_starts_nothing(ilk, tmp_path):
@@ -124,3 +145,21 @@ def test_a_session_cut_at_the_cap_says_so_and_points_at_its_drafts(ilk, tmp_path
     assert "MASTER-issue-7-r1-execution-plan.md" in out["problems"][0]
     assert "changed the checkout" in out["problems"][1]
     assert out["master_path"].endswith("MASTER-issue-7-r1-execution-plan.md")
+
+
+def test_a_plan_check_finding_reaches_the_outcome_and_a_missing_check_is_not_a_pass(
+        ilk, tmp_path, monkeypatch):
+    # planprobe2 (#8751, Oct 20): the session saw a plan_check WARN three times, and the outcome
+    # said drafted-checked with warnings: [].
+    ilk.make_repo()
+    ilk.project()
+    warn = "WARN: issue-7-r1-a: sub-plan signals a network tool"
+    monkeypatch.setenv("ILK2_PLAN_CHECK", str(fake_plan_check(tmp_path, warn)))
+    ilk.script(plan_files())
+    code, out = run(ilk, tmp_path)
+    assert (code, out["outcome"]) == (3, "drafted")
+    assert out["warnings"] == [{"kind": "plan-check", "detail": warn}]
+    monkeypatch.setenv("ILK2_PLAN_CHECK", str(tmp_path / "missing.py"))
+    ilk.script(plan_files())
+    code, out = run(ilk, tmp_path)
+    assert (code, [w["kind"] for w in out["warnings"]]) == (3, ["plan-check-failed"])
