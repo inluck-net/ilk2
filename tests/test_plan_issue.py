@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -101,6 +103,7 @@ def test_no_master_or_an_unplannable_issue_fails(ilk, tmp_path):
     ilk.script([{"write": str(drafts() / "notes.txt"), "text": "thinking"}])
     code, out = run(ilk, tmp_path)
     assert code == 1 and "0 MASTER files" in out["problems"][0]
+    shutil.rmtree(drafts())
     ilk.script([{"write": str(drafts() / "UNPLANNABLE.txt"), "text": "the issue has no acceptance"}])
     code, out = run(ilk, tmp_path)
     assert code == 1 and out["problems"] == ["unplannable: the issue has no acceptance"]
@@ -112,6 +115,7 @@ def test_a_refused_check_or_a_standing_warning_is_only_drafted(ilk, tmp_path):
     ilk.script(plan_files(check="no-such-tool x"))                          # refused at the check
     code, out = run(ilk, tmp_path)
     assert (code, out["outcome"]) == (3, "drafted") and out["problems"]
+    shutil.rmtree(drafts())
     ilk.script(plan_files(check="python -m pytest -q tests/test_calc.py tests/test_74a.py"))
     code, out = run(ilk, tmp_path)                                          # a gate-path warning
     assert (code, out["outcome"]) == (3, "drafted")
@@ -159,7 +163,23 @@ def test_a_plan_check_finding_reaches_the_outcome_and_a_missing_check_is_not_a_p
     code, out = run(ilk, tmp_path)
     assert (code, out["outcome"]) == (3, "drafted")
     assert out["warnings"] == [{"kind": "plan-check", "detail": warn}]
+    shutil.rmtree(drafts())
     monkeypatch.setenv("ILK2_PLAN_CHECK", str(tmp_path / "missing.py"))
     ilk.script(plan_files())
     code, out = run(ilk, tmp_path)
     assert (code, [w["kind"] for w in out["warnings"]]) == (3, ["plan-check-failed"])
+
+
+def test_a_reused_run_id_cannot_read_an_earlier_plan(ilk, tmp_path):
+    ilk.make_repo()
+    ilk.project()
+    old = plan_files()
+    for item in old:
+        path = Path(item["write"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item["text"])
+    code, out = run(ilk, tmp_path)
+    assert (code, out["outcome"]) == (1, "failed")
+    assert "drafts already exist" in out["problems"][0]
+    assert ilk.stub_calls() == 0
+    assert all(Path(item["write"]).exists() for item in old)

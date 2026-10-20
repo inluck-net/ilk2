@@ -179,8 +179,13 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
     issue = raw["issue"]
     batch_id = f"issue-{issue['number']}-{raw['run_id']}"
     drafts = paths.home() / "plans" / project / batch_id
-    drafts.mkdir(parents=True, exist_ok=True)
     out["plans_dir"] = str(drafts)
+    try:
+        # An old MASTER must never become the result of a new session that wrote nothing.
+        # mkdir is exclusive so simultaneous calls with the same run_id cannot share drafts.
+        drafts.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return finish("failed", f"drafts already exist for {batch_id}; use a new run_id")
     work = paths.data() / "plan-issue" / f"{batch_id}-{int(clock.wall())}"
     wt = work / "wt"
     gitops.add_worktree(repo, wt, base_sha)
