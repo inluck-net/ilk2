@@ -325,7 +325,7 @@ The feature is split in two (Codex review 3, finding 6).
 
 ## 2.7 Releases and upgrades
 
-- **A release** is `~/.ilk2/releases/<version>/`: the code, a uv-built virtualenv and a manifest with hashes. `~/.ilk2/current` points at one release. launchd starts the supervisor and the health job from `current`.
+- **A release** is `~/.ilk2/releases/<version>/`: the code, a uv-built virtualenv and a manifest with hashes. `~/.ilk2/current` points at one release. **Version** (Chad, Oct 20): `0.3.57+g5f58fcdd`. People read `0.3.57`; tools read the commit after `+g`. The patch number is `__version__`'s patch plus the commits since the commit that last set `__version__`. Git history alone decides it, so both hosts and RSI's unattended releases name a commit alike. A hand bump (`0.4.0`) restarts the count. The panel and `ilk2 --version` show the readable number; releases before Oct 20 keep their `0.3.0+g…` names. Judgment call: a commit count, not hand-chosen semantic bumps, because most releases are cut unattended; wrong if Chad needs the number to say feature versus fix, which a hand minor bump then covers. launchd starts the supervisor and the health job from `current`.
 - **Upgrades drain only when the supervisor's code changed** (Oct 14). At start the supervisor records a hash of every ilk2 module it loaded (`meta.supervisor_code`). `ilk2 release upgrade` swaps `current` atomically, then compares those modules with the new release:
 
 ```mermaid

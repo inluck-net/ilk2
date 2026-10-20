@@ -1,7 +1,8 @@
 """Releases, install and upgrade (docs/02 §2.7).
 
 - A release is ~/.ilk2/releases/<version>/: a uv-built virtualenv with the ilk2 wheel, and a
-  manifest with hashes. ~/.ilk2/current points at one release (an atomic symlink swap).
+  manifest with hashes. <version> is `0.3.57+g5f58fcdd`: a number people read, and the commit
+  after `+g` that tools read (push, the RSI push check). See version_of. ~/.ilk2/current points at one release (an atomic symlink swap).
 - launchd runs the supervisor (KeepAlive) and the health job (every 60 s) from `current`.
 - Upgrade drains: the supervisor stops admitting, drivers stop at step boundaries, and when
   no run is left (or the drain bound passes) the supervisor exits; launchd restarts it from
@@ -14,6 +15,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,6 +40,37 @@ def sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def version_of(repo: Path, sha: str) -> str:
+    """The release version for commit `sha` (Chad, Oct 20: one number a person can read, kept
+    for every release): `__version__` as of that commit, its patch raised by the commits since
+    the commit that last set `__version__`, then `+g<sha>`. Only git history decides it, so both
+    hosts, and RSI's unattended releases, name a commit alike. Setting `__version__` by hand
+    (0.4.0) restarts the count."""
+    init = "src/ilk2/__init__.py"
+    text = subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{init}"], capture_output=True,
+                          text=True, check=True).stdout
+    major, minor, patch = re.search(r'__version__ = "(\d+)\.(\d+)\.(\d+)"', text).groups()
+    anchor = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%H", "-G", "^__version__",
+                             sha, "--", init], capture_output=True, text=True, check=True).stdout.strip()
+    n = int(subprocess.run(["git", "-C", str(repo), "rev-list", "--count", f"{anchor}..{sha}"],
+                           capture_output=True, text=True, check=True).stdout.strip()) if anchor else 0
+    return f"{major}.{minor}.{int(patch) + n}+g{sha}"
+
+
+def human(version: str | None) -> str:
+    """The part of a release version a person reads: 0.3.57+g5f58fcdd -> 0.3.57."""
+    return (version or "?").split("+", 1)[0]
+
+
+def running_version() -> str:
+    """This process's release version, from its release's manifest (the venv lives in
+    releases/<version>/venv); the package version when not run from a release."""
+    try:
+        return json.loads((Path(os.sys.prefix).parent / "manifest.json").read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        return __version__
+
+
 def build(repo: Path, version: str | None = None) -> Path:
     sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=8", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
@@ -45,7 +78,7 @@ def build(repo: Path, version: str | None = None) -> Path:
                            capture_output=True, text=True).stdout.strip()
     if dirty:
         raise RuntimeError("src/ has uncommitted changes; a release is built from a commit")
-    version = version or f"{__version__}+g{sha}"
+    version = version or version_of(repo, sha)
     dest = releases() / version
     if dest.exists():
         return dest

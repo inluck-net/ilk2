@@ -9,7 +9,6 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from ilk2 import __version__
 
 API_VERSION = 1
 
@@ -190,7 +189,11 @@ def shadow_problem(clone: str, of: str) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ilk2")
-    ap.add_argument("--version", action="version", version=f"ilk2 {__version__}")
+    from ilk2 import release as _release
+    _v = _release.running_version()
+    _h = _release.human(_v)
+    ap.add_argument("--version", action="version",
+                    version=f"ilk2 {_h}" + (f" ({_v})" if _v != _h else ""))
     ap.add_argument("--api-version", type=int, default=API_VERSION,
                     help="the JSON contract version the caller expects (B2); only 1 exists")
     sub = ap.add_subparsers(dest="cmd")

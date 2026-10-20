@@ -253,6 +253,7 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
             out.append(f"--{mark} {_trunc(st_['title'], 70)}{commit}")
 
     if "rsi" in st:
+        from . import release
         out += ["---", "RSI"]
         landing = rsi_st.get("landing")
         if landing:
@@ -270,10 +271,10 @@ def render(st: dict, tick_age: float | None, stale: float) -> str:
                 stage = f"verified, {h}h until the rezmac push"
             else:
                 stage = st_ or "?"
-            out.append(f"landing now: {stage} · {landing.get('version') or '?'}  "
+            out.append(f"landing now: {stage} · {release.human(landing.get('version'))}  "
                        f"{landing.get('batch_id')}  {landing.get('title') or '?'}")
         for r in (rsi_st.get("recent") or [])[:5]:
-            out.append(f"{r.get('version') or '?'}  {r.get('title') or '?'}  {r.get('status')}")
+            out.append(f"{release.human(r.get('version'))}  {r.get('title') or '?'}  {r.get('status')}")
             repo, commit = rsi_st.get("repo"), r.get("merge_commit")
             if repo and commit:
                 cmd = f"git -C {repo} show --stat {commit}"

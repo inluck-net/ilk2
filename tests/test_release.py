@@ -56,6 +56,10 @@ def test_build_and_install_without_launchd(ilk, monkeypatch, tmp_path):
     # the console script too: its shebang named the temporary build dir (gh-resolve-e1, Oct 13)
     cli = subprocess.run([str(rel / "venv" / "bin" / "ilk2"), "--version"], capture_output=True, text=True)
     assert cli.returncode == 0 and cli.stdout.strip().startswith("ilk2 "), cli.stderr
+    head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short=8", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    assert rel.name == release.version_of(REPO, head)                      # 0.3.N+g<head>
+    assert cli.stdout.strip() == f"ilk2 {release.human(rel.name)} ({rel.name})"
     info = release.install(rel.name, load=False)
     assert os.path.realpath(release.current()) == str(rel)
     sup = plistlib.loads((tmp_path / "agents" / f"{release.SUPERVISOR}.plist").read_bytes())
@@ -179,3 +183,33 @@ def test_the_supervisor_entry_loads_no_driver_worker_gates_or_cli():
     loaded = set(out.strip().split(","))
     assert "ilk2.supervisor" in loaded and "ilk2.runs" in loaded
     assert not loaded & {"ilk2.cli", "ilk2.driver", "ilk2.worker", "ilk2.gates", "ilk2.attribution"}
+
+
+def test_a_release_version_is_a_number_people_read_plus_the_commit(tmp_path):
+    # Chad, Oct 20: every release read 0.3.0+g<hash>, so a person could not tell which was newer.
+    g = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    init = tmp_path / "src" / "ilk2" / "__init__.py"
+    init.parent.mkdir(parents=True)
+
+    def commit(msg, version=None):
+        if version:
+            init.write_text(f'"""ilk2."""\n\n__version__ = "{version}"\n')
+        (tmp_path / "log.txt").write_text(msg)
+        subprocess.run(g + ["add", "-A"], check=True)
+        subprocess.run(g + ["commit", "-q", "-m", msg], check=True)
+        return subprocess.run(g + ["rev-parse", "--short=8", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    commit("start", "0.2.0")
+    first = commit("set 0.3.0", "0.3.0")
+    assert release.version_of(tmp_path, first) == f"0.3.0+g{first}"
+    for i in range(2):
+        commit(f"work {i}")
+    third = commit("work 2")
+    assert release.version_of(tmp_path, third) == f"0.3.3+g{third}"
+    assert release.version_of(tmp_path, first) == f"0.3.0+g{first}"    # an old commit keeps its number
+    bumped = commit("0.4.0", "0.4.0")                                    # a hand bump restarts the count
+    assert release.version_of(tmp_path, bumped) == f"0.4.0+g{bumped}"
+    assert release.version_of(tmp_path, commit("more")).startswith("0.4.1+g")
+    assert release.human(f"0.3.3+g{third}") == "0.3.3" and release.human(None) == "?"

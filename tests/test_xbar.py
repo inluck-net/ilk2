@@ -176,6 +176,9 @@ def test_the_rsi_section_lists_recent_landings_with_a_git_show_copy():
     for i, sub in zip(range(6, 1, -1), subs):
         assert f"param2=" in sub and f"git -C /repo show --stat deadbee{i}" in sub
         assert "pbcopy" in sub and "terminal=false" in sub
+    st["rsi"]["recent"] = [{**recent[0], "version": "0.3.57+g5f58fcdd"}]      # a person reads 0.3.57
+    assert "0.3.57  fix 6  pushed" in xbar.render(st, tick_age=5, stale=180).splitlines()
+    st["rsi"]["recent"] = recent
     st["rsi"]["repo"] = None
     assert not [x for x in xbar.render(st, tick_age=5, stale=180).splitlines()
                 if x.startswith("--git -C")]
