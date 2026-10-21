@@ -20,8 +20,8 @@ from . import batches, bounds, clock, faults, gates, gitops, lease, paths, procs
 from .gates import vitest
 from .gates.env import pinned_env
 from .plans import Gate, v1_documents
-from .runs import (NOT_A_RESTART, Stop, counts_as_restart, fenced, has_unfinished_cancel,  # noqa: F401
-                   is_root_plan, lane_names, root_in_use_by_other)
+from .runs import (NOT_A_RESTART, Stop, counts_as_restart, fenced, free_root,  # noqa: F401
+                   has_unfinished_cancel, is_root_plan, lane_names, root_in_use_by_other)
 from .store import Conflict, Store, StoreBusy, dumps, new_id
 
 LOCKFILES = {"package-lock.json", "bun.lockb", "bun.lock", "yarn.lock", "pnpm-lock.yaml",
@@ -733,6 +733,7 @@ class Driver:
         self.s.transition("batches", self.batch_id, "shipped", actor="driver", reason="all plans shipped",
                           expect_from={"active"}, fields={"terminal_reason": "shipped"})
         lease.driver_release(self.s, str(self.batch_root), head)
+        free_root(self.s, self.batch_root, self.batch_id)
         self.cleanup_diag()
         self.event("batch.shipped", head=head)
 
@@ -1585,6 +1586,7 @@ class Driver:
         if row and row["holder"] == "driver" and not root_in_use_by_other(self.s, self.batch_id):
             lease.driver_release(self.s, str(self.batch_root),
                                  gitops.branch_head(self.batch_root, self.batch_branch))
+        free_root(self.s, self.batch_root, self.batch_id)
         self.s.clear_needs_human(self.batch_id)
         return True
 

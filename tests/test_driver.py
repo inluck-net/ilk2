@@ -1014,9 +1014,11 @@ def test_the_p6_consumer_sequence_end_to_end(ilk, tmp_path, capsys):
     assert b["status"] == "shipped" and b["meta"] == {"issue": 1, "run_id": "run-1"}
     root, head, gen = b["execution_root"], b["accepted_head"], b["root_lease"]["generation"]
     assert b["branch"] == "resolver-1" and b["root_lease"]["holder"] == "released"
+    assert checked_out(ilk, root) is None                       # shipped: the branch is free
     rc, lk = call("lease", "acquire", "--root", root, "--generation", str(gen),
                   "--expected-head", head, "--owner", "gh-resolve", "--length", "600")
     assert rc == 0
+    assert checked_out(ilk, root) == "refs/heads/resolver-1"    # leased: back on the branch
     (Path(root) / "merged-from-base.txt").write_text("m")        # the consumer's own commit
     ilk.git(root, "add", "-A")
     ilk.git(root, "-c", "user.name=c", "-c", "user.email=c@c", "commit", "-qm", "merge base")
@@ -1024,6 +1026,7 @@ def test_the_p6_consumer_sequence_end_to_end(ilk, tmp_path, capsys):
     rc, _ = call("lease", "release", "--root", root, "--generation", str(lk["generation"]),
                  "--new-head", new)
     assert rc == 0
+    assert checked_out(ilk, root) is None                       # released: free again
     rc, out = call("submit", str(plan), "--project", "proj", "--branch", "resolver-1",
                    "--consumer-ref", "run-1b", "--json")
     assert rc == 0
@@ -1582,3 +1585,66 @@ def test_project_set_refuses_an_unknown_effort(ilk, capsys):
     ilk.project()
     assert cli.main(["project", "set", "proj", "worker_effort=fast"]) == 2
     assert cli.main(["project", "set", "proj", "worker_effort=low"]) == 0
+
+
+def checked_out(ilk, root) -> str | None:
+    """The branch `git worktree list` shows at root, as gh-resolve reads it (None: detached)."""
+    entries = ilk.git(ilk.repo, "worktree", "list", "--porcelain").split("\n\n")
+    entry = next(e for e in entries if Path(e.split("\n")[0].split(" ", 1)[1]).resolve() == Path(root).resolve())
+    return next((ln.split(" ", 1)[1] for ln in entry.split("\n") if ln.startswith("branch ")), None)
+
+
+def test_a_shipped_batch_frees_its_branch_and_a_rework_takes_it_back(ilk):
+    # gh-resolve-84, Oct 21: a shipped batch's worktree kept its resolver branch checked out for
+    # the 7-day keep window, so gh-resolve's conflict rework could not write that branch.
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    b = ilk.s.get("batches", bid)
+    assert checked_out(ilk, b["execution_root"]) == f"refs/heads/{b['branch']}"
+    assert ilk.drive_inprocess(bid) == "shipped"
+    root = b["execution_root"]
+    assert checked_out(ilk, root) is None
+    assert ilk.git(root, "rev-parse", "HEAD") == ilk.git(root, "rev-parse", b["branch"])
+    assert lease.get(ilk.s, root)["holder"] == "released"
+    shipped = ilk.git(root, "rev-parse", b["branch"])
+    ilk.script([{"write": "notes.txt", "text": "rework\n"}])
+    again = ilk.submit(one_step(), branch=b["branch"])      # a rework on the same branch
+    assert ilk.s.get("batches", again)["execution_root"] == root
+    assert ilk.drive_inprocess(again) == "shipped"
+    assert ilk.git(root, "rev-parse", f"{b['branch']}~1") == shipped   # it built on the branch
+    assert checked_out(ilk, root) is None
+
+
+def test_a_cancelled_batch_frees_its_branch_unless_another_batch_works_there(ilk):
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    b = ilk.s.get("batches", bid)
+    other = ilk.submit(one_step(), branch=b["branch"])      # shares the root, still queued
+    assert ilk.s.get("batches", other)["execution_root"] == b["execution_root"]
+    batches.cancel(ilk.s, bid, "stand-down")
+    assert checked_out(ilk, b["execution_root"]) == f"refs/heads/{b['branch']}"
+    batches.cancel(ilk.s, other, "stand-down")
+    assert checked_out(ilk, b["execution_root"]) is None
+
+
+def test_a_lease_on_a_branch_checked_out_elsewhere_is_refused_and_released(ilk, tmp_path, capsys):
+    from ilk2 import cli
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    root = b["execution_root"]
+    ilk.git(ilk.repo, "worktree", "add", "-q", str(tmp_path / "rework"), b["branch"])  # the consumer's
+    row = lease.get(ilk.s, root)
+    capsys.readouterr()
+    rc = cli.main(["lease", "acquire", "--root", root, "--generation", str(row["generation"]),
+                   "--expected-head", row["accepted_head"], "--owner", "gh-resolve", "--length", "600"])
+    assert rc == 3 and "cannot check out" in capsys.readouterr().out
+    assert lease.get(ilk.s, root)["holder"] == "released"
+    assert checked_out(ilk, root) is None

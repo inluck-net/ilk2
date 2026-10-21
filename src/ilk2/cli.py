@@ -389,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import xbar
         return xbar.main()
 
-    from . import batches, bounds, gitops, lease, plans
+    from . import batches, bounds, gitops, lease, plans, runs
     from .store import Conflict, CursorExpired
     s = _store()
     try:
@@ -551,12 +551,21 @@ def main(argv: list[str] | None = None) -> int:
             length = a.length or bounds.load().lease
             if a.op == "acquire":
                 g = lease.consumer_acquire(s, a.root, a.generation, a.expected_head, a.owner, head, length)
+                if b:  # a finished batch's root is detached (runs.free_root): the consumer's
+                    try:  # merge and commits under the lease go on the branch, as before
+                        if gitops.git(Path(a.root), "rev-parse", "--abbrev-ref", "HEAD") != b["branch"]:
+                            gitops.git(Path(a.root), "checkout", "-q", b["branch"])
+                    except gitops.GitError as e:
+                        lease.consumer_release(s, a.root, g, head)
+                        raise Conflict(f"cannot check out {b['branch']} in {a.root}: {e}") from e
             elif a.op == "renew":
                 g = lease.consumer_renew(s, a.root, a.generation, length)
             elif a.op == "release":
                 g = lease.consumer_release(s, a.root, a.generation, a.new_head or head)
             else:
                 g = lease.recover(s, a.root, a.generation, a.new_head or head)
+            if a.op in ("release", "recover") and b and b["status"] in ("shipped", "cancelled"):
+                runs.free_root(s, Path(a.root), b["id"])
             _out({"generation": g}, True)
         elif a.cmd == "apply":
             import time

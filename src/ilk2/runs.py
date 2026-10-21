@@ -49,6 +49,24 @@ def root_in_use_by_other(s: Store, batch_id: str) -> bool:
                  "('queued', 'active')", b["execution_root"], batch_id) is not None
 
 
+def free_root(s: Store, root: Path, batch_id: str) -> None:
+    """A finished batch's ilk2-made root lets go of its branch, so a consumer can write it from
+    another worktree (gh-resolve-84, Oct 21: conflict rework refuses a branch checked out in a
+    worktree). The worktree stays until gc_worktrees. A root another unfinished batch uses, or
+    one leased to anyone, is left alone; the driver (_take_batch_root) and `lease acquire`
+    check the branch out again before anything is written there."""
+    from . import gitops, paths
+    if root.parent != paths.worktrees() or not root.exists():
+        return
+    if s.one("SELECT 1 FROM batches WHERE execution_root = ? AND id != ? AND status NOT IN "
+             "('shipped', 'cancelled')", str(root), batch_id):
+        return
+    row = lease.get(s, str(root))
+    if row and row["holder"] != "released":
+        return
+    gitops.git(root, "checkout", "-q", "--detach", check=False)
+
+
 def has_unfinished_cancel(s: Store, batch_id: str) -> bool:
     """A cancelled batch with anything left to end: a live child row or a held root."""
     if s.one("SELECT 1 FROM steps WHERE batch_id = ? AND status IN ('pending', 'accepting', "
