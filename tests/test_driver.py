@@ -918,6 +918,76 @@ def test_a_base_failure_is_not_charged_to_a_step_that_changes_the_gates_config(i
     assert json.loads(gr["details"])["comparable_base"] is False   # recorded as before
 
 
+def test_a_base_failure_whose_message_the_config_change_alters_is_not_new(ilk):
+    # batch 18a's shape (docs/evidence/2026-10-18-batch-18a-retrospective.md): the step changes
+    # the gate's configuration in a way that changes what a failure's report looks like
+    # (--tb=long -> --tb=short changes the frames the fingerprint hashes). Measured under the
+    # base's own configuration the pre-existing failure fingerprint-shifts and reads as new;
+    # measured under this step's configuration both sides match again (docs/02 §2.5.4).
+    ilk.make_repo()
+    root = ilk.repo
+    (root / "tests" / "test_old.py").write_text("def test_old():\n    assert False\n")
+    (root / "pytest.ini").write_text("[pytest]\naddopts = --tb=long\n")
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a failing base test")
+    ilk.project()
+    conf = {"write": "pytest.ini", "text": "[pytest]\naddopts = --tb=short\n"}
+    ilk.script([GOOD, conf])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_old.py")]))
+    assert ilk.drive_inprocess(bid) == "shipped"
+    gr = ilk.s.one("SELECT new_failures, details FROM gate_results ORDER BY id DESC LIMIT 1")
+    assert json.loads(gr["new_failures"]) == []
+    details = json.loads(gr["details"])
+    assert details["comparable_base"] is False       # the gate is still recorded as spec-changed
+    assert details["base_under"] == "step-config"
+
+
+def test_a_failure_the_step_introduced_is_still_new_when_the_spec_changed(ilk):
+    # I6's strength under the overlay (docs/02 §2.5.4): a base-red test the step broke
+    # differently, or a test that passed at the base and fails now, is still new.
+    ilk.make_repo()
+    root = ilk.repo
+    (root / "tests" / "test_old.py").write_text("def test_old():\n    assert False\n")
+    (root / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    (root / "pytest.ini").write_text("[pytest]\naddopts = --tb=long\n")
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a failing base test")
+    ilk.project()
+    broke = {"write": "tests/test_ok.py", "text": "def test_ok():\n    assert False\n"}
+    ilk.script([GOOD, {"write": "pytest.ini", "text": "[pytest]\naddopts = --tb=short\n"}, broke])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_old.py",
+                                           "tests/test_ok.py")]))
+    assert ilk.drive_inprocess(bid) == "blocked"
+    gr = ilk.s.one("SELECT new_failures FROM gate_results ORDER BY id LIMIT 1")
+    assert json.loads(gr["new_failures"]) == ["tests/test_ok.py::test_ok"]
+
+
+def test_a_head_config_that_cannot_run_at_the_base_falls_back_to_the_bases_own_base(ilk):
+    # The overlay is A2's one exception (base measurement only). When the head's configuration
+    # cannot run on the base source at all -- its conftest imports a module only the step adds
+    # -- the overlaid measurement is unmeasured. That must not block the batch the way a gate
+    # nothing can measure does (base-unmeasured): it falls back to the base's own measurement
+    # and says so in the gate's evidence.
+    ilk.make_repo()
+    root = ilk.repo
+    (root / "tests" / "test_old.py").write_text("def test_old():\n    assert False\n")
+    ilk.git(root, "add", "-A")
+    ilk.git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a failing base test")
+    ilk.project()
+    conf = {"write": "tests/conftest.py", "text":
+            "import sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n"
+            "import headonly\n"}
+    ilk.script([GOOD, conf, {"write": "headonly.py", "text": "X = 1\n"}])
+    bid = ilk.submit(one_step(gates_=[gate("tests/test_calc.py", "tests/test_old.py")]))
+    assert ilk.drive_inprocess(bid) == "shipped"      # not "blocked (base-unmeasured)"
+    gr = ilk.s.one("SELECT new_failures, details FROM gate_results ORDER BY id DESC LIMIT 1")
+    assert json.loads(gr["new_failures"]) == []       # the base's own measurement still matched
+    details = json.loads(gr["details"])
+    assert details["comparable_base"] is False and details["base_under"] == "base-config"
+    fell_back = [e for e in ilk.s.events_since(0, bid) if e["kind"] == "base.overlay-unmeasured"]
+    assert [e["payload"]["gate"] for e in fell_back] == ["unit"]
+
+
 def test_a_verification_step_gates_its_kept_work_first(ilk):
     # gh-resolve P5 batch, Oct 14: after a restart the kept work skipped gates-first, and the
     # worker was briefed with the previous attempt's failures.
