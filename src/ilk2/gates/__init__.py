@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -92,6 +93,38 @@ def config_files(gate: Gate, root: Path) -> list[str]:
     elif gate.adapter == "vitest":
         out += vitest.config_files(gate.command, gate.cwd)
     return sorted(set(out))
+
+
+@contextmanager
+def config_overlay(gate: Gate, head: Path, onto: Path):
+    """`head`'s gate-configuration files in `onto`, for the duration of the block: each of
+    config_files(gate, head) written with the head's bytes, and each configuration file `onto`
+    has and the head lacks removed (a base-only conftest.py the step deleted). Source and test
+    files are never overlaid (§2.5.7 A2); a new test file staying absent at the base is the
+    pure-addition case (§2.5.4, "0 tests"). On the way out everything is put back, so the
+    diagnostic worktree keeps its own commit's configuration for the rest of the batch."""
+    here, there = set(config_files(gate, head)), set(config_files(gate, onto))
+    saved: list[tuple[str, bytes | None]] = []
+    try:
+        for rel in sorted(here | there):
+            dst = onto / rel
+            saved.append((rel, dst.read_bytes() if dst.is_file() else None))
+            src = head / rel
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+            elif dst.is_file():
+                dst.unlink()
+        yield
+    finally:
+        for rel, prior in saved:
+            dst = onto / rel
+            if prior is None:
+                if dst.is_file():
+                    dst.unlink()
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(prior)
 
 
 # -- running ------------------------------------------------------------------------------

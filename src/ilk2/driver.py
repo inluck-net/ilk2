@@ -88,6 +88,7 @@ class Driver:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.api_spent = 0.0
         self.spec_changed: set[str] = set()  # gates whose spec this run's steps changed
+        self.base_own_config: set[str] = set()  # gates whose base fell back to its own config
         self._env_n = 0
 
     # -- phases and events --------------------------------------------------------------
@@ -438,19 +439,22 @@ class Driver:
             return not new, new
         return r.failure_map() == (base.get("failures") or {}), []
 
-    def measure_key(self, gate: Gate, where: Path, commit: str) -> str:
+    def measure_key(self, gate: Gate, where: Path, commit: str, spec: str | None = None) -> str:
         """What one base measurement is a measurement of (docs/09 V3), the measurement-key
         sibling of lock_digest: the gate's specification version and the commit, plus what that
         version leaves out -- the project's setup command and the home files the pinned HOME
         copies in (ProjectConfig.setup / .home_files). A change in any of these is a different
         measurement, so a result is never adopted across it. The `measure-key-v1` tag is the
         FINGERPRINT_VERSION rule (gates/fingerprint.py): bump it and every key changes rather
-        than being compared across rules."""
+        than being compared across rules. `spec` is the version this measurement is stored
+        under; pass it when the tree at `where` is not what produced that version (an overlaid
+        diagnostic worktree, §2.5.4), so the key is the head's and is never confused with the
+        base's own-spec one."""
         import hashlib
         h = hashlib.sha256()
         h.update(b"measure-key-v1")
         h.update(self.project_id.encode())
-        h.update(gates.spec_version(gate, where, self.env()).encode())
+        h.update((spec or gates.spec_version(gate, where, self.env())).encode())
         h.update(commit.encode())
         h.update(json.dumps(list((self.cfg.setup or {}).get("command") or [])).encode())
         # the same host HOME pinned_env copies from, so a changed copy is a changed key
@@ -463,10 +467,14 @@ class Driver:
             h.update(fh.digest())
         return h.hexdigest()[:16]
 
-    def measure_base(self, gate: Gate, where: Path, commit: str) -> dict[str, str] | None:
+    def measure_base(self, gate: Gate, where: Path, commit: str, spec: str | None = None,
+                     block_on_unmeasured: bool = True) -> dict[str, str] | None:
         env = self.env()
-        spec = gates.spec_version(gate, where, env)
-        key = self.measure_key(gate, where, commit)
+        # `spec` is stored and keyed as given, never re-derived from `where`: an overlaid
+        # diagnostic worktree lists different config_files than the head whose specification
+        # this measurement is the base *for* (§2.5.4).
+        spec = spec or gates.spec_version(gate, where, env)
+        key = self.measure_key(gate, where, commit, spec)
         got = self._stored_base(gate, spec, commit, key)
         if got is not None:
             return got
@@ -501,6 +509,11 @@ class Driver:
                        failures=len(r.failures), seconds=round(time.monotonic() - t0, 1),
                        timeouts=r.timeouts, reran=bool(r.reruns))
             if r.outcome == "unmeasured":
+                if not block_on_unmeasured:
+                    # The caller asked for this measurement and has another answer (base_for
+                    # falls back to the base's own). Nothing is stored, so the next caller
+                    # tries again rather than adopting a base with no failures in it.
+                    return None
                 self.block_batch("base-unmeasured",
                                  f"gate {gate.name} cannot be measured at {commit[:12]}: {r.reason}",
                                  f"fix the gate, then: ilk2 resume {self.batch_id}")
@@ -1254,12 +1267,14 @@ class Driver:
                     v.outcome = "pass-with-attributed"
                     self.event("gate.pass-with-attributed", gate=gate.name, step=step["id"],
                                attributed=sorted(done))
+            base_under = "base-config" if gate.name in self.base_own_config else "step-config"
             self.s.insert("gate_results", {"attempt_id": aid, "gate": gate.name,
                                            "spec_version": spec, "outcome": v.outcome,
                                            "new_failures": dumps(v.new_failures),
                                            "details": dumps({"reason": v.reason or r.reason,
                                                              "comparable_base": base is not None
                                                              and gate.name not in self.spec_changed,
+                                                             "base_under": base_under,
                                                              "possibly_inherited": inherited,
                                                              "attribution": {a.test_id: a.to_dict()
                                                                              for a in attributions},
@@ -1273,9 +1288,12 @@ class Driver:
             if v.outcome == "fail":
                 lines = [f"Gate `{gate.name}` failed: `{' '.join(gate.command)}`"]
                 if gate.name in self.spec_changed:
-                    lines.append("(This step changed the gate's specification: failures are "
-                                 "compared with the base measured under the base's own "
-                                 "configuration, by test id and fingerprint.)")
+                    under = ("the base's own configuration (this step's configuration cannot "
+                             "run at the base)" if base_under == "base-config"
+                             else "this step's configuration")
+                    lines.append(f"(This step changed the gate's specification: failures are "
+                                 f"compared with the base measured under {under}, by test id "
+                                 f"and fingerprint.)")
                 for tid in v.new_failures[:30]:
                     f = r.failures.get(tid)
                     tag = " [possibly-inherited: also failing at the step's parent]" \
@@ -1466,12 +1484,31 @@ class Driver:
         diag = self.diag_worktree(self.base)
         if gates.spec_version(gate, diag, self.env()) != spec_now:
             # The step changed what decides the gate (a conftest, a runner config). Judgment
-            # call (Oct 14): compare with the base measured under the base's own configuration,
-            # by test id and fingerprint, instead of charging every failure to the step. A
-            # failure identical at the base is not new. gh-resolve P5 batch: the verification's
-            # full suite could never pass, its 12 base failures counted as new. Wrong if a config
-            # change can produce a new failure identical in id and fingerprint to a base one.
+            # call (Oct 21): measure the base at the base commit under *this step's*
+            # configuration -- the head's config files overlaid on the diagnostic worktree,
+            # source and tests untouched -- and compare by test id and fingerprint (I6
+            # unchanged). Both sides are then measured under one specification, so a failure
+            # that was already failing at the base matches again instead of fingerprint-
+            # shifting into a false new one (batch 18a: the changed test configuration made
+            # 42 of 44 "new" failures pre-existing ones, and one verification worker spent
+            # 86 min on them; gh-resolve P5, Oct 14: the verification's full suite could never
+            # pass, its 12 base failures counted as new). A base-red test the step broke
+            # differently still differs and is still new. Wrong if a configuration change
+            # alone can make a genuinely new failure fingerprint-match a base one, or if
+            # overlaid bases go unmeasured often enough to matter.
             self.spec_changed.add(gate.name)
+            if gate.name not in self.base_own_config:
+                with gates.config_overlay(gate, self.root, diag):
+                    got = self.measure_base(gate, diag, self.base, spec=spec_now,
+                                            block_on_unmeasured=False)
+                if got is not None:
+                    return got
+                # The head's configuration cannot run on the base source. That is not
+                # base-unmeasured (a gate nothing can measure blocks the batch): fall back to
+                # the base's own measurement, as before Oct 21, and mark the gate so its
+                # evidence says which base it was judged against.
+                self.base_own_config.add(gate.name)
+                self.event("base.overlay-unmeasured", gate=gate.name, commit=self.base[:12])
         return self.measure_base(gate, diag, self.base)
 
     def parent_probe(self, gate: Gate, parent: str, failing: list[str]) -> list[str]:
