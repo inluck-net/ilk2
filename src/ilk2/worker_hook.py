@@ -19,6 +19,8 @@ import sys
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 GIT_WRITE = re.compile(r"\bgit\b[^|;&\n]*\b(commit|push)\b")
+GH_MERGE = re.compile(r"\bgh\b[^|;&\n]*\bpr\s+merge\b")
+GH_API = re.compile(r"\bgh\b[^|;&\n]*\bapi\b([^|;&\n]*)")
 RUNNERS = re.compile(r"(^|\s|/)(pytest|vitest)(\s|$)|-m\s+pytest|\b(npm|bun|pnpm|yarn)\s+(run\s+)?test\b")
 
 
@@ -170,13 +172,43 @@ def full_suite(command: str, gates: list[list[str]], root: str = ".", depth: int
     return False
 
 
-def decide(ev: dict, root: str, gates: list[list[str]], write_dirs: list[str] = ()) -> str | None:
+def gh_api_write(command: str) -> bool:
+    for match in GH_API.finditer(command):
+        try:
+            args = shlex.split(match.group(1))
+        except ValueError:
+            return True
+        if "graphql" in args:
+            return True  # a GraphQL query and mutation share an endpoint and POST method
+        for i, arg in enumerate(args):
+            if arg in ("-f", "-F", "--field", "--raw-field", "--input") or arg.startswith(
+                    ("--field=", "--raw-field=", "--input=", "-f", "-F")):
+                return True
+            if arg in ("-X", "--method"):
+                if i + 1 >= len(args) or args[i + 1].upper() != "GET":
+                    return True
+            if arg.startswith("--method=") and arg.split("=", 1)[1].upper() != "GET":
+                return True
+            if arg.startswith("-X") and arg != "-X" and arg[2:].upper() != "GET":
+                return True
+    return False
+
+
+def decide(ev: dict, root: str, gates: list[list[str]], write_dirs: list[str] = (),
+           deny_commands: list[str] = ()) -> str | None:
     tool = ev.get("tool_name", "")
     inp = ev.get("tool_input") or {}
     if tool == "Bash":
         cmd = inp.get("command", "")
         if GIT_WRITE.search(cmd):
             return "git commit and git push are refused: the driver commits after its gates pass."
+        if GH_MERGE.search(cmd):
+            return "gh pr merge is refused: a person handles the review and merge."
+        if gh_api_write(cmd):
+            return "gh api writes are refused in a worker attempt."
+        for pattern in deny_commands:
+            if re.search(pattern, cmd):
+                return "A project deny_commands rule refuses this command."
         if full_suite(cmd, gates, root):
             return ("Running a declared gate's whole suite is refused: the driver runs it after "
                     "your attempt. Run only the tests for the files you changed.")
@@ -200,7 +232,12 @@ def main() -> int:
     if wf and os.path.exists(wf):
         with open(wf) as f:
             write_dirs = json.load(f)
-    reason = decide(ev, root, gates, write_dirs) if root else "ILK2_WORKTREE is not set; refusing."
+    deny_commands: list[str] = []
+    df = os.environ.get("ILK2_DENY_COMMANDS_FILE")
+    if df and os.path.exists(df):
+        with open(df) as f:
+            deny_commands = json.load(f)
+    reason = decide(ev, root, gates, write_dirs, deny_commands) if root else "ILK2_WORKTREE is not set; refusing."
     log = os.environ.get("ILK2_HOOK_LOG")
     if log:
         with open(log, "a") as f:

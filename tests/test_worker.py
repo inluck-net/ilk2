@@ -112,10 +112,22 @@ def test_prompt_not_in_argv_and_env_scrubbed(env, monkeypatch):
     cfg, files, wt = env
     monkeypatch.setenv("ANTHROPIC_API_KEY", "should-not-pass")
     monkeypatch.setenv("ILK_SKILL_HOME", "/x")
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
+        monkeypatch.setenv(key, "fake-secret")
+    monkeypatch.setenv("GH_CONFIG_DIR", "/host/gh")
+    settings_path = cfg.template / "settings.json"
+    settings_before = json.loads(settings_path.read_text())
+    settings_before["env"]["GH_TOKEN"] = "fake-secret"
+    settings_path.write_text(json.dumps(settings_before))
+    worker.prepare(cfg, files, wt, [], fresh_config=True)
     e = worker.worker_env(files, wt)
     assert "ANTHROPIC_API_KEY" not in e and "ILK_SKILL_HOME" not in e
+    assert all(key not in e for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"))
+    assert e["GH_CONFIG_DIR"] == str(files.gh_config)
+    assert list(files.gh_config.iterdir()) == []
     assert e["CLAUDE_CONFIG_DIR"] == str(files.config)
     settings = json.loads((files.config / "settings.json").read_text())
+    assert "GH_TOKEN" not in settings["env"]
     assert "worker_hook.py" in settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert oct((files.config / "settings.json").stat().st_mode)[-3:] == "600"
 
@@ -129,6 +141,13 @@ GATES = [["python3", "-m", "pytest", "tests/test_a.py", "tests/test_b.py", "-q"]
     ("git commit -m x", True),
     ("git add . && git push", True),
     ("git status", False),
+    ("gh pr merge 123", True),
+    ("gh --repo o/r pr merge 123", True),
+    ("gh api repos/o/r/issues -X POST", True),
+    ("gh api repos/o/r/issues --method=PATCH", True),
+    ("gh api repos/o/r/issues -f title=x", True),
+    ("gh api graphql -f query=x", True),
+    ("gh api repos/o/r/issues --method GET", False),
     ("python3 -m pytest", True),                                   # whole suite
     ("python3 -m pytest tests/test_a.py tests/test_b.py -q", True),  # a declared gate's suite
     ("python3 -m pytest tests/test_a.py", False),                  # targeted
@@ -147,6 +166,18 @@ def test_hook_edit_outside(tmp_path):
     outside = {"tool_name": "Write", "tool_input": {"file_path": "/etc/hosts"}}
     assert decide(inside, str(tmp_path), []) is None
     assert decide(outside, str(tmp_path), []) is not None
+
+
+def test_project_command_denial_reaches_hook(env):
+    cfg, files, wt = env
+    cfg.deny_commands = [r"\bterraform\s+apply\b"]
+    worker.prepare(cfg, files, wt, [], fresh_config=False)
+    e = worker.worker_env(files, wt)
+    for cmd, expected in (("terraform apply", 2), ("terraform plan", 0)):
+        ev = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        r = subprocess.run(["python3", "-I", str(worker.HOOK)], input=json.dumps(ev), text=True,
+                           capture_output=True, env=e)
+        assert r.returncode == expected
 
 
 def test_write_dirs_are_open_to_the_hook_and_the_sandbox_and_nothing_else_is(tmp_path):

@@ -1099,7 +1099,8 @@ class Driver:
                  session: str | None) -> tuple[str, dict, str | None]:
         cfg = worker.WorkerConfig(claude_bin=self.cfg.claude_bin, max_turns=self.cfg.max_turns,
                                   sandbox=self.cfg.sandbox, sandbox_allow=self.cfg.sandbox_allow,
-                                  model=self.cfg.worker_model, effort=self.cfg.worker_effort)
+                                  model=self.cfg.worker_model, effort=self.cfg.worker_effort,
+                                  deny_commands=self.cfg.deny_commands)
         resume, carried = None, False
         if n in bounds.RESUMED_ATTEMPTS and session and self.s.one(
                 "SELECT 1 FROM attempts WHERE step_id = ? AND session_id = ? AND run_id = ?",

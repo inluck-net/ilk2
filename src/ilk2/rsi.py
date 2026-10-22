@@ -392,7 +392,8 @@ def plan(s, cand, repo: Path, cfg, cap_s: float = PLAN_CAP_S) -> dict:
     gitops.add_worktree(repo, wt, gitops.rev(repo, "main") or gitops.head(repo))
     try:
         wcfg = worker.WorkerConfig(claude_bin=cfg.claude_bin, max_turns=cfg.max_turns,
-                                   sandbox=cfg.sandbox, sandbox_allow=cfg.sandbox_allow)
+                                   sandbox=cfg.sandbox, sandbox_allow=cfg.sandbox_allow,
+                                   deny_commands=cfg.deny_commands)
         files = worker.AttemptFiles(d / "attempt")
         gate = cfg.rsi_gate or SUITE_GATE
         worker.prepare(wcfg, files, wt, [gate["command"]])

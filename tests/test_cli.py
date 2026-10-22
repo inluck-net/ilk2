@@ -39,3 +39,16 @@ def test_project_show_prints_settings_with_env_values_redacted(ilk, capsys):
     assert d["config"]["env_set"] == {"API_TOKEN": "<set>"} and d["config"]["setup"]["env"] == {"PW": "<set>"}
     assert "s3cret" not in out and "hunter2" not in out
     assert cli.main(["project", "show", "nope"]) == 2
+
+
+def test_project_rejects_invalid_command_denial(ilk, capsys):
+    import json
+    from ilk2 import batches
+    ilk.make_repo()
+    ilk.project()
+    capsys.readouterr()
+    assert main(["project", "set", "proj", 'deny_commands=["("]']) == 2
+    assert "invalid regular expression" in capsys.readouterr().out
+    assert batches.project_config(ilk.s, "proj").deny_commands == []
+    assert main(["project", "set", "proj", 'deny_commands=["terraform apply"]']) == 0
+    assert json.loads(capsys.readouterr().out)["set"]["deny_commands"] == ["terraform apply"]

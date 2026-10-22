@@ -41,6 +41,7 @@ class ProjectConfig:
     # Paths no batch may change (docs/06 R8), e.g. gh-resolve's write-target denylist
     # ["convex/migrations/"]: a directory prefix or a glob. Checked on every attempt.
     deny_paths: list[str] = field(default_factory=list)
+    deny_commands: list[str] = field(default_factory=list)  # worker Bash hook regexes (§2.6)
     # The V1 data dir key of a project taken over from V1: queued masters /ilk-plan writes
     # there are claimed and submitted by the supervisor (docs/04 §4.3, ilk2/v1.py).
     v1_key: str | None = None
@@ -102,6 +103,18 @@ class ProjectConfig:
         d = json.loads(text or "{}")
         known = {f for f in ProjectConfig.__dataclass_fields__}
         return ProjectConfig(**{k: v for k, v in d.items() if k in known})
+
+
+def deny_commands_problem(patterns: object) -> str | None:
+    import re
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        return "deny_commands must be a JSON list of regular expressions"
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except re.error:
+            return "deny_commands contains an invalid regular expression"
+    return None
 
 
 def _glob_re(pattern: str) -> "re.Pattern[str]":

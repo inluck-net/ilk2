@@ -193,7 +193,8 @@ def _plan(s, raw: dict, out: dict, finish, cap_s: float | None) -> int:
         wcfg = worker.WorkerConfig(claude_bin=cfg.claude_bin, max_turns=cfg.max_turns,
                                    sandbox=cfg.sandbox, sandbox_allow=cfg.sandbox_allow,
                                    write_dirs=[str(drafts)],
-                                   model=cfg.worker_model, effort=cfg.worker_effort)
+                                   model=cfg.worker_model, effort=cfg.worker_effort,
+                                   deny_commands=cfg.deny_commands)
         files = worker.AttemptFiles(work / "attempt")
         worker.prepare(wcfg, files, wt, [])
         out["planner_log"] = str(files.logs)

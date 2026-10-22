@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ HOOK = Path(__file__).with_name("worker_hook.py")
 SCRUB = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "ILK_", "ILK2_",
          # these override autoCompactEnabled, so the pin below would silently not hold (W2)
          "DISABLE_AUTO_COMPACT", "DISABLE_COMPACT")
+GITHUB_TOKENS = {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"}
 # docs/06 W2: auto-compact pinned on, as a safety net only (one step is the context bound,
 # docs/02 §2.6). Passed with --settings, which outranks the consumer repo's .claude/settings.json.
 # Judgment call: the window (autoCompactWindow) is left to Claude Code; wrong if W4's peaks near it.
@@ -48,6 +50,7 @@ class WorkerConfig:
     # Directories outside the worktree the worker may also edit (plan-issue's drafts dir): both
     # the sandbox and the hook allow them. sandbox_allow alone leaves the hook refusing them.
     write_dirs: list[str] = field(default_factory=list)
+    deny_commands: list[str] = field(default_factory=list)
     hook: bool = True
     hook_python: str = sys.executable
     permission_mode: str = "bypassPermissions"
@@ -67,6 +70,8 @@ class AttemptFiles:
     def tmp(self) -> Path: return self.root / "tmp"
     @property
     def logs(self) -> Path: return self.root / "logs"
+    @property
+    def gh_config(self) -> Path: return self.tmp / "gh-config"
 
 
 def tool_dirs(worktree: Path) -> list[str]:
@@ -124,10 +129,16 @@ def prepare(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, gate_command
     """Create the attempt's config dir, temp dir and logs. Values are never printed."""
     for d in (files.root, files.tmp, files.logs):
         d.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if fresh_config and files.gh_config.exists():
+        shutil.rmtree(files.gh_config)
+    files.gh_config.mkdir(mode=0o700, exist_ok=True)
     if fresh_config or not (files.config / "settings.json").exists():
         files.config.mkdir(parents=True, mode=0o700, exist_ok=True)
         src = cfg.template / "settings.json"
         settings = json.loads(src.read_text()) if src.exists() else {}
+        if isinstance(settings.get("env"), dict):
+            settings["env"] = {k: v for k, v in settings["env"].items()
+                               if k not in GITHUB_TOKENS and k != "GH_CONFIG_DIR"}
         settings.pop("hooks", None)
         if cfg.hook:
             settings["hooks"] = {"PreToolUse": [{
@@ -141,13 +152,16 @@ def prepare(cfg: WorkerConfig, files: AttemptFiles, worktree: Path, gate_command
             json.dump(settings, f, indent=2)
     (files.logs / "gates.json").write_text(json.dumps(gate_commands))
     (files.logs / "write_dirs.json").write_text(json.dumps([os.path.realpath(d) for d in cfg.write_dirs]))
+    (files.logs / "deny_commands.json").write_text(json.dumps(cfg.deny_commands))
     (files.logs / "sandbox.sb").write_text(sandbox_profile(worktree, files,
                                                            [*cfg.sandbox_allow, *cfg.write_dirs]))
 
 
 def worker_env(files: AttemptFiles, worktree: Path) -> dict[str, str]:
-    env = {k: v for k, v in procs.host_env().items() if not k.startswith(SCRUB)}
+    env = {k: v for k, v in procs.host_env().items()
+           if not k.startswith(SCRUB) and k not in GITHUB_TOKENS and k != "GH_CONFIG_DIR"}
     env["CLAUDE_CONFIG_DIR"] = str(files.config)
+    env["GH_CONFIG_DIR"] = str(files.gh_config)
     env["TMPDIR"] = os.path.realpath(files.tmp) + "/"
     # zsh writes here-documents under $TMPPREFIX (default /tmp/zsh), not $TMPDIR: the sandbox
     # refused a planner's heredoc on Oct 19 ("can't create temp file for here document").
@@ -155,6 +169,7 @@ def worker_env(files: AttemptFiles, worktree: Path) -> dict[str, str]:
     env["ILK2_WORKTREE"] = os.path.realpath(worktree)
     env["ILK2_GATES_FILE"] = str(files.logs / "gates.json")
     env["ILK2_WRITE_DIRS_FILE"] = str(files.logs / "write_dirs.json")
+    env["ILK2_DENY_COMMANDS_FILE"] = str(files.logs / "deny_commands.json")
     env["ILK2_HOOK_LOG"] = str(files.logs / "hook.jsonl")
     return env
 

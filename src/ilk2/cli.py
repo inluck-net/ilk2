@@ -460,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
                     _out({"error": "rejected", "problems": [
                         f"worker_effort must be one of {list(batches.WORKER_EFFORTS)} or null"]}, True)
                     return 2
+                if "deny_commands" in changes:
+                    problem = batches.deny_commands_problem(changes["deny_commands"])
+                    if problem:
+                        _out({"error": "rejected", "problems": [problem]}, True)
+                        return 2
                 for k, v in changes.items():
                     setattr(cfg, k, v)
                 s.update("projects", a.project_id, {"config": json.dumps(asdict(cfg))},
@@ -479,6 +484,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             cfg = batches.ProjectConfig.from_json(
                 Path(a.config[1:]).read_text() if a.config.startswith("@") else a.config)
+            problem = batches.deny_commands_problem(cfg.deny_commands)
+            if problem:
+                _out({"error": "rejected", "problems": [problem]}, True)
+                return 2
             root = os.path.realpath(a.repo)
             if a.shadow_of:
                 why = shadow_problem(root, a.shadow_of)
