@@ -60,7 +60,7 @@ This step builds one **installed-artifact manifest** per host and a checker that
 - PATH entries and `tools/*` links;
 - V1 worker and manager homes;
 - every launchd file whose label or content matches `ilk` or `.ilk-data`, in any folder on both hosts, including rezmac's older scheduler plist backups and `net.inluck.ilk-pocket-agent`;
-- the consumer and provisioning repos that read or create V1 state (gh-resolve, ilk-pocket, mac-provision), as counts of runtime references. Each count records the repo commit and the exact `rg` command, and says whether it counts matching lines or occurrences.
+- the consumer and provisioning repos that read or create V1 state (gh-resolve, ilk-pocket, mac-provision), as counts of runtime references. Each count records the repo commit and the exact `rg` command, and says whether it counts matching lines or occurrences. The repos are host configuration, `~/.ilk2/v1-consumers.json` (`[{"name", "repo", "sub", "pattern", "glob"?, "skip_tests"?}]`), not ilk2 code: ilk2 names no consumer (Chad, Oct 22). Without the file the inventory counts no consumers and says `consumers_source: "absent"`. Both hosts have held the three entries since Oct 22.
 
 Search space for "no other consumer" (Codex, round 2): all 12 top-level git checkouts under `~/Projects/github/inluck-net` and the ilk-skills worktrees, excluding `.git` and `node_modules`, for `.ilk-data`, `.ilk/current`, `ILK_DATA_HOME`, `ILK_DATA_DIR`, `park_master.py` and `skills/ilk-loop`. Apart from ilk2 and V1 themselves, only gh-resolve, ilk-pocket and mac-provision match. In `~/Library/LaunchAgents`, by name and content: 4 matching files on chad-mbp, and 7 name matches and 5 content matches on rezmac.
 

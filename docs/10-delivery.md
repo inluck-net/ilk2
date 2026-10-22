@@ -1,6 +1,6 @@
 # 10. Delivering a batch as a pull request
 
-**Status:** revision 2, Oct 22, 2026. **Accepted** (all four decisions in 10.6). Nothing is built yet; the order of work is 10.7. Revision 2 adds Chad's two decoupling rules: opt-in on both sides, and ilk2 never names gh-resolve (10.2, 10.3, 10.4).
+**Status:** revision 3, Oct 22, 2026. **Accepted** (all four decisions in 10.6). Nothing is built yet; the order of work is 10.7. Revision 2 adds Chad's two decoupling rules: opt-in on both sides, and ilk2 never names gh-resolve (10.2, 10.3, 10.4). Revision 3 makes 10.3 the exact protocol (JSON, verbs, exit codes) before any code, at Chad's "update design docs first", and adds `deliver list`, the `dropped` state and a bound on a claim.
 **Asked by Chad, Oct 21:** "do you think we can build something in the ilk2 side to support open PR for a job? can talk to the gh-resolve session, as the resolver can open PR after ilk2 finished a batch. let's get this designed properly before implementing". The trigger was a Codex session that had just submitted a kira-dev batch through `/ilk2-plan`. It found no "open a PR when done" hook, so it proposed a local watcher that polls status, then pushes and runs `gh pr create`.
 
 ## 10.1 The gap
@@ -17,30 +17,65 @@
 
 ## 10.3 The contract, ilk2 side
 
-- **Opt-in on both sides.** On ilk2, a new project setting, `deliverer` (default none): an opaque name such as `ilk2 project set kira-dev --deliverer <name>`, which ilk2 only compares with the name a claim gives (`claim --by <name>`). On the deliverer's side, its own setting, off by default (10.4). Nothing is delivered unless both are on. A submit that asks for delivery on a project without a deliverer is rejected, so a request nobody will serve fails at submit, not after a day.
-- **Asked for at submit.** `ilk2 submit ... --deliver pr [--deliver-base <branch>] [--deliver-draft]`. The base defaults to the project's `default_branch`. The request is stored on the batch: `{kind: "pr", base, draft, deliverer, requested_by}`. `/ilk2-plan` asks once whether the batch should end in a PR and passes the flag.
-- **A state the consumer can read.** `status --json` gets a `delivery` field: `{kind, base, draft, state, pr_url, detail, claimed_by, at}`. `state` moves:
+This section is the protocol a deliverer codes against. Every command prints JSON with `api_version` and follows the CLI's exit codes (`src/ilk2/cli.py:711-719`): **0** done; **2** rejected, `{"error": "rejected", "problems": [...]}`; **3** conflict, `{"error": "conflict", "detail": "..."}`.
 
-  ```mermaid
-  stateDiagram-v2
-    [*] --> waiting: submit --deliver pr
-    waiting --> owed: batch shipped
-    waiting --> [*]: batch cancelled (nothing to deliver)
-    owed --> claimed: deliver claim (compare-and-set)
-    claimed --> done: deliver done --pr URL
-    claimed --> failed: deliver failed --detail
-    failed --> owed: deliver retry (a person)
-    owed --> owed: unclaimed past the bound → needs_human delivery-owed
-  ```
+### 10.3.1 Opting in
 
-  `batch.shipped` carries the `delivery` field, so an events reader needs no second call.
-- **New CLI.** `ilk2 deliver claim|done|failed|retry --batch B`:
-  - `claim --by <name>` is a compare-and-set from `owed`, so two deliverer passes cannot both deliver one batch.
-  - `done --pr <url>` and `failed --detail <text>` close it. `failed` opens a needs_human `delivery-failed` row with the detail.
-  - `retry` (a person) puts it back to `owed`.
-  The push itself still goes through the existing root lease: `lease acquire` (which checks the branch out again, `e0dfa47`), then the deliverer's work, then `lease release --new-head`.
-- **Backstop.** A delivery `owed` and unclaimed for longer than `deliver_owed_after_s` opens a needs_human `delivery-owed` row. So a deliverer that is down shows on the panel instead of as silence (invariant I11: every non-terminal state is bounded).
-- **Rework.** A later batch submitted on the same branch with `--deliver pr` is a new request. The deliverer finds the open PR for that branch and pushes to it instead of opening a second one; `done` records the same URL.
+- **Project settings.** `deliverer` is an opaque name, default `null`; ilk2 only compares it with the name a claim gives. `deliver_owed_after_s` defaults to 1800 and `deliver_claim_max_s` to 7200 (10.5). Set with `ilk2 project set <project> --deliverer <name>`.
+- **On the deliverer's side**, its own setting, off by default (10.4). Nothing is delivered unless both are on.
+
+### 10.3.2 Asking at submit
+
+`ilk2 submit <plan> --project P ... --deliver pr [--deliver-base <branch>] [--deliver-draft]`
+
+- `--deliver-base` defaults to the project's `default_branch`.
+- Rejected (exit 2), so a request nobody will serve fails at submit:
+  - `--deliver` on a project whose `deliverer` is `null`: `"--deliver pr needs the project's deliverer setting"`;
+  - `--deliver-base` or `--deliver-draft` without `--deliver pr`;
+  - a `--deliver` kind other than `pr`.
+- `/ilk2-plan` asks once whether the batch should end in a PR and passes the flag. That change lives in ilk-skills and is made by an ilk2 batch there (AGENTS.md).
+
+### 10.3.3 The delivery object
+
+`ilk2 status --json` shows it per batch: `null` when no delivery was asked for, otherwise:
+
+```json
+{"kind": "pr", "base": "dev", "draft": false, "deliverer": "<name>",
+ "state": "waiting", "pr_url": null, "detail": null,
+ "claimed_by": null, "claimed_at": null, "updated_at": 1792600000.0, "version": 1}
+```
+
+- `state` is one of `waiting`, `owed`, `claimed`, `done`, `failed`, `dropped`. `version` goes up by one on every change.
+- `batch.shipped` carries the same object under `delivery`, already `owed`.
+
+```mermaid
+stateDiagram-v2
+  [*] --> waiting: submit --deliver pr
+  waiting --> owed: batch shipped
+  waiting --> dropped: batch cancelled
+  owed --> claimed: deliver claim (compare-and-set)
+  claimed --> done: deliver done --pr URL
+  claimed --> failed: deliver failed --detail
+  claimed --> failed: claimed past deliver_claim_max_s
+  failed --> owed: deliver retry (a person)
+  owed --> owed: unclaimed past deliver_owed_after_s → needs_human delivery-owed
+```
+
+### 10.3.4 The deliver verbs
+
+| Command | Moves | Prints (exit 0) | Exit 3 when | Exit 2 when |
+|---|---|---|---|---|
+| `ilk2 deliver list [--by NAME] [--state S]` | nothing | `{"deliveries": [D...]}` | never | an unknown state |
+| `ilk2 deliver claim --batch B --by NAME` | `owed` → `claimed` | `{"batch": B, "delivery": {...}}` | the state is not `owed` (the detail names it and `claimed_by`), or NAME is not the deliverer | no such batch, or no delivery asked |
+| `ilk2 deliver done --batch B --by NAME --pr URL` | `claimed` → `done` | the same | not `claimed`, or NAME is not `claimed_by` | the same; a URL not starting with `https://` |
+| `ilk2 deliver failed --batch B --by NAME --detail TEXT` | `claimed` → `failed` | the same | not `claimed`, or NAME is not `claimed_by` | the same |
+| `ilk2 deliver retry --batch B` | `failed` → `owed` | the same | not `failed` | the same |
+
+- **A row D of `deliver list`** carries what a deliverer needs without a second call: `{"batch", "project", "branch", "execution_root", "accepted_head", "root_lease": {"holder", "generation"}, "delivery": {...}}`. Without `--state` it lists `owed` and `claimed`. This exists so a deliverer never scans `ilk2 status`, which prints every batch's history.
+- **Needs-human rows.** `failed` opens a `delivery-failed` row with the detail; `retry`, or a later `done`, clears it. An `owed` delivery past `deliver_owed_after_s` opens `delivery-owed`; `claim` clears it.
+- **A stuck claim.** A claim past `deliver_claim_max_s` goes to `failed`, detail `"claimed by NAME for more than N s"`. This is invariant I11: every non-terminal state is bounded. The supervisor checks both bounds every tick.
+- **The push itself** still goes through the root lease: `lease acquire` (which checks the branch out again, `e0dfa47`), then the deliverer's merge, pre-push, push and PR, then `lease release --new-head`.
+- **Rework.** A later batch on the same branch with `--deliver pr` is a new request. The deliverer finds the open PR for that branch and pushes to it instead of opening a second one; `done` records the same URL.
 
 ## 10.4 The first deliverer: gh-resolve
 
@@ -58,6 +93,7 @@ From gh-resolve-84's reading of gh-resolve `main` `0792de63` (Oct 21); gh-resolv
 ## 10.5 Judgment calls
 
 - **Ready for review by default, not draft:** for kira-cloudflare, the test workflows skip drafts (`convex-tests.yml:92`, `frontend-unit-tests.yml:50`, `consistency-check.yml:60` run on `ready_for_review`), so a draft PR carries no CI evidence. `--deliver-draft` stays available. Wrong if a repo's CI runs on drafts and reviewers prefer drafts for machine PRs; then the default becomes per project.
+- **`deliver_claim_max_s` 2 h, a project setting:** a deliverer's base merge plus pre-push plus push. gh-resolve's pre-push alone has taken about 871 s on rezmac (docs/06 R2). Wrong if a pre-push regularly runs past 2 h, which would fail deliveries that were still working.
 - **`deliver_owed_after_s` 30 min, a project setting:** for the first deliverer, six ticks of ~5 min. Wrong if its tick stretches past that under load (its reap passes have run longer while pre-push runs), which would page a person for a delivery that was about to happen.
 - **One deliverer per project, named in project settings,** rather than any consumer claiming any batch. Basis: a deliverer holds one repo's push credentials (true of the first one: one gh-resolve installation per repo). Wrong if two installations ever serve one repo.
 
