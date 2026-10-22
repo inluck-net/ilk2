@@ -82,6 +82,19 @@ def test_vitest_ids_and_fingerprints(tmp_path, cache):
     assert "todo" in r.failures["t/sum.test.ts::adds"].message
 
 
+def test_target_outside_vitest_include_still_fails_at_runtime(tmp_path, cache):
+    root = fixture_repo(tmp_path / "r")
+    (root / "node_modules").symlink_to(cache)
+    target = "convex/__tests__/voiceConfigWrite.test.ts"
+    (root / target).parent.mkdir(parents=True)
+    (root / target).write_text('import { it } from "vitest"; it("writes", () => {})\n')
+    env = pinned_env(home=tmp_path / "home", tmp=tmp_path / "tmp", path_prelude=PRELUDE)
+    gate = Gate(name="voice", adapter="vitest", command=["vitest", "run", "-c",
+                "vitest.config.ts", target], cap_s=120)
+    result = gates.measure(gate, root, env, tmp_path / "work")
+    assert (result.outcome, result.reason, result.collected) == ("fail", "no-tests", 0)
+
+
 def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_path, monkeypatch, cache):
     monkeypatch.setenv("ILK2_NOTIFY", "log")
     ilk.repo = fixture_repo(ilk.repo)

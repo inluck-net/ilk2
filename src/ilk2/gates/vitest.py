@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Callable
@@ -76,6 +77,109 @@ def config_files(command: list[str], cwd: str) -> list[str]:
         if a.startswith("--config="):
             return [str(Path(cwd) / a.split("=", 1)[1])]
     return [str(Path(cwd) / c) for c in DEFAULT_CONFIGS]
+
+
+def active_config(command: list[str], cwd: str,
+                  read: Callable[[str], str | None]) -> tuple[str | None, str | None, bool]:
+    """The selected config at the batch base: path, contents, explicit flag."""
+    explicit = any(a in ("-c", "--config") or a.startswith("--config=") for a in command)
+    candidates = config_files(command, cwd)
+    for path in candidates:
+        content = read(path)
+        if content is not None:
+            return path, content, explicit
+    return (candidates[0] if explicit else None), None, explicit
+
+
+def test_targets(command: list[str]) -> list[str]:
+    """Positional test files, excluding the config path and option values."""
+    out, skip = [], False
+    for arg in command[1:]:
+        if skip:
+            skip = False
+            continue
+        if arg in ("-c", "--config", "-t", "--testNamePattern", "--project", "--reporter",
+                   "--outputFile", "--pool", "--maxWorkers", "--minWorkers"):
+            skip = True
+            continue
+        if not arg.startswith("-") and re.search(r"\.(?:test|spec)\.[cm]?[jt]sx?$", arg):
+            out.append(arg.removeprefix("./"))
+    return out
+
+
+def _glob_regex(pattern: str) -> str:
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif pattern[i] == "{":
+            end = pattern.find("}", i + 1)
+            if end < 0:
+                out.append(re.escape(pattern[i]))
+                i += 1
+            else:
+                out.append("(?:" + "|".join(_glob_regex(p) for p in pattern[i + 1:end].split(",")) + ")")
+                i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return "".join(out)
+
+
+def _without_comments(source: str) -> str:
+    out, i, quote = [], 0, None
+    while i < len(source):
+        c = source[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and i + 1 < len(source):
+                i += 1
+                out.append(source[i])
+            elif c == quote:
+                quote = None
+        elif c in ("'", '"', "`"):
+            quote = c
+            out.append(c)
+        elif source.startswith("//", i):
+            i = source.find("\n", i)
+            if i < 0:
+                break
+            out.append("\n")
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            if end < 0:
+                break
+            i = end + 1
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def included_by_config(content: str, target: str) -> bool | None:
+    """Static literal test.include, or None when the config cannot be established this way."""
+    content = _without_comments(content)
+    if re.search(r"\bprojects\s*:|\bworkspace\s*:", content):
+        return None
+    matches = list(re.finditer(r"\binclude\s*:\s*\[([^\]]*)\]", content, re.S))
+    if len(matches) != 1:
+        return None
+    body = matches[0].group(1)
+    quoted = re.findall(r"(['\"])(.*?)\1", body, re.S)
+    residue = re.sub(r"(['\"])(.*?)\1|[\s,]", "", body, flags=re.S)
+    if residue:
+        return None  # expressions, spreads and interpolated patterns need runtime collection
+    return any(re.fullmatch(_glob_regex(pattern), target) for _, pattern in quoted)
 
 
 def run_command(command: list[str], root: Path, cwd: str, report: Path) -> list[str]:

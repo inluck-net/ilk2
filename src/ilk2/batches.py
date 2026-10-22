@@ -200,6 +200,53 @@ def resolve_scripts(spec: plans.BatchSpec, repo: Path, commit: str) -> None:
                             g.declares_tests = False
 
 
+def gate_resolutions(spec: plans.BatchSpec, repo: Path, commit: str | None) -> tuple[list[dict], list[str]]:
+    """Explain resolved gates and reject target/config mismatches visible at the batch base."""
+    from .gates import vitest
+    cache: dict[str, str | None] = {}
+
+    def read(rel: str) -> str | None:
+        if not commit:
+            return None
+        rel = os.path.normpath(rel)
+        if rel not in cache:
+            cache[rel] = gitops.git(repo, "show", f"{commit}:{rel}", check=False) or None
+        return cache[rel]
+
+    resolutions, problems = [], []
+    for plan in spec.plans:
+        for step_no, step in enumerate(plan.steps):
+            for gate in step.gates:
+                entry = {"plan": plan.slug, "step": step_no, "gate": gate.name,
+                         "adapter": gate.adapter, "command": gate.command, "config": None}
+                if gate.adapter == "vitest":
+                    config, content, explicit = vitest.active_config(gate.command, gate.cwd, read)
+                    entry["config"] = config
+                    entry["config_source"] = "explicit" if explicit else "default" if config else "builtin"
+                    targets = vitest.test_targets(gate.command)
+                    if targets:
+                        entry["targets"] = targets
+                    if explicit and content is None and commit:
+                        problems.append(f"plan {plan.slug} step {step_no}: gate {gate.name}: "
+                                        f"explicit Vitest config {config!r} is absent at the base; "
+                                        f"resolved command {gate.command!r}")
+                    elif content is not None:
+                        for target in targets:
+                            # A new test may be written by this batch; the runtime gate decides
+                            # whether it is collected after the step.
+                            full = os.path.normpath(os.path.join(gate.cwd, target))
+                            if read(full) is None:
+                                continue
+                            included = vitest.included_by_config(content, target)
+                            if included is False:
+                                problems.append(f"plan {plan.slug} step {step_no}: gate {gate.name}: "
+                                                f"target {target!r} is outside the include set of "
+                                                f"Vitest config {config!r}; resolved command "
+                                                f"{gate.command!r}; use an explicit config that includes it")
+                resolutions.append(entry)
+    return resolutions, problems
+
+
 def preflight(spec: plans.BatchSpec, repo: Path, base_sha: str, cfg: "ProjectConfig") -> list[str]:
     """Collect-only run of every distinct pytest gate at the base, in the pinned environment,
     so a gate that cannot run is a synchronous rejection, not a later base-unmeasured block
@@ -346,6 +393,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         problems.append(f"base {base or proj['default_branch']!r} is not a commit")
     if base_sha:
         resolve_scripts(spec, repo, base_sha)
+        _, gate_problems = gate_resolutions(spec, repo, base_sha)
+        problems += gate_problems
     problems += translate_v1_tooling(spec, cfg)
     plans.merge_v1_ceremony(spec)
     problems += plans.check(spec, root=root or repo, path_dirs=cfg.path_prelude)

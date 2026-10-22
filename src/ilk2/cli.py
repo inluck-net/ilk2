@@ -524,7 +524,13 @@ def main(argv: list[str] | None = None) -> int:
                                      deliver=a.deliver, deliver_base=a.deliver_base,
                                      deliver_draft=a.deliver_draft)
             except batches.SubmitRejected as e:
-                _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
+                detail = {}
+                if a.check:
+                    proj = s.get("projects", a.project)
+                    repo = Path(proj["repo_root"])
+                    base_sha = gitops.rev(repo, a.branch or a.base or proj["default_branch"])
+                    detail["gates"] = batches.gate_resolutions(spec, repo, base_sha)[0]
+                _out({"error": "rejected", "problems": e.problems, **detail}, True)  # B3: one shape
                 return 2
             if a.check:
                 proj = s.get("projects", a.project)
@@ -534,8 +540,10 @@ def main(argv: list[str] | None = None) -> int:
                 warn = batches.base_warning(bb)
                 warns = ([warn] if warn else []) + batches.plan_warnings(spec) + \
                     batches.gate_path_warnings(spec, repo, base_sha)
+                resolutions = batches.gate_resolutions(spec, repo, base_sha)[0]
                 _out({"ok": True, "plans": len(spec.plans),
                       "steps": sum(len(p.steps) for p in spec.plans), "base_behind": bb,
+                      "gates": resolutions,
                       **({"warnings": warns} if warns else {})}, True)
             else:
                 bb = json.loads(s.get("batches", bid)["snapshot"]).get("base_behind")

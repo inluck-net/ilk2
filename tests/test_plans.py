@@ -356,6 +356,41 @@ def test_submit_check_validates_and_creates_nothing(ilk, capsys, tmp_path):
     assert "no steps" in capsys.readouterr().out
 
 
+def test_submit_check_refuses_bun_test_target_outside_root_vitest_include(ilk, capsys):
+    # kira-cloudflare: `bun test <convex file>` resolves to root `vitest run`, whose frontend
+    # include excludes convex tests. The separate convex config includes the same target.
+    import json
+    import shutil
+    from ilk2 import cli
+    node = shutil.which("node")
+    assert node is not None
+    target = "convex/__tests__/voiceConfigWrite.test.ts"
+    config = "tests/convex-tests/vitest.config.ts"
+    ilk.make_repo({
+        "package.json": json.dumps({"scripts": {"test": "vitest run"}}),
+        "vitest.config.ts": 'export default { test: { include: ["src/**/*.{test,spec}.{ts,tsx}"] } }\n',
+        config: 'export default { test: { include: ["convex/__tests__/**/*.test.ts"] } }\n',
+        target: 'import { it } from "vitest"; it("writes", () => {})\n',
+    })
+    ilk.project(path_prelude=[str(Path(node).parent), "/usr/bin", "/bin"])
+    spec = {"plans": [{"slug": "voice", "steps": [{"title": "write", "instructions": "x",
+             "scope": [target], "gates": [{"name": "voice", "command": f"bun test {target}"}]}]}]}
+    path = ilk.tmp / "voice.json"
+    path.write_text(json.dumps(spec))
+    assert cli.main(["submit", "--check", "--project", "proj", str(path)]) == 2
+    rejected = json.loads(capsys.readouterr().out)
+    assert "outside" in " ".join(rejected["problems"])
+    assert rejected["gates"][0]["command"] == ["vitest", "run", target]
+    assert rejected["gates"][0]["config"] == "vitest.config.ts"
+    spec["plans"][0]["steps"][0]["gates"][0]["command"] = f"bun test -c {config} {target}"
+    path.write_text(json.dumps(spec))
+    assert cli.main(["submit", "--check", "--project", "proj", str(path)]) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["gates"][0]["command"] == ["vitest", "run", "-c", config, target]
+    assert accepted["gates"][0]["config"] == config
+    assert ilk.s.one("SELECT COUNT(*) n FROM batches")["n"] == 0
+
+
 # -- structural refusals ported from V1's preflight (docs/07 §7.4.1) ------------------------
 
 SUB_OK = """---
