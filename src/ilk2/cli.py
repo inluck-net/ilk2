@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     psub.add_parser("show", help="a project's settings (env values redacted)").add_argument("project_id")
     pi = sub.add_parser("plan-issue", help="headless /ilk2-plan for one consumer issue (docs/07 §7.4.2b): "
                         "plans and checks; never submits. Exit 0 drafted-checked, 3 drafted, 1 failed")
-    pi.add_argument("--input", required=True, help="the issue JSON (gh-resolve's planner contract)")
+    pi.add_argument("--input", required=True, help="the issue JSON (the planner contract, docs/07 §7.4.2b)")
     pi.add_argument("--outcome", required=True, help="where to write the outcome JSON")
     rs = sub.add_parser("rsi", help="ilk2 improving itself (docs/06 'RSI')")
     rs.add_argument("op", choices=["find", "candidates", "tick", "pending", "land", "log", "resolve",

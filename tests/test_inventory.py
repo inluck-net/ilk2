@@ -101,3 +101,40 @@ def test_the_command_exits_1_while_anything_v1_remains(ilk, tmp_path, monkeypatc
     monkeypatch.setenv("PATH", str(home / "bin"))
     assert cli.main(["v1", "inventory"]) == 1
     assert json.loads(capsys.readouterr().out)["open"]["artifacts"] > 0
+
+
+def test_the_consumers_come_from_the_host_file_and_ilk2_names_none(tmp_path):
+    # Chad, Oct 22: ilk2 works without any consumer and does not know which ones exist; the
+    # repos to count V1 references in are host configuration, not code.
+    home, repo = planted_home(tmp_path)
+    out = inventory.scan(home=home, path_dirs=[str(home / "bin")])
+    assert out["consumers"] == [] and out["consumers_source"] == "absent"
+    (home / ".ilk2").mkdir(exist_ok=True)
+    (home / ".ilk2" / "v1-consumers.json").write_text(json.dumps(
+        [{"name": "consumer", "repo": str(repo), "sub": "pkg", "pattern": r"\.ilk-data"}]))
+    out = inventory.scan(home=home, path_dirs=[str(home / "bin")])
+    assert out["consumers_source"] == str(home / ".ilk2" / "v1-consumers.json")
+    c = out["consumers"][0]
+    assert c["name"] == "consumer" and (c["lines"], c["occurrences"], c["files"]) == (1, 2, 1)
+
+
+def test_ilk2_code_names_no_consumer():
+    import io
+    import re
+    import tokenize
+    src = Path(inventory.__file__).parent
+    pat = re.compile(r"gh-resolve|gh_resolve", re.I)
+    hits = []
+    for path in sorted(src.rglob("*.py")):
+        prev = None
+        for tok in tokenize.generate_tokens(io.StringIO(path.read_text()).readline):
+            if tok.type in (tokenize.NL, tokenize.COMMENT):
+                continue
+            starts = prev in (None, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+            if tok.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+                prev = tok.type
+                continue
+            if not (tok.type == tokenize.STRING and starts) and pat.search(tok.string):
+                hits.append(f"{path.name}:{tok.start[0]}")
+            prev = tok.type
+    assert hits == []

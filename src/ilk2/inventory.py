@@ -4,7 +4,8 @@ Read-only. An artifact is V1 when its real target is under ~/.ilk or ~/.ilk-data
 clone (the ilk-skills checkout). Covered: skills, commands, hooks, tools and rules links for
 Claude Code, Codex, Cursor and ~/.agents; hook registrations in Claude's settings.json; the
 installer's auto-plan blocks; PATH links; V1 worker homes; launchd files by name or content, in
-any folder; and the consumer repos that read V1, as matching-line counts at a recorded commit.
+any folder; and the consumer repos that read V1, as matching-line counts at a recorded commit
+(the repos are listed in ~/.ilk2/v1-consumers.json; ilk2 names none).
 Worker homes and plists are reported by path only: their contents can hold credentials, so
 they are matched, never printed. The data trees are listed apart; they go at the archive (§7.4.6).
 
@@ -46,15 +47,20 @@ class Consumer:
         return f"rg -n {g} -e '{self.pattern}' {self.sub}"
 
 
-def default_consumers(home: Path) -> list[Consumer]:
-    """The consumers docs/07 §7.4.4 names; their baselines were counted with these commands."""
-    base = home / "Projects" / "github" / "inluck-net"
-    return [Consumer("gh-resolve", str(base / "gh-resolve"), "tools/gh_resolve",
-                     r"\.ilk-data|ILK_DATA_HOME|ILK_DATA_DIR|\.ilk/current|ilk-loop|park_master\.py"),
-            Consumer("ilk-pocket", str(base / "ilk-pocket"), "ilk_pocket", r"\.ilk-data|ILK_DATA_HOME"),
-            Consumer("mac-provision", str(base / "mac-provision"), "lib",
-                     r"\.ilk-data|\.ilk/current|net\.inluck\.ilk\.scheduler|skills/ilk-loop",
-                     glob="*.sh", skip_tests=False)]
+def consumers_file(home: Path) -> Path:
+    return home / ".ilk2" / "v1-consumers.json"
+
+
+def host_consumers(home: Path) -> list[Consumer] | None:
+    """The repos to count V1 references in, from ~/.ilk2/v1-consumers.json
+    ([{"name", "repo", "sub", "pattern", "glob"?, "skip_tests"?}]): host configuration, so ilk2
+    names no consumer (Chad, Oct 22). None when the file is absent or unreadable."""
+    try:
+        rows = json.loads(consumers_file(home).read_text())
+    except (OSError, ValueError):
+        return None
+    return [Consumer(r["name"], _expand(r["repo"], home), r["sub"], r["pattern"],
+                     r.get("glob", "*.py"), r.get("skip_tests", True)) for r in rows]
 
 
 def _under(p: str, roots: list[str]) -> bool:
@@ -199,13 +205,18 @@ def scan(home: Path | None = None, clones: list[str] | None = None,
     for a in arts:
         if a["path"] in allowed:
             a["allowed"] = allowed[a["path"]]
-    cons = [_consumer(c) for c in (consumers if consumers is not None else default_consumers(home))]
+    source = "argument"
+    if consumers is None:
+        consumers = host_consumers(home)
+        source = str(consumers_file(home)) if consumers is not None else "absent"
+    cons = [_consumer(c) for c in consumers or []]
     for c in cons:
         if c["name"] in allowed:
             c["allowed"] = allowed[c["name"]]
     open_arts = [a for a in arts if "allowed" not in a]
     open_cons = [c for c in cons if c.get("lines") and "allowed" not in c]
     return {"host": socket.gethostname().split(".")[0], "artifacts": arts, "consumers": cons,
+            "consumers_source": source,
             "data": [str(home / d) for d in (".ilk", ".ilk-data") if (home / d).exists()],
             "open": {"artifacts": len(open_arts), "consumers": len(open_cons)},
             "clean": not open_arts and not open_cons}
