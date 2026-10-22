@@ -106,7 +106,9 @@ def test_s20_package_script_resolves_and_config_edit_changes_version(ilk, tmp_pa
     assert g["script"] == "test:unit" and g["script_entry"] == PKG["scripts"]["test:unit"]
     assert ilk.drive_inprocess(bid) == "shipped"
     gr = ilk.s.one("SELECT * FROM gate_results ORDER BY id DESC LIMIT 1")
-    base = ilk.s.one("SELECT spec_version FROM base_measurements WHERE batch_id = ?", bid)
+    # the base measured before the edit: since dcaac7a a changed config adds a second base row,
+    # measured under the step's config, and an unordered read returned either (Oct 22)
+    base = ilk.s.one("SELECT spec_version FROM base_measurements WHERE batch_id = ? ORDER BY at LIMIT 1", bid)
     assert gr["spec_version"] != base["spec_version"]  # the config edit changed the gate version
     assert json.loads(gr["details"])["comparable_base"] is False
 
