@@ -96,9 +96,24 @@ def identity(root: Path) -> dict[str, str]:
     """Author and committer for ilk2's commits: the repository's own configured user, as V1's
     workers committed, else ilk2's. gh-resolve on rezmac kira-live, Oct 14: its foreign-commit
     guard trusts only the clone's configured identity, and declined #8716's publish of
-    commits by ilk2@localhost."""
+    commits by ilk2@localhost. The repository's user is the one git resolves (docs/02 §2.4.1
+    step 2): a half-set identity keeps the configured half and takes the other from git's own
+    -- chad-mbp has user.email and no user.name, and git synthesises the name from the host's
+    gecos. Falling back unless BOTH keys are set (Oct 22) threw a good email away and blocked
+    every batch there behind an identity fix git did not need."""
     name = git(root, "config", "user.name", check=False)
     email = git(root, "config", "user.email", check=False)
+    if name and email:
+        return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+                "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+    if not (name or email):
+        return dict(IDENT)
+    ident = git(root, "var", "GIT_AUTHOR_IDENT", check=False)   # "Name <email> <ts> <tz>"
+    at = ident.rfind(" <")
+    gt = ident.find(">", at)
+    if at < 0 or gt < 0:
+        return dict(IDENT)
+    name, email = name or ident[:at], email or ident[at + 2:gt]
     if not (name and email):
         return dict(IDENT)
     return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
@@ -114,8 +129,8 @@ def commit_refusal(root: Path, expected_email: str | None) -> str | None:
                       "core.bare", check=False) == "true":
         return f"core.bare is true in {common}/config"
     if expected_email:
-        got = identity(root)["GIT_AUTHOR_EMAIL"]  # what a commit would carry: user.email without
-        if got != expected_email:                 # user.name falls back to ilk2@localhost
+        got = identity(root)["GIT_AUTHOR_EMAIL"]  # the email a commit would carry: the configured
+        if got != expected_email:                 # user.email, else git's own on a half-set identity
             return (f"commits in {root} would be authored {got}; the project expects {expected_email} "
                     "(user.name and user.email)")
     return None
