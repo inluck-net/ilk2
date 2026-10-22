@@ -42,6 +42,23 @@ def lock_digest(where: Path) -> str | None:
     return h.hexdigest()[:16] if seen else None
 
 
+def claim_session(s: Store, aid: str, session: str) -> bool:
+    """Compare-and-set: give attempt `aid` the carried session before it dispatches, only when
+    no live attempt (status starting or running) already holds it. Two plans whose depends_on
+    forks become ready together would otherwise resume one transcript twice (judgment call:
+    claim on carry rather than trust plan order, because gh-resolve's masters are serial chains
+    and a fork is not a measured failure; wrong if a fork is ever meant to share one live
+    transcript). False leaves the attempt fresh."""
+    with s.tx() as c:
+        held = c.execute("SELECT 1 FROM attempts WHERE session_id = ? AND id != ? AND "
+                         "status IN ('starting', 'running') LIMIT 1", (session, aid)).fetchone()
+        if held:
+            return False
+        cur = c.execute("UPDATE attempts SET session_id = ? WHERE id = ? AND session_id IS NULL",
+                        (session, aid))
+        return cur.rowcount == 1
+
+
 # Run endings that are not a failure of the run: they never consume a restart (§2.10).
 # Anything else (error, store-busy, lease, a crash) does, so a driver that fails the same
 # way every time reaches blocked (crash-loop) instead of respawning forever (Codex M1 review #3).
@@ -1029,20 +1046,43 @@ class Driver:
                           "ORDER BY created_at DESC LIMIT 1", step["id"])
         return bool(last) and last["outcome"] in ("red", "interrupted", "timeout", "crashed")
 
-    def carried_session(self, step) -> str | None:
-        """The session of the previous step of the same plan, if that step was accepted and its
-        session stayed under carry_max_context (docs/02 §2.6: the step is still the bound
-        for a fresh start; carrying is an optimisation that falls back to a fresh session)."""
-        if step["idx"] == 0:
+    def dependency_carry(self, step):
+        """The accepted attempt of the latest shipped dependency plan's greatest-idx step that
+        has one: the source a step with no earlier step of its own can still carry (gh-resolve's
+        V1 masters put one step in each sub-plan and each sub-plan runs as its own lane, so the
+        within-plan edge fired once per batch and every other work step started cold)."""
+        plan = self.s.get("plans", step["plan_id"])
+        deps = json.loads(plan["depends_on"] or "[]")
+        if not deps:
             return None
-        row = self.s.one("SELECT a.session_id, a.timings FROM attempts a JOIN steps st ON "
-                         "st.id = a.step_id WHERE st.plan_id = ? AND st.idx = ? AND "
-                         "a.outcome = 'accepted' ORDER BY a.created_at DESC LIMIT 1",
-                         step["plan_id"], step["idx"] - 1)
+        marks = ", ".join("?" for _ in deps)
+        src = self.s.one(f"SELECT * FROM plans WHERE batch_id = ? AND status = 'shipped' AND "
+                         f"slug IN ({marks}) ORDER BY ord DESC LIMIT 1", self.batch_id, *deps)
+        if not src:
+            return None
+        return self.s.one("SELECT a.session_id, a.timings, st.plan_id FROM attempts a JOIN steps "
+                          "st ON st.id = a.step_id WHERE st.plan_id = ? AND a.outcome = 'accepted' "
+                          "AND a.session_id IS NOT NULL ORDER BY st.idx DESC, a.created_at DESC "
+                          "LIMIT 1", src["id"])
+
+    def carried_session(self, step) -> tuple[str, str] | None:
+        """(session, source plan id) for the step's first attempt: the previous step of the same
+        plan, else the last accepted step of its latest shipped dependency. Either way that step
+        must be accepted and its session under carry_max_context (docs/02 §2.6: the step is still
+        the bound for a fresh start; carrying is an optimisation that falls back to a fresh
+        session)."""
+        row = None
+        if step["idx"] > 0:
+            row = self.s.one("SELECT a.session_id, a.timings, st.plan_id FROM attempts a JOIN "
+                             "steps st ON st.id = a.step_id WHERE st.plan_id = ? AND st.idx = ? "
+                             "AND a.outcome = 'accepted' ORDER BY a.created_at DESC LIMIT 1",
+                             step["plan_id"], step["idx"] - 1)
+        if not row or not row["session_id"]:
+            row = self.dependency_carry(step)
         if not row or not row["session_id"]:
             return None
         peak = json.loads(row["timings"] or "{}").get("peak_context_tokens") or 0
-        return None if peak > self.cfg.carry_max_context else row["session_id"]
+        return None if peak > self.cfg.carry_max_context else (row["session_id"], row["plan_id"])
 
     def all_evidence(self, step_id: str) -> str:
         """Every red attempt's evidence for the escalation round: a fresh session sees what each
@@ -1101,15 +1141,16 @@ class Driver:
                                   sandbox=self.cfg.sandbox, sandbox_allow=self.cfg.sandbox_allow,
                                   model=self.cfg.worker_model, effort=self.cfg.worker_effort,
                                   deny_commands=self.cfg.deny_commands)
-        resume, carried = None, False
+        resume, carried = None, None
         if n in bounds.RESUMED_ATTEMPTS and session and self.s.one(
                 "SELECT 1 FROM attempts WHERE step_id = ? AND session_id = ? AND run_id = ?",
                 step["id"], session, self.run_id):
             # Q6: the 2nd attempt resumes the same session. The 3rd starts a fresh one.
             resume = session
         elif n == 1 and session is None and self.cfg.carry_session:
-            resume = self.carried_session(step)
-            carried = resume is not None
+            found = self.carried_session(step)
+            if found and claim_session(self.s, aid, found[0]):
+                resume, carried = found  # carried names the plan the session came from
         if resume:
             # A session's transcript lives in the config dir of the attempt that created it
             first = self.s.one("SELECT id, run_id FROM attempts WHERE session_id = ? "
@@ -1121,13 +1162,23 @@ class Driver:
                        fresh_config=resume is None)
         docs = self.write_documents(files)
         if carried:
-            prompt = ("The previous step of this plan is accepted and committed. Continue in this "
-                      "session with the next step, same rules as before; you already have the "
-                      "context you read.\n\n" + worker.brief(
-                          step["title"], step["instructions"],
-                          [" ".join(g.command) for g in gate_list], evidence, preload=None,
-                          scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope,
-                          documents=docs, refreshed_at=getattr(self, "refreshed_at", None)))
+            if carried == step["plan_id"]:
+                lead = ("The previous step of this plan is accepted and committed. Continue in "
+                        "this session with the next step, same rules as before; you already have "
+                        "the context you read.")
+            else:
+                slug = self.s.get("plans", carried)["slug"]
+                lead = (f"The previous step — the last step of the dependency plan {slug}, which "
+                        "this plan depends on — is accepted and committed at the batch head, and "
+                        "this step runs in a worktree that already contains that commit (under "
+                        "lanes it is a different worktree from the one the session worked in). "
+                        "Continue in this session with the next step, same rules as before; work "
+                        "here, and you already have the context you read.")
+            prompt = lead + "\n\n" + worker.brief(
+                step["title"], step["instructions"],
+                [" ".join(g.command) for g in gate_list], evidence, preload=None,
+                scope=json.loads(step["scope"]), scope_enforced=self.cfg.enforce_scope,
+                documents=docs, refreshed_at=getattr(self, "refreshed_at", None))
         elif resume:
             prompt = "The driver's gate is red after your attempt. Fix the cause, with the same " \
                      "rules as before.\n\n" + (evidence or "")
