@@ -1532,7 +1532,9 @@ def test_ilk2_commits_as_the_repositorys_configured_user(ilk):
     assert who == "chad007 <chad007@users.noreply.github.com>|chad007 <chad007@users.noreply.github.com>"
 
 
-def test_ilk2_commits_as_itself_when_the_repository_names_no_user(ilk):
+def test_ilk2_commits_as_itself_when_the_repository_names_no_user(ilk, monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     ilk.make_repo()
     ilk.project()
     ilk.script([GOOD])
@@ -1774,8 +1776,10 @@ def test_a_lease_on_a_branch_checked_out_elsewhere_is_refused_and_released(ilk, 
     assert checked_out(ilk, root) is None
 
 
-def test_a_repo_that_cannot_take_a_commit_blocks_before_any_worker_runs(ilk):
+def test_a_repo_that_cannot_take_a_commit_blocks_before_any_worker_runs(ilk, monkeypatch):
     from ilk2 import batches
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     # Oct 22: a consumer's test run inside a git hook rewrote kira-cloudflare's .git/config
     # (core.bare=true, user.email=test@example.com); 5 accepted commits authored "test".
     ilk.make_repo()
@@ -1790,11 +1794,12 @@ def test_a_repo_that_cannot_take_a_commit_blocks_before_any_worker_runs(ilk):
     assert "test@example.com" in rows[0]["detail"] and "me@example.com" in rows[0]["detail"]
     assert ilk.stub_calls() == 0
     ilk.git(ilk.repo, "config", "--unset", "user.name")
-    ilk.git(ilk.repo, "config", "user.email", "me@example.com")
+    ilk.git(ilk.repo, "config", "--unset", "user.email")
     batches.resume(ilk.s, bid)
-    assert ilk.drive_inprocess(bid).startswith("blocked")       # no user.name: ilk2@localhost
+    assert ilk.drive_inprocess(bid).startswith("blocked")       # no user at all: ilk2@localhost
     assert "ilk2@localhost" in ilk.s.open_human_rows(bid)[0]["detail"]
     ilk.git(ilk.repo, "config", "user.name", "Me")
+    ilk.git(ilk.repo, "config", "user.email", "me@example.com")
     batches.resume(ilk.s, bid)
     assert ilk.drive_inprocess(bid) == "shipped"
     b = ilk.s.get("batches", bid)
@@ -1814,3 +1819,21 @@ def test_a_bare_flag_set_during_an_attempt_commits_nothing(ilk):
     assert [r["reason"] for r in ilk.s.open_human_rows(bid)] == ["commit-identity"]
     assert "core.bare" in ilk.s.open_human_rows(bid)[0]["detail"]
     assert ilk.git(ilk.repo, "--git-dir", str(ilk.repo / ".git"), "rev-parse", b["branch"]) == base
+
+
+def test_a_configured_email_is_kept_when_user_name_is_unset(ilk, monkeypatch):
+    # chad-mbp, Oct 22: git has user.email and no user.name anywhere, and synthesises the name
+    # from the host's gecos. identity() threw the email away, so a repository whose git identity
+    # already carried the project's commit_email was blocked on ilk2@localhost. The synthesised
+    # name is the host's to decide, so only the email is asserted.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    ilk.make_repo()
+    ilk.git(ilk.repo, "config", "user.email", "me@example.com")
+    ilk.project(commit_email="me@example.com")
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    assert ilk.s.open_human_rows(bid) == []
+    b = ilk.s.get("batches", bid)
+    assert ilk.git(ilk.repo, "log", "-1", "--format=%ae", b["branch"]) == "me@example.com"
