@@ -105,6 +105,22 @@ def identity(root: Path) -> dict[str, str]:
             "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
 
 
+def commit_refusal(root: Path, expected_email: str | None) -> str | None:
+    """Why ilk2 must not commit in root now, or None (docs/02 §2.4 step 2). Oct 22: a test run
+    inside a git hook set core.bare and user.email=test@example.com in a consumer's real
+    .git/config, and 5 accepted commits were authored "test"."""
+    common = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
+    if common and git(root, "config", "--file", str(Path(common) / "config"), "--type=bool",
+                      "core.bare", check=False) == "true":
+        return f"core.bare is true in {common}/config"
+    if expected_email:
+        got = identity(root)["GIT_AUTHOR_EMAIL"]  # what a commit would carry: user.email without
+        if got != expected_email:                 # user.name falls back to ilk2@localhost
+            return (f"commits in {root} would be authored {got}; the project expects {expected_email} "
+                    "(user.name and user.email)")
+    return None
+
+
 def commit_tree(root: Path, tree: str, parent: str, message: str, attempt_id: str) -> str:
     msg = f"{message}\n\n{TRAILER}: {attempt_id}\n"
     p = subprocess.run(["git", "-C", str(root), "commit-tree", tree, "-p", parent, "-F", "-"],

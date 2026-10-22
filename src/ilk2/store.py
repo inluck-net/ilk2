@@ -48,6 +48,7 @@ NEEDS_HUMAN_REASONS = {
     "rsi-review", "rsi-rollback",   # unattended RSI landing (rsi_land.py)
     "rsi-health", "rsi-goal",       # RSI watched from outside, and standing goals (docs/08)
     "repair-rounds",                # a verification step's repairs keep reopening (docs/09 V2)
+    "commit-identity",              # a bare repository or a wrong user.email (docs/02 §2.4)
 }
 # Rows that stay active once acked: acking an ongoing condition must not spawn a second row,
 # and recovery clears the acked one (docs/08 §8.6).

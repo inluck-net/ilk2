@@ -1718,3 +1718,45 @@ def test_a_lease_on_a_branch_checked_out_elsewhere_is_refused_and_released(ilk, 
     assert rc == 3 and "cannot check out" in capsys.readouterr().out
     assert lease.get(ilk.s, root)["holder"] == "released"
     assert checked_out(ilk, root) is None
+
+
+def test_a_repo_that_cannot_take_a_commit_blocks_before_any_worker_runs(ilk):
+    from ilk2 import batches
+    # Oct 22: a consumer's test run inside a git hook rewrote kira-cloudflare's .git/config
+    # (core.bare=true, user.email=test@example.com); 5 accepted commits authored "test".
+    ilk.make_repo()
+    ilk.project(commit_email="me@example.com")
+    ilk.git(ilk.repo, "config", "user.name", "test")
+    ilk.git(ilk.repo, "config", "user.email", "test@example.com")
+    ilk.script([GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid).startswith("blocked")
+    rows = ilk.s.open_human_rows(bid)
+    assert [r["reason"] for r in rows] == ["commit-identity"]
+    assert "test@example.com" in rows[0]["detail"] and "me@example.com" in rows[0]["detail"]
+    assert ilk.stub_calls() == 0
+    ilk.git(ilk.repo, "config", "--unset", "user.name")
+    ilk.git(ilk.repo, "config", "user.email", "me@example.com")
+    batches.resume(ilk.s, bid)
+    assert ilk.drive_inprocess(bid).startswith("blocked")       # no user.name: ilk2@localhost
+    assert "ilk2@localhost" in ilk.s.open_human_rows(bid)[0]["detail"]
+    ilk.git(ilk.repo, "config", "user.name", "Me")
+    batches.resume(ilk.s, bid)
+    assert ilk.drive_inprocess(bid) == "shipped"
+    b = ilk.s.get("batches", bid)
+    assert ilk.git(b["execution_root"], "log", "-1", "--format=%ae", b["branch"]) == "me@example.com"
+
+
+def test_a_bare_flag_set_during_an_attempt_commits_nothing(ilk):
+    ilk.make_repo()
+    ilk.project()                                               # no commit_email: the bare check only
+    cfg = ilk.repo / ".git" / "config"
+    corrupt = {"write": str(cfg), "text": cfg.read_text().replace("bare = false", "bare = true")}
+    ilk.script([GOOD, corrupt])
+    bid = ilk.submit(one_step())
+    b = ilk.s.get("batches", bid)
+    base = ilk.git(ilk.repo, "rev-parse", b["branch"])
+    assert ilk.drive_inprocess(bid).startswith("blocked")
+    assert [r["reason"] for r in ilk.s.open_human_rows(bid)] == ["commit-identity"]
+    assert "core.bare" in ilk.s.open_human_rows(bid)[0]["detail"]
+    assert ilk.git(ilk.repo, "--git-dir", str(ilk.repo / ".git"), "rev-parse", b["branch"]) == base

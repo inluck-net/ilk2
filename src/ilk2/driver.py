@@ -205,6 +205,7 @@ class Driver:
             raise Stop("waiting-lease")
         if row and row["holder"] == "released":
             lease.driver_acquire(self.s, str(root), row["generation"])
+        self.check_commit_identity(root)  # before any worker time is spent on a root it cannot commit to
         cur = gitops.git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
         if cur != branch:
             if gitops.branch_head(root, branch) is None:
@@ -270,6 +271,7 @@ class Driver:
             done = gitops.is_ancestor(root, lane_head, parent)  # merged before a crash: re-gate only
             repair = None
             if not done:
+                self.check_commit_identity(root)
                 union = []
                 if self.cfg.union_merge:
                     attrs = self.dir / "union-merge.attributes"
@@ -759,6 +761,14 @@ class Driver:
                           fields={"blocked_reason": "; ".join(blocked)})
         head = gitops.branch_head(self.batch_root, self.batch_branch)
         lease.driver_release(self.s, str(self.batch_root), head)  # batch.blocked: emitted by the store
+
+    def check_commit_identity(self, root: Path) -> None:
+        """Commit nothing under a wrong identity or into a bare repository: block the batch
+        instead, before the step's intent is written (docs/02 §2.4 step 2)."""
+        why = gitops.commit_refusal(root, self.cfg.commit_email)
+        if why:
+            self.block_batch("commit-identity", why,
+                             f"fix the repository's git config, then: ilk2 resume {self.batch_id}")
 
     def block_batch(self, reason: str, detail: str, clear: str, release: bool = True) -> None:
         self.s.transition("batches", self.batch_id, "blocked", actor="driver", reason=reason,
@@ -1527,6 +1537,7 @@ class Driver:
     def accept(self, step, aid: str, parent: str) -> None:
         if not lease.holder_is_driver(self.s, str(self.batch_root)):  # a lane holds its batch's
             raise Stop("lease", "the root lease is not held by the driver")
+        self.check_commit_identity(self.root)
         tree = gitops.worktree_tree(self.root)
         intent = {"attempt_id": aid, "parent": parent, "tree": tree}
         self.s.transition("steps", step["id"], "accepting", actor="driver", reason="intent",

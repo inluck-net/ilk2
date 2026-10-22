@@ -48,6 +48,9 @@ class ProjectConfig:
     # roots; None leaves it uncapped (judgment call: keeps today's callers working; gh-resolve
     # sets about 3600). reserve: host runs kept free for this project even while it is idle.
     max_lease_s: float | None = None
+    # The address every ilk2 commit in this project must carry (docs/02 §2.4 step 2); None
+    # checks only that the repository is not bare.
+    commit_email: str | None = None
     reserve: int = 0
     # Lanes (docs/06 "Parallel plans", Chad's go Oct 14): independent work plans of one batch
     # run at once, each in its own worktree and lane branch, merged into the batch branch when
