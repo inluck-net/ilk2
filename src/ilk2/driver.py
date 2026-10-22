@@ -16,7 +16,7 @@ from dataclasses import asdict, replace
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import batches, bounds, clock, faults, gates, gitops, lease, paths, procs, worker
+from . import batches, bounds, clock, delivery, faults, gates, gitops, lease, paths, procs, worker
 from .gates import vitest
 from .gates.env import pinned_env
 from .plans import Gate, v1_documents
@@ -747,10 +747,11 @@ class Driver:
         head = gitops.branch_head(self.batch_root, self.batch_branch)
         self.s.transition("batches", self.batch_id, "shipped", actor="driver", reason="all plans shipped",
                           expect_from={"active"}, fields={"terminal_reason": "shipped"})
+        owed = delivery.on_shipped(self.s, self.batch_id)  # docs/10: the event carries it, owed
         lease.driver_release(self.s, str(self.batch_root), head)
         free_root(self.s, self.batch_root, self.batch_id)
         self.cleanup_diag()
-        self.event("batch.shipped", head=head)
+        self.event("batch.shipped", head=head, delivery=owed)
 
     def finish_blocked(self) -> None:
         blocked = [f"{p['slug']}: {p['blocked_reason']}" for p in

@@ -51,6 +51,11 @@ class ProjectConfig:
     # The address every ilk2 commit in this project must carry (docs/02 §2.4 step 2); None
     # checks only that the repository is not bare.
     commit_email: str | None = None
+    # docs/10 §10.3.1: an opaque name the deliverer claims with (`deliver claim --by`); None
+    # refuses `submit --deliver`. The bounds are judgment calls (§10.5).
+    deliverer: str | None = None
+    deliver_owed_after_s: float = 1800
+    deliver_claim_max_s: float = 7200
     reserve: int = 0
     # Lanes (docs/06 "Parallel plans", Chad's go Oct 14): independent work plans of one batch
     # run at once, each in its own worktree and lane branch, merged into the batch branch when
@@ -293,7 +298,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
            originals: dict | None = None, branch: str | None = None,
            deny_paths: list[str] | None = None, meta: dict | None = None,
            check_only: bool = False, not_after: float | None = None,
-           fence: tuple[str, int] | None = None) -> str:
+           fence: tuple[str, int] | None = None, deliver: str | None = None,
+           deliver_base: str | None = None, deliver_draft: bool = False) -> str:
     """Validate and create a batch. check_only validates exactly as a submit would and creates
     nothing: a consumer can test its rendered plans before it goes live (gh-resolve on rezmac,
     Oct 14: two live dispatches were rejected one after the other)."""
@@ -340,6 +346,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
             if bad:
                 problems.append(f"plan {p.slug} step {i}: declares writes to denied paths {bad} "
                                 f"(deny_paths {deny})")
+    from . import delivery
+    problems += delivery.request_problems(cfg, deliver, deliver_base, deliver_draft)
     if not problems and not cfg.setup:
         problems += preflight(spec, repo, base_sha, cfg)
     if problems:
@@ -380,7 +388,8 @@ def submit(s: Store, project_id: str, spec: plans.BatchSpec, *, base: str | None
         snapshot["meta"] = meta
     try:
         _commit(s, bid, project_id, base_sha, branch, root, priority, consumer_ref, snapshot,
-                originals, spec, meta, path_warns, not_after, fence)
+                originals, spec, meta, path_warns, not_after, fence,
+                (cfg, deliver, deliver_base or proj["default_branch"], deliver_draft) if deliver else None)
     except SubmitRejected:
         if made is not None:
             gitops.remove_worktree(repo, made)
@@ -411,7 +420,7 @@ def advance_fence(s, key: str, token: int) -> int:
 
 
 def _commit(s, bid, project_id, base_sha, branch, root, priority, consumer_ref, snapshot,
-            originals, spec, meta, path_warns, not_after, fence) -> None:
+            originals, spec, meta, path_warns, not_after, fence, deliver=None) -> None:
     with s.tx():
         late = _fenced(s, not_after, fence)  # in the same transaction as the insert
         if late:
@@ -423,6 +432,9 @@ def _commit(s, bid, project_id, base_sha, branch, root, priority, consumer_ref, 
                              "consumer_ref": consumer_ref, "status": "queued",
                              "snapshot": dumps(snapshot), "originals": dumps(originals or {}),
                              "created_at": clock.wall()})
+        if deliver is not None:  # docs/10: the request is made with the batch, in one transaction
+            from . import delivery
+            delivery.insert(s, bid, *deliver)
         for po, p in enumerate(spec.plans):
             pid = f"{bid}.{p.slug}"
             s.insert("plans", {"id": pid, "batch_id": bid, "slug": p.slug, "ord": po,
@@ -614,6 +626,8 @@ def cancel(s: Store, batch_id: str, reason: str, superseded_by: str | None = Non
                  expect_from={"queued", "active", "blocked", "parked"},
                  fields={"terminal_reason": f"cancelled ({reason})",
                          "blocked_reason": f"superseded by {superseded_by}" if superseded_by else None})
+    from . import delivery
+    delivery.on_cancelled(s, batch_id)  # docs/10: nothing to deliver
     live = s.one("SELECT 1 FROM runs WHERE batch_id = ? AND status IN ('starting', 'running')", batch_id)
     if not live:  # nothing running: finish now; otherwise the supervisor stops the run first
         from .driver import finish_cancel

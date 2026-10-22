@@ -71,7 +71,7 @@ def _root_setup(s, b) -> dict | None:
 
 
 def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
-    from . import lease
+    from . import delivery, lease
     if batch_id:
         rows = s.all("SELECT * FROM batches WHERE id = ?", batch_id)
     elif consumer_ref:  # every batch a consumer submitted under one ref, newest first
@@ -115,7 +115,8 @@ def status(s, batch_id: str | None, consumer_ref: str | None = None) -> dict:
                                          "AND entity_id = ? AND to_state = 'shipped'", b["id"])
                                    or {"t": None})["t"],
                     "setup": _root_setup(s, b),
-                    "base_behind": json.loads(b["snapshot"]).get("base_behind")})
+                    "base_behind": json.loads(b["snapshot"]).get("base_behind"),
+                    "delivery": delivery.get(s, b["id"])})  # docs/10 §10.3.3
     if consumer_ref and not batch_id:
         nh = [dict(r) for b in rows for r in s.open_human_rows(b["id"])]
     else:
@@ -284,6 +285,23 @@ def main(argv: list[str] | None = None) -> int:
     fe.add_argument("--key", required=True)
     fe.add_argument("--token", type=int, required=True)
     sm.add_argument("--json", action="store_true")
+    sm.add_argument("--deliver", metavar="KIND", help="end the batch in a delivery: pr (docs/10); "
+                    "needs the project's deliverer setting")
+    sm.add_argument("--deliver-base", help="the PR's base branch (default: the project's)")
+    sm.add_argument("--deliver-draft", action="store_true", help="open the PR as a draft")
+
+    dl = sub.add_parser("deliver", help="the delivery protocol a deliverer speaks (docs/10 §10.3.4)")
+    dsub = dl.add_subparsers(dest="dcmd", required=True)
+    d_ = dsub.add_parser("list", help="owed and claimed deliveries, with what a deliverer needs")
+    d_.add_argument("--by")
+    d_.add_argument("--state")
+    for verb in ("claim", "done", "failed", "retry"):
+        d_ = dsub.add_parser(verb)
+        d_.add_argument("--batch", required=True)
+        if verb != "retry":
+            d_.add_argument("--by", required=True)
+    dsub.choices["done"].add_argument("--pr", required=True)
+    dsub.choices["failed"].add_argument("--detail", required=True)
 
     st = sub.add_parser("status")
     st.add_argument("--batch")
@@ -493,7 +511,9 @@ def main(argv: list[str] | None = None) -> int:
                                      originals={f.name: f.read_text()}, branch=a.branch,
                                      deny_paths=a.deny_path, meta=_meta(a.meta),
                                      check_only=a.check, not_after=a.not_after,
-                                     fence=(a.fence[0], int(a.fence[1])) if a.fence else None)
+                                     fence=(a.fence[0], int(a.fence[1])) if a.fence else None,
+                                     deliver=a.deliver, deliver_base=a.deliver_base,
+                                     deliver_draft=a.deliver_draft)
             except batches.SubmitRejected as e:
                 _out({"error": "rejected", "problems": e.problems}, True)  # B3: one shape
                 return 2
@@ -539,6 +559,21 @@ def main(argv: list[str] | None = None) -> int:
             v = batches.amend(s, a.batch, json.loads(Path(a.file).read_text()),
                               expect_version=a.version, reason=a.reason)
             _out({"version": v}, True)
+        elif a.cmd == "deliver":
+            from . import delivery
+            try:
+                if a.dcmd == "list":
+                    _out({"deliveries": delivery.listing(s, a.by, a.state)}, True)
+                    return 0
+                d = {"claim": lambda: delivery.claim(s, a.batch, a.by),
+                     "done": lambda: delivery.done(s, a.batch, a.by, a.pr),
+                     "failed": lambda: delivery.failed(s, a.batch, a.by, a.detail),
+                     "retry": lambda: delivery.retry(s, a.batch)}[a.dcmd]()
+            except delivery.Rejected as e:
+                _out({"error": "rejected", "problems": [str(e)]}, True)
+                return 2
+            _out({"batch": a.batch, "delivery": d}, True)
+            return 0
         elif a.cmd == "ack":
             s.ack(a.id, a.by)
         elif a.cmd == "lease":

@@ -21,7 +21,7 @@ This section is the protocol a deliverer codes against. Every command prints JSO
 
 ### 10.3.1 Opting in
 
-- **Project settings.** `deliverer` is an opaque name, default `null`; ilk2 only compares it with the name a claim gives. `deliver_owed_after_s` defaults to 1800 and `deliver_claim_max_s` to 7200 (10.5). Set with `ilk2 project set <project> --deliverer <name>`.
+- **Project settings.** `deliverer` is an opaque name, default `null`; ilk2 only compares it with the name a claim gives. `deliver_owed_after_s` defaults to 1800 and `deliver_claim_max_s` to 7200 (10.5). Set with `ilk2 project set <project> 'deliverer="<name>"'` (the setting's value is JSON).
 - **On the deliverer's side**, its own setting, off by default (10.4). Nothing is delivered unless both are on.
 
 ### 10.3.2 Asking at submit

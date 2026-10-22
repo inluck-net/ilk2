@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import batches, bounds, clock, faults, gitops, lease, paths, procs
+from . import batches, bounds, clock, delivery, faults, gitops, lease, paths, procs
 from .runs import counts_as_restart, fenced, has_unfinished_cancel, ready_plans, root_in_use_by_other
 from .store import Conflict, Store, new_id
 
@@ -105,6 +105,7 @@ class Supervisor:
                                     f"ilk2 lease recover --root {root}",
                                     batch_id=b["id"] if b else None)
         self.check_waits()
+        delivery.tick(self.s, now_w)  # docs/10: an owed or claimed delivery is bounded (I11)
         if now_w - getattr(self, "_pruned_at", 0) > 3600:  # hourly is plenty for a 30-day bound
             self._pruned_at = now_w
             n = self.s.prune_events(self.b.events_keep)

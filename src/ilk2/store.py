@@ -29,6 +29,7 @@ STATES: dict[str, set[str]] = {
     "steps": {"pending", "accepting", "accepted", "blocked", "cancelled"},
     "runs": {"starting", "running", "ended"},
     "attempts": {"running", "done"},
+    "deliveries": {"waiting", "owed", "claimed", "done", "failed", "dropped"},  # docs/10
 }
 TERMINAL = {
     "batches": {"shipped", "cancelled"},
@@ -49,6 +50,7 @@ NEEDS_HUMAN_REASONS = {
     "rsi-health", "rsi-goal",       # RSI watched from outside, and standing goals (docs/08)
     "repair-rounds",                # a verification step's repairs keep reopening (docs/09 V2)
     "commit-identity",              # a bare repository or a wrong user.email (docs/02 §2.4)
+    "delivery-owed", "delivery-failed",  # a PR nobody delivers, or a failed one (docs/10)
 }
 # Rows that stay active once acked: acking an ongoing condition must not spawn a second row,
 # and recovery clears the acked one (docs/08 §8.6).
@@ -168,6 +170,12 @@ CREATE INDEX IF NOT EXISTS goal_rounds_hash ON rsi_goal_rounds(goal_id, goal_has
 CREATE UNIQUE INDEX IF NOT EXISTS goal_rounds_open ON rsi_goal_rounds(goal_id) WHERE closed_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS rsi_one_planning ON rsi_candidates(status) WHERE status = 'planning';
 CREATE INDEX IF NOT EXISTS transitions_to ON transitions(entity, to_state, at, entity_id);
+-- docs/10: one delivery request per batch, keyed by the batch id
+CREATE TABLE IF NOT EXISTS deliveries (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, base TEXT NOT NULL, draft INTEGER NOT NULL,
+  deliverer TEXT NOT NULL, status TEXT NOT NULL, pr_url TEXT, detail TEXT, claimed_by TEXT,
+  claimed_at REAL, owed_at REAL, updated_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+CREATE INDEX IF NOT EXISTS deliveries_status ON deliveries(status, deliverer);
 CREATE INDEX IF NOT EXISTS transitions_actor ON transitions(actor, at, entity, entity_id);
 CREATE INDEX IF NOT EXISTS attempts_ended ON attempts(ended_at, step_id);
 CREATE INDEX IF NOT EXISTS batches_project ON batches(project_id, created_at);
