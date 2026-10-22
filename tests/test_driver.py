@@ -581,6 +581,60 @@ def test_next_step_of_a_plan_resumes_the_previous_steps_session(ilk):
     assert "Preloaded context" not in prompts[1]           # the session already has it
 
 
+def test_a_dependent_plan_carries_the_dependency_steps_session(ilk):
+    # gh-resolve's batches are V1 /ilk-plan masters whose sub-plans hold one step each and run as
+    # their own lanes, so the within-plan edge never fired for them and every work step but one
+    # started cold (docs/02 §2.6).
+    ilk.make_repo()
+    ilk.project()
+    ilk.script([{"write": "a.txt", "text": "a"}], [{"write": "b.txt", "text": "b"}],
+               [{"write": "c.txt", "text": "c"}])
+    spec = {"plans": [
+        {"slug": "p", "steps": [{"title": "p0", "instructions": "p step", "must_pass": [],
+                                 "gates": [gate("tests/test_calc.py")]}]},
+        {"slug": "q", "depends_on": ["p"],
+         "steps": [{"title": "q0", "instructions": "q step", "must_pass": [],
+                    "gates": [gate("tests/test_calc.py")]}]},
+        {"slug": "r", "steps": [{"title": "r0", "instructions": "r step", "must_pass": [],
+                                 "gates": [gate("tests/test_calc.py")]}]}]}
+    bid = ilk.submit(spec)
+    assert ilk.drive_inprocess(bid) == "shipped"
+
+    def session(slug):
+        return ilk.s.one("SELECT a.session_id FROM attempts a JOIN steps st ON st.id = a.step_id "
+                         "JOIN plans pl ON pl.id = st.plan_id WHERE pl.slug = ? "
+                         "ORDER BY a.created_at LIMIT 1", slug)["session_id"]
+
+    assert session("q") == session("p")      # q carries the dependency's step
+    assert session("r") != session("q")      # an independent plan still starts cold
+    q_prompt = next(p for p in ilk.stub_prompts() if "q step" in p)
+    assert "previous step" in q_prompt.lower() and "is accepted and committed" in q_prompt
+    assert "of this plan" not in q_prompt.lower()
+
+
+def test_a_session_a_running_attempt_holds_is_not_carried_away(ilk):
+    # depends_on may fork: two siblings that become ready together would otherwise resume one
+    # transcript twice. The carry is claimed before dispatch (docs/02 §2.6).
+    from ilk2 import clock
+    from ilk2.driver import claim_session
+    ilk.make_repo()
+    ilk.project()
+    bid = ilk.submit(one_step())
+    step = ilk.s.one("SELECT * FROM steps WHERE batch_id = ?", bid)
+    rid = ilk.new_run(bid)
+    ilk.s.insert("attempts", {"id": "a-hold", "run_id": rid, "step_id": step["id"], "n": 1,
+                              "session_id": "S", "status": "running", "parent_commit": "x",
+                              "created_at": clock.wall()})
+    ilk.s.insert("attempts", {"id": "a-next", "run_id": rid, "step_id": step["id"], "n": 2,
+                              "status": "running", "parent_commit": "x", "created_at": clock.wall()})
+    assert claim_session(ilk.s, "a-next", "S") is False
+    assert ilk.s.get("attempts", "a-next")["session_id"] is None   # left fresh
+    ilk.s.transition("attempts", "a-hold", "done", actor="test", reason="ended",
+                     fields={"outcome": "accepted"})
+    assert claim_session(ilk.s, "a-next", "S") is True
+    assert ilk.s.get("attempts", "a-next")["session_id"] == "S"
+
+
 def test_red_first_a_must_pass_test_that_passes_without_the_change_is_red(ilk):
     # gh-resolve-e1, Oct 13: folding V1's "Red-first pins" step must keep its guarantee, that a
     # new pin fails on the old code ("loop-written tests copy the code's assumptions").
