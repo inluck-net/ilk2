@@ -413,6 +413,45 @@ def test_a_failed_source_is_recorded_and_the_others_still_count(ilk, tmp_path, m
     assert done["payload"]["sources"] == src
 
 
+def test_the_issues_source_is_retried_once_before_its_failure_is_recorded(ilk, monkeypatch):
+    # Oct 23: two `graphql: EOF` blips of `gh` were each recorded as an unreadable input (rsi-auto-12).
+    ilk.make_repo()
+    calls = []
+
+    def flaky(s):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('Post "https://api.github.com/graphql": EOF')
+        return []
+    monkeypatch.setattr(rsi, "_issues", flaky)
+    _, status, errors = rsi.find_sources(ilk.s, ilk.repo)
+    assert status["issues"] == "ok" and "issues" not in errors and len(calls) == 2
+    assert not [e for e in ilk.s.events_since(0) if e["kind"] == "rsi.issues-failed"]
+
+
+def test_an_issues_failure_that_persists_is_recorded_once_and_a_store_error_is_not_retried(
+        ilk, monkeypatch):
+    ilk.make_repo()
+    calls = []
+
+    def down(s):
+        calls.append(1)
+        raise RuntimeError("gh: connection refused")
+    monkeypatch.setattr(rsi, "_issues", down)
+    _, status, _ = rsi.find_sources(ilk.s, ilk.repo)
+    assert status["issues"].startswith("RuntimeError") and len(calls) == 2
+    assert len([e for e in ilk.s.events_since(0) if e["kind"] == "rsi.issues-failed"]) == 1
+    calls.clear()
+
+    def locked(s):
+        calls.append(1)
+        raise rsi.StoreError("db is locked")
+    monkeypatch.setattr(rsi, "_issues", locked)
+    with pytest.raises(rsi.StoreError):                           # the store: a failed tick
+        rsi.find_sources(ilk.s, ilk.repo)
+    assert len(calls) == 1
+
+
 def test_every_tick_records_its_start_and_how_it_ended(ilk, monkeypatch):
     ilk.make_repo()
     ilk2_project(ilk)

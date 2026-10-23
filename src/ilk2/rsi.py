@@ -156,23 +156,30 @@ def find_sources(s, repo: Path | None = None, now: float | None = None):
     status: dict[str, str] = {}
     errors: dict[str, Exception] = {}
 
-    def run(name, fn) -> list[Candidate]:
-        try:
-            got = fn()
-        except STORE_ERRORS:
-            raise
-        except Exception as e:  # noqa: BLE001 - one source's failure is that source's
-            status[name] = f"{type(e).__name__}: {e}"[:300]
-            errors[name] = e
-            s.event(f"rsi.{name}-failed" if name == "issues" else "rsi.source-failed",
-                    {"source": name, "error": status[name]})
-            return []
+    def run(name, fn, tries: int = 1) -> list[Candidate]:
+        for left in range(tries - 1, -1, -1):
+            try:
+                got = fn()
+                break
+            except STORE_ERRORS:
+                raise
+            except Exception as e:  # noqa: BLE001 - one source's failure is that source's
+                if left:
+                    continue
+                status[name] = f"{type(e).__name__}: {e}"[:300]
+                errors[name] = e
+                s.event(f"rsi.{name}-failed" if name == "issues" else "rsi.source-failed",
+                        {"source": name, "error": status[name]})
+                return []
         status[name] = "ok"
         return got
 
     out = run("records", lambda: _records(s, now)) + run("requests", lambda: requests(repo))
     if repo is not None:  # Chad's inputs live with the ilk2 repo's host (goals: goals.tick)
-        out += run("issues", lambda: _issues(s))
+        # Judgment call: `gh` gets a second try, for the two `graphql: EOF` blips of Oct 23
+        # (rsi-auto-12, reviewed); the local sources and goals do not, as a second read of the
+        # same file or store fails the same way. Wrong if `gh` fails in pairs.
+        out += run("issues", lambda: _issues(s), tries=2)
     return sorted(out, key=lambda c: -score(c.source, len(c.evidence))), status, errors
 
 
