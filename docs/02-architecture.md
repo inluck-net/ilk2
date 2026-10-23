@@ -252,7 +252,7 @@ On Oct 12, 36 V1 loop-gate reds did not reproduce in an isolated copy, because t
 
 ### 2.5.3 Setup hook
 
-A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). A transient failure (killed by a signal, a network or registry error, or its cap hit under host load) is re-run once. If it fails again, or fails permanently, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`. Setup time, in the execution root and in each diagnostic worktree, is recorded in the batch's timings.
+A project may declare a setup command, for example `bun install --frozen-lockfile`. It runs in the execution root under the pinned environment, before the base measurement and after any step that changes the lockfile. It has its own time cap (§2.11.1). A transient failure (killed by a signal, a network or registry error, or its cap hit under host load) is re-run once. If it fails again, or fails permanently, the batch is `blocked (setup)` with its output; it never becomes `base-unmeasured`. One exception: the re-run after a step's own lockfile change is that step's red (the attempt is judged red on the setup output, and the worker is told that its own lockfile change is why the install fails and to regenerate the lockfile with the project's installer and commit it), because setup passed before that step's diff; a failure before any step's diff still blocks the batch. Setup time, in the execution root and in each diagnostic worktree, is recorded in the batch's timings.
 
 ### 2.5.4 Base measurement and new failures
 

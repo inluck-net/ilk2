@@ -452,6 +452,25 @@ def test_interrupted_setup_is_rerun_in_a_reused_diag_worktree(ilk):
     assert (p / "setup-ran").read_text() == "xx"  # and not a third time once it completed
 
 
+def test_a_step_that_makes_setup_fail_is_red_not_a_setup_block(ilk):
+    # b-21a1d775ec87, Oct 23: a step left the lockfile un-installable and the batch went to a
+    # person holding bun's own remedy. Setup passed before this step's diff, so the re-run
+    # after its lockfile change is the step's red (the worker can regenerate the lockfile).
+    ilk.make_repo()
+    ilk.project(setup={"command": ["python", "-c",
+                                   "import pathlib, sys\n"
+                                   "p = pathlib.Path('uv.lock')\n"
+                                   "sys.exit(1 if p.is_file() and 'BROKEN' in p.read_text() else 0)"]})
+    ilk.script([{"write": "uv.lock", "text": "BROKEN\n"}],
+               [{"write": "uv.lock", "text": "clean\n"}, GOOD])
+    bid = ilk.submit(one_step())
+    assert ilk.drive_inprocess(bid) == "shipped"
+    atts = ilk.s.all("SELECT * FROM attempts ORDER BY n")
+    assert atts[0]["outcome"] == "red" and "setup failed" in atts[0]["evidence"]
+    assert "install fails" in atts[0]["evidence"] and "regenerate the lockfile" in atts[0]["evidence"]
+    assert [r["reason"] for r in ilk.s.open_human_rows(bid) if r["reason"] == "setup"] == []
+
+
 def test_deny_patterns_follow_gitignore_style_double_star():
     # gh-resolve's path_denylist ('**/schema.ts', '**/migrations/**', '**/wrangler.toml'):
     # fnmatch missed the top-level file, since '**/' needed at least one directory.

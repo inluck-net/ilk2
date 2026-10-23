@@ -401,7 +401,11 @@ class Driver:
             for gate in self.all_gates():
                 self.measure_base(gate, diag, self.base)
 
-    def setup(self, where: Path) -> None:
+    def setup(self, where: Path, block: bool = True) -> str | None:
+        """Run the project's setup hook in `where`. None on success. A permanent failure
+        blocks the batch (`block=True`: every call before a step's diff is in the tree), or
+        is returned as its detail text (`block=False`: the re-run in `run_gates` after a step
+        changed a lockfile — the step's red, §2.5.3, because setup passed before the step)."""
         cmd, cap = self.cfg.setup["command"], self.cfg.setup.get("cap_s", self.b.setup_cap)
         g = Gate(name="setup", adapter="shell", command=cmd, cap_s=int(cap), declares_tests=False)
         t0 = time.monotonic()
@@ -416,13 +420,17 @@ class Driver:
             rc, out, capped, _ = gates._run(cmd, where, self.env(), g.cap_s)
             if rc == 0:
                 ran(True, i + 1)
-                return
+                return None
             transient = capped or (rc is not None and rc < 0) or "ETIMEDOUT" in out \
                 or "network" in out.lower() or "ECONNRESET" in out
             if not transient or i == 1:
                 ran(False, i + 1)
-                self.block_batch("setup", f"setup failed (exit {rc}): {out[-1500:]}",
+                detail = f"setup failed (exit {rc}): {out[-1500:]}"
+                if not block:
+                    return detail
+                self.block_batch("setup", detail,
                                  "fix the setup, then: ilk2 resume " + self.batch_id)
+        return None
 
     def all_gates(self) -> list[Gate]:
         seen, out = set(), []
@@ -1279,7 +1287,14 @@ class Driver:
                   ) -> tuple[str | None, dict]:
         changed = set(gitops.changed_paths(self.root))
         if self.cfg.setup and any(Path(p).name in LOCKFILES for p in changed):
-            self.setup(self.root)
+            # §2.5.3: the only setup after a step's diff, and setup passed before it
+            # (activation). A failure is therefore this step's red, not the consumer's setup
+            # block (I11); the gates are not run, because without the install their results
+            # mean nothing.
+            failed = self.setup(self.root, block=False)
+            if failed:
+                return (failed + "\n\nYour own change to a lockfile is why the install fails: "
+                        "regenerate the lockfile with the project's installer and commit it."), {}
         reds, verdicts, runs = [], {}, []
         for gate in gate_list:
             env = self.env()
