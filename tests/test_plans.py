@@ -1,5 +1,9 @@
 import subprocess
+import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from ilk2 import plans
 
@@ -333,6 +337,51 @@ def test_a_v1_script_gate_that_is_not_a_test_runner_is_an_exit_code_check(ilk):
     g = spec.plans[0].steps[0].gates[1]
     assert (g.adapter, g.command, g.declares_tests) == ("shell", ["bun", "run", "typecheck"], False)
     assert plans.check(spec) == []
+
+
+@pytest.mark.parametrize("checker", ["tsc", "tsrs"])
+@pytest.mark.parametrize("source", ["v1", "json"])
+def test_typecheck_package_scripts_are_exit_code_gates(ilk, tmp_path, checker, source):
+    from ilk2 import batches, gates, gitops
+    from ilk2.gates.env import pinned_env
+
+    repo = ilk.make_repo({"package.json": json.dumps({"scripts": {
+        "typecheck": f"{checker} --noEmit"}})})
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    bun = fake_bin / "bun"
+    bun.write_text(f"#!{sys.executable}\n"
+                   "import json, shlex, subprocess\n"
+                   "with open('package.json') as f:\n"
+                   "    entry = json.load(f)['scripts']['typecheck']\n"
+                   "raise SystemExit(subprocess.call(shlex.split(entry)))\n")
+    bun.chmod(0o755)
+    fake_checker = fake_bin / checker
+    fake_checker.write_text('#!/bin/sh\necho "error TS2345: simulated"\nexit "${CHECKER_EXIT}"\n')
+    fake_checker.chmod(0o755)
+
+    if source == "v1":
+        text = ("---\nplan: typecheck\n---\n\n## Steps\n\n### Step 0 — check\n"
+                "```yaml\nlocal_checks:\n  - command: bun run typecheck\n```\n")
+        spec = plans.BatchSpec(plans=[plans.parse_v1_subplan(text)])
+    else:
+        spec = plans.from_dict({"plans": [{"slug": "typecheck", "steps": [{
+            "instructions": "check", "gates": [{"name": "typecheck",
+            "command": "bun run typecheck", "declares_tests": False}]}]}]})
+    batches.resolve_scripts(spec, repo, gitops.rev(repo, "HEAD"))
+    gate = spec.plans[0].steps[0].gates[0]
+    assert (gate.adapter, gate.command, gate.declares_tests, gate.script_entry) == (
+        "shell", ["bun", "run", "typecheck"], False, f"{checker} --noEmit")
+    assert plans.check(spec, root=repo, path_dirs=[str(fake_bin)]) == []
+
+    for exit_code, expected in [(0, "pass"), (2, "fail")]:
+        env = pinned_env(home=tmp_path / "home", tmp=tmp_path / "tmp",
+                         path_prelude=[str(fake_bin), str(Path(sys.executable).parent)],
+                         set_vars={"CHECKER_EXIT": str(exit_code)})
+        result = gates.measure(gate, repo, env, tmp_path / "work")
+        assert (result.exitstatus, result.outcome) == (exit_code, expected)
+        assert gates.judge(result, base={}).outcome == expected
+        assert list(result.failures) == ([] if exit_code == 0 else [f"{gate.name}::<exit>"])
 
 
 def test_submit_check_validates_and_creates_nothing(ilk, capsys, tmp_path):
